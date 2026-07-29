@@ -1,0 +1,26 @@
+{
+  "manifest_version": "0.3",
+  "name": "simview",
+  "display_name": "SimView",
+  "version": "0.1.0",
+  "description": "Control and review a local iOS Simulator.",
+  "long_description": "A local-only iOS Simulator preview with physical input and review annotations.",
+  "author": {
+    "name": "SimView contributors"
+  },
+  "homepage": "https://github.com/simview-dev/simview",
+  "documentation": "https://github.com/simview-dev/simview#readme",
+  "support": "https://github.com/simview-dev/simview/issues",
+  "icon": "assets/icon.png",
+  "server": {
+    "type": "binary",
+    "entry_point": "bin/simview-mcp",
+    "mcp_config": {
+      "command": "${__dirname}/bin/simview-mcp",
+      "args": []
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin"]
+  }
+}

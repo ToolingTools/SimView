@@ -1,0 +1,36 @@
+{
+  "name": "simview",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "packageManager": "bun@1.3.14",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "bun run build:app && bun run build:packages && bun run build:native",
+    "build:app": "bun build packages/app/src/index.tsx --target=browser --minify --outfile=packages/app/dist/preview.js && cp packages/app/src/preview.html packages/app/dist/preview.html",
+    "build:packages": "bun run --filter '@simview/*' build",
+    "build:native": "swift build --package-path native/SimViewCore -c release && cp native/SimViewCore/.build/release/simview-core packages/core/bin/simview-core",
+    "build:probe": "bun scripts/build-probe.ts",
+    "check": "bun run typecheck && bun test && swift test --package-path native/SimViewCore",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "doctor": "bun packages/cli/src/index.ts doctor --json",
+    "dev:app": "bun --hot packages/app/dev.ts",
+    "dev:mcp": "bun packages/mcp/src/index.ts",
+    "package:plugin": "bun scripts/package-plugin.ts",
+    "package:mcpb": "bun scripts/package-mcpb.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "preact": "10.29.7",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@anthropic-ai/mcpb": "2.1.2",
+    "@types/bun": "1.3.14",
+    "typescript": "7.0.2"
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "@simview/app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@modelcontextprotocol/ext-apps": "1.7.5",
+    "preact": "10.29.7"
+  },
+  "scripts": {
+    "build": "bun build src/index.tsx --target=browser --minify --outfile=dist/preview.js && cp src/preview.html dist/preview.html",
+    "test": "bun test"
+  }
+}
+

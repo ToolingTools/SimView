@@ -1,0 +1,13 @@
+{
+  "name": "@simview/core",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "exports": "./src/index.ts",
+  "files": ["src", "bin"],
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outdir=dist",
+    "test": "bun test"
+  }
+}
+

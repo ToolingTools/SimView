@@ -1,0 +1,12 @@
+.DS_Store
+node_modules/
+dist/
+.build/
+native/SimViewProbe/build/
+*.xcodeproj/
+*.xcworkspace/
+*.dSYM/
+artifacts/
+packages/core/bin/
+.simview/
+coverage/

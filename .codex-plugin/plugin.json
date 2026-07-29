@@ -1,0 +1,40 @@
+{
+  "name": "simview",
+  "version": "0.1.0+codex.20260729190157",
+  "description": "Control and review a local iOS Simulator in a live MCP App preview.",
+  "author": {
+    "name": "SimView contributors"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "ios",
+    "simulator",
+    "preview",
+    "review",
+    "mcp"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "SimView",
+    "shortDescription": "See, control, and review an iOS Simulator.",
+    "longDescription": "Open a live local iOS Simulator preview, forward physical input, add coordinate comments, and send a screenshot with feedback to chat.",
+    "developerName": "SimView contributors",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive"
+    ],
+    "defaultPrompt": [
+      "Use $simview to review the booted simulator.",
+      "Open SimView and annotate visual mismatches.",
+      "Capture the simulator and send coordinate comments."
+    ],
+    "brandColor": "#171717",
+    "composerIcon": "./assets/icon.png",
+    "logo": "./assets/logo.png",
+    "logoDark": "./assets/logo-dark.png",
+    "screenshots": [
+      "./assets/screenshot-preview.png"
+    ]
+  }
+}

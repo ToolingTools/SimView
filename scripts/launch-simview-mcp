@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export SIMVIEW_PLUGIN_ROOT=$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)
+export SIMVIEW_CORE_BINARY="$SCRIPT_DIR/simview-core"
+export SIMVIEW_PROBE_DYLIB="$SCRIPT_DIR/libSimViewProbe.dylib"
+if [ -f "$SIMVIEW_PLUGIN_ROOT/.codex-plugin/plugin.json" ]; then
+  SIMVIEW_RESOURCE_VERSION=$(
+    /usr/bin/plutil -extract version raw "$SIMVIEW_PLUGIN_ROOT/.codex-plugin/plugin.json" 2>/dev/null ||
+      echo "0.1.0"
+  )
+  export SIMVIEW_RESOURCE_VERSION
+fi
+case "$(uname -m)" in
+  arm64) exec "$SCRIPT_DIR/simview-mcp-arm64" "$@" ;;
+  x86_64) exec "$SCRIPT_DIR/simview-mcp-x64" "$@" ;;
+  *) echo "SimView does not support architecture $(uname -m)" >&2; exit 1 ;;
+esac

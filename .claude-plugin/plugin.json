@@ -1,0 +1,13 @@
+{
+  "name": "simview",
+  "version": "0.1.0",
+  "description": "Control and review a local iOS Simulator.",
+  "author": {
+    "name": "SimView contributors"
+  },
+  "homepage": "https://github.com/simview-dev/simview",
+  "repository": "https://github.com/simview-dev/simview",
+  "license": "Apache-2.0",
+  "keywords": ["ios", "simulator", "mcp"]
+}
+

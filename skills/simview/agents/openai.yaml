@@ -1,0 +1,10 @@
+interface:
+  display_name: SimView
+  short_description: Review a live iOS Simulator
+  default_prompt: Use $simview to open the booted iOS Simulator and review the current screen.
+dependencies:
+  tools:
+    - type: mcp
+      value: simview
+      description: SimView local simulator preview and controls
+

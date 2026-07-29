@@ -1,0 +1,21 @@
+{
+  "name": "@simview/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "Apache-2.0",
+  "bin": {
+    "simview": "./src/index.ts"
+  },
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@simview/client": "workspace:*",
+    "@simview/core": "workspace:*",
+    "@simview/mcp": "workspace:*"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --target=bun --outdir=dist",
+    "compile": "bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile=dist/simview-arm64 && bun build --compile --target=bun-darwin-x64 src/index.ts --outfile=dist/simview-x64",
+    "test": "bun test"
+  }
+}
+
