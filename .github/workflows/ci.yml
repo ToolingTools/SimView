@@ -14,11 +14,8 @@ jobs:
         with:
           bun-version: 1.3.14
       - run: bun install --frozen-lockfile
-      - run: bun run typecheck
-      - run: bun test
-      - run: bun run build:app
-      - run: bun run build:packages
-      - run: swift test --package-path native/SimViewCore
+      - run: bun run release:build
+      - run: bun run smoke:npm
       - name: Real simulator smoke test
         if: ${{ vars.SIMVIEW_SIMULATOR_RUNNER == 'true' }}
         run: ./scripts/real-simulator-smoke.sh

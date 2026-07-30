@@ -20,7 +20,11 @@
     "dev:app": "bun --hot packages/app/dev.ts",
     "dev:mcp": "bun packages/mcp/src/index.ts",
     "package:plugin": "bun scripts/package-plugin.ts",
-    "package:mcpb": "bun scripts/package-mcpb.ts"
+    "package:mcpb": "bun scripts/package-mcpb.ts",
+    "package:npm": "bun scripts/package-npm.ts",
+    "smoke:npm": "bun scripts/smoke-npm-package.ts",
+    "release:build": "bun scripts/build-release.ts",
+    "release:sign": "bun scripts/sign-release.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "1.7.5",

@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "simview": {
-      "command": "./bin/simview-mcp",
-      "args": [],
+      "command": "./bin/simview",
+      "args": ["mcp"],
       "cwd": "."
     }
   }

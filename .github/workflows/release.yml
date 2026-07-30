@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - run: bun install --frozen-lockfile
+
+      - name: Check tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          test "v${PACKAGE_VERSION}" = "${GITHUB_REF_NAME}"
+
+      - name: Import Developer ID certificate
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="${RUNNER_TEMP}/simview-signing.keychain-db"
+          KEYCHAIN_PASSWORD="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          CERTIFICATE_PATH="${RUNNER_TEMP}/simview-developer-id.p12"
+          printf '%s' "${APPLE_CERTIFICATE_BASE64}" | base64 --decode > "${CERTIFICATE_PATH}"
+          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+          security import "${CERTIFICATE_PATH}" \
+            -P "${APPLE_CERTIFICATE_PASSWORD}" \
+            -A \
+            -t cert \
+            -f pkcs12 \
+            -k "${KEYCHAIN_PATH}"
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "${KEYCHAIN_PASSWORD}" \
+            "${KEYCHAIN_PATH}"
+          security list-keychains -d user -s "${KEYCHAIN_PATH}"
+
+      - name: Build and sign release
+        env:
+          SIMVIEW_REQUIRE_SIGNING: "1"
+          SIMVIEW_SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        run: bun run release:build
+
+      - name: Verify universal Developer ID binaries
+        env:
+          SIMVIEW_SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
+        run: |
+          for BINARY in \
+            packages/cli/dist/simview \
+            packages/core/bin/simview-core \
+            packages/core/bin/libSimViewProbe.dylib
+          do
+            lipo -verify_arch arm64 x86_64 "${BINARY}"
+            codesign --verify --strict --verbose=2 "${BINARY}"
+            codesign -dv --verbose=4 "${BINARY}" 2>&1 \
+              | grep -F "Authority=${SIMVIEW_SIGNING_IDENTITY}"
+          done
+
+      - name: Submit signed binaries for notarization
+        env:
+          APPLE_NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          NOTARY_KEY="${RUNNER_TEMP}/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          printf '%s' "${APPLE_NOTARY_KEY_BASE64}" | base64 --decode > "${NOTARY_KEY}"
+          chmod 600 "${NOTARY_KEY}"
+          xcrun notarytool submit artifacts/simview-plugin.zip \
+            --key "${NOTARY_KEY}" \
+            --key-id "${APPLE_NOTARY_KEY_ID}" \
+            --issuer "${APPLE_NOTARY_ISSUER_ID}" \
+            --wait
+
+      - name: Smoke test npm package with npx and bunx
+        run: bun run smoke:npm
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: simview-${{ github.ref_name }}
+          path: artifacts/release/
+          if-no-files-found: error
+
+      - name: Publish npm package
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          npm publish "artifacts/release/simview-${PACKAGE_VERSION}.tgz" --access public
+
+      - name: Create GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/release/* \
+            --verify-tag \
+            --generate-notes \
+            --title "SimView ${GITHUB_REF_NAME}"

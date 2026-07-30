@@ -1,11 +1,9 @@
 {
   "name": "@simview/mcp",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "license": "Apache-2.0",
-  "bin": {
-    "simview-mcp": "./src/index.ts"
-  },
   "exports": "./src/index.ts",
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "1.7.5",
@@ -15,8 +13,6 @@
   },
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outdir=dist",
-    "compile": "bun build --compile --target=bun-darwin-arm64 src/index.ts --outfile=dist/simview-mcp-arm64 && bun build --compile --target=bun-darwin-x64 src/index.ts --outfile=dist/simview-mcp-x64",
     "test": "bun test"
   }
 }
-

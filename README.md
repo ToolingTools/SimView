@@ -23,6 +23,19 @@ Release archives contain compiled Bun clients and a universal Swift executable.
 End users do not need Bun, Node, Homebrew, AXe, IDB, a simulator helper app, or
 Screen Recording permission.
 
+## Install
+
+The generated npm package can be run without installing SimView globally:
+
+```sh
+npx simview doctor --json
+bunx simview preview
+```
+
+`npx` requires Node and `bunx` requires Bun only as the package runner. The
+SimView command they launch is a standalone universal executable. GitHub
+release archives and agent plugins do not require either runtime.
+
 ## Build from source
 
 ```sh
@@ -116,10 +129,11 @@ compatibility and the release matrix live in
 
 ## Release safety
 
-`scripts/build-release.ts` creates architecture binaries, a universal native
-binary, checksums, and a CycloneDX-style SBOM. Signing and notarization require
-the release operator's Apple credentials and are deliberately not faked by the
-build.
+`scripts/build-release.ts` creates a universal standalone command, the
+universal native core and probe, plugin/MCPB/npm packages, checksums, and a
+CycloneDX-style SBOM. Generated executables remain ignored by Git. When
+`SIMVIEW_SIGNING_IDENTITY` is present, it signs every distributed Mach-O before
+packaging; release CI requires that identity and notarizes the signed plugin.
 
 Before publishing:
 
@@ -130,6 +144,9 @@ Before publishing:
 3. Validate the Codex plugin and MCPB archive on a clean macOS account.
 4. Measure the 60-second animated fixture and publish fps plus p50/p95 latency
    with hardware details.
+
+See [docs/distribution.md](docs/distribution.md) for signing secrets, npm trusted
+publishing, and the catalog-only Codex/Claude marketplace layout.
 
 ## License and attribution
 

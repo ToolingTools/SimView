@@ -28,7 +28,7 @@ describe("browser relay assets", () => {
   test("resolves the packaged app beside a compiled executable", async () => {
     fixtureRoot = await mkdtemp(join(tmpdir(), "simview-plugin-"));
     await mkdir(join(fixtureRoot, "app"), { recursive: true });
-    expect(resolveAppRoot(undefined, join(fixtureRoot, "bin", "simview-arm64")))
+    expect(resolveAppRoot(undefined, join(fixtureRoot, "bin", "simview")))
       .toBe(join(fixtureRoot, "app"));
   });
 });

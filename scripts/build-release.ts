@@ -1,12 +1,17 @@
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 
 const root = resolve(import.meta.dir, "..");
 const artifacts = join(root, "artifacts", "release");
-const version = JSON.parse(await Bun.file(join(root, "package.json")).text()).version as string;
+const archiveRoot = join(root, "artifacts", "archive");
+const rootManifest = await Bun.file(join(root, "package.json")).json() as {
+  version: string;
+};
+const { version } = rootManifest;
 
 await rm(artifacts, { recursive: true, force: true });
+await rm(archiveRoot, { recursive: true, force: true });
 await mkdir(artifacts, { recursive: true });
 
 await $`bun run check`;
@@ -14,24 +19,50 @@ await $`bun run build:app`;
 await $`bun run build:packages`;
 await $`bun run build:probe`;
 await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64 --arch x86_64`;
-await $`bun run --cwd ${join(root, "packages/mcp")} compile`;
 await $`bun run --cwd ${join(root, "packages/cli")} compile`;
 
 const nativeBinary = join(root, "native/SimViewCore/.build/apple/Products/Release/simview-core");
 const probeBinary = join(root, "native/SimViewProbe/build/libSimViewProbe.dylib");
+const cliBinary = join(root, "packages/cli/dist/simview");
+const packagedCore = join(root, "packages/core/bin/simview-core");
+const packagedProbe = join(root, "packages/core/bin/libSimViewProbe.dylib");
 await mkdir(join(root, "packages/core/bin"), { recursive: true });
-await $`cp ${nativeBinary} ${join(root, "packages/core/bin/simview-core")}`;
-await $`cp ${probeBinary} ${join(root, "packages/core/bin/libSimViewProbe.dylib")}`;
-await $`cp ${nativeBinary} ${join(artifacts, "simview-core")}`;
-await $`cp ${probeBinary} ${join(artifacts, "libSimViewProbe.dylib")}`;
-await $`cp ${join(root, "packages/mcp/dist/simview-mcp-arm64")} ${join(artifacts, "simview-mcp-arm64")}`;
-await $`cp ${join(root, "packages/mcp/dist/simview-mcp-x64")} ${join(artifacts, "simview-mcp-x64")}`;
-await $`cp ${join(root, "packages/cli/dist/simview-arm64")} ${join(artifacts, "simview-arm64")}`;
-await $`cp ${join(root, "packages/cli/dist/simview-x64")} ${join(artifacts, "simview-x64")}`;
+await cp(nativeBinary, packagedCore);
+await cp(probeBinary, packagedProbe);
+
+if (process.env.SIMVIEW_SIGNING_IDENTITY) {
+  await $`bun run release:sign`;
+} else if (process.env.SIMVIEW_REQUIRE_SIGNING === "1") {
+  throw new Error(
+    "SIMVIEW_REQUIRE_SIGNING=1 but SIMVIEW_SIGNING_IDENTITY was not provided",
+  );
+} else {
+  console.warn("Building unsigned release artifacts; set SIMVIEW_SIGNING_IDENTITY to sign them.");
+}
+
 await $`bun run package:plugin`;
 await $`bun run package:mcpb`;
-await $`cp ${join(root, "artifacts/simview-plugin.zip")} ${artifacts}`;
-await $`cp ${join(root, "artifacts/simview.mcpb")} ${artifacts}`;
+await $`bun run package:npm`;
+
+await Promise.all([
+  cp(cliBinary, join(artifacts, "simview")),
+  cp(packagedCore, join(artifacts, "simview-core")),
+  cp(packagedProbe, join(artifacts, "libSimViewProbe.dylib")),
+  cp(join(root, "artifacts/simview-plugin.zip"), join(artifacts, "simview-plugin.zip")),
+  cp(join(root, "artifacts/simview.mcpb"), join(artifacts, "simview.mcpb")),
+]);
+
+const archiveStage = join(archiveRoot, `simview-${version}`);
+await mkdir(join(archiveStage, "bin"), { recursive: true });
+await Promise.all([
+  cp(cliBinary, join(archiveStage, "bin/simview")),
+  cp(packagedCore, join(archiveStage, "bin/simview-core")),
+  cp(packagedProbe, join(archiveStage, "bin/libSimViewProbe.dylib")),
+  cp(join(root, "README.md"), join(archiveStage, "README.md")),
+  cp(join(root, "LICENSE"), join(archiveStage, "LICENSE")),
+  cp(join(root, "THIRD_PARTY_NOTICES.md"), join(archiveStage, "THIRD_PARTY_NOTICES.md")),
+]);
+await $`ditto -c -k --norsrc --keepParent ${archiveStage} ${join(artifacts, `simview-${version}-macos.zip`)}`;
 
 const files = [...new Bun.Glob("*").scanSync({ cwd: artifacts })].sort();
 const components = await Promise.all(files.map(async name => ({
@@ -40,7 +71,9 @@ const components = await Promise.all(files.map(async name => ({
   version,
   hashes: [{
     alg: "SHA-256",
-    content: new Bun.CryptoHasher("sha256").update(await Bun.file(join(artifacts, name)).arrayBuffer()).digest("hex"),
+    content: new Bun.CryptoHasher("sha256")
+      .update(await Bun.file(join(artifacts, name)).arrayBuffer())
+      .digest("hex"),
   }],
 })));
 await writeFile(join(artifacts, "sbom.cdx.json"), `${JSON.stringify({

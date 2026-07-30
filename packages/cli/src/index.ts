@@ -8,7 +8,7 @@ import {
   type AccessibilityNode,
   type AccessibilitySnapshot,
 } from "@simview/client";
-import { SimViewSession } from "@simview/mcp";
+import { runServer, SimViewSession } from "@simview/mcp";
 
 type Options = Record<string, string | boolean>;
 
@@ -233,6 +233,9 @@ export async function run(argv = process.argv): Promise<void> {
     });
     process.exit(await child.exited);
   }
+  case "mcp":
+    await runServer();
+    break;
   default:
     console.log(`SimView 0.1.0
 
@@ -252,6 +255,7 @@ Usage:
   simview swipe --from <x,y> --to <x,y> --duration <ms>
   simview type <text>
   simview button <home|lock|volume-up|volume-down|action>
+  simview mcp
   simview serve --socket <path> --token-fd <fd>`);
   }
 }

@@ -1,10 +1,13 @@
 {
   "name": "simview",
-  "version": "0.1.0+codex.20260730094808",
+  "version": "0.1.0",
   "description": "Control and review a local iOS Simulator in a live MCP App preview.",
   "author": {
-    "name": "SimView contributors"
+    "name": "SimView contributors",
+    "url": "https://github.com/steve228uk/SimView"
   },
+  "homepage": "https://github.com/steve228uk/SimView",
+  "repository": "https://github.com/steve228uk/SimView",
   "license": "Apache-2.0",
   "keywords": [
     "ios",
@@ -31,10 +34,6 @@
     ],
     "brandColor": "#171717",
     "composerIcon": "./assets/icon.png",
-    "logo": "./assets/logo.png",
-    "logoDark": "./assets/logo-dark.png",
-    "screenshots": [
-      "./assets/screenshot-preview.png"
-    ]
+    "logo": "./assets/icon.png"
   }
 }

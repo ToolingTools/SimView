@@ -10,3 +10,13 @@ artifacts/
 packages/core/bin/
 .simview/
 coverage/
+
+# Local signing credentials
+*.p12
+*.p8
+*.cer
+*.keychain
+*.keychain-db
+.env
+.env.*
+!.env.example
