@@ -84,6 +84,7 @@ final class SimViewServer: @unchecked Sendable {
     private let parentPID: pid_t?
     private let idleTimeout: TimeInterval
     private let queue = DispatchQueue(label: "dev.simview.server", qos: .userInteractive)
+    private let inputQueue = DispatchQueue(label: "dev.simview.server.input", qos: .userInteractive)
     private var listenerFD: Int32 = -1
     private var listener: DispatchSourceRead?
     private var timer: DispatchSourceTimer?
@@ -173,7 +174,18 @@ final class SimViewServer: @unchecked Sendable {
                 }
                 return
             }
-            try handle(request, connection: connection)
+            if request.method.hasPrefix("input.") {
+                inputQueue.async { [weak self] in
+                    guard let self else { return }
+                    do {
+                        try self.handle(request, connection: connection)
+                    } catch {
+                        self.sendError(error, requestID: request.id, to: connection)
+                    }
+                }
+            } else {
+                try handle(request, connection: connection)
+            }
         } catch {
             let id = (try? Request(data: frame.payload).id) ?? "unknown"
             sendError(error, requestID: id, to: connection)

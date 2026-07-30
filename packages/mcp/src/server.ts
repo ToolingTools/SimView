@@ -20,6 +20,21 @@ import { SimViewSession } from "./session";
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? "0.1.0";
 const RESOURCE_URI = `ui://simview/${VERSION}/preview.html`;
 const session = new SimViewSession();
+const OPEN_PREVIEW_META = {
+  ui: { resourceUri: RESOURCE_URI, visibility: ["model"] as const },
+  "openai/outputTemplate": RESOURCE_URI,
+  "openai/widgetAccessible": true,
+};
+const APP_CALLABLE_META = {
+  ui: { resourceUri: RESOURCE_URI, visibility: ["model", "app"] as const },
+  "ui/resourceUri": RESOURCE_URI,
+  "openai/widgetAccessible": true,
+};
+const APP_ONLY_META = {
+  ui: { resourceUri: RESOURCE_URI, visibility: ["app"] as const },
+  "ui/resourceUri": RESOURCE_URI,
+  "openai/widgetAccessible": true,
+};
 
 const geometry = z.object({
   kind: z.literal("point"),
@@ -29,18 +44,12 @@ const geometry = z.object({
 
 export function createServer(): McpServer {
   const server = new McpServer({ name: "simview", version: VERSION });
-  const appMeta = {
-    ui: { resourceUri: RESOURCE_URI, visibility: ["model", "app"] as const },
-    "ui/resourceUri": RESOURCE_URI,
-    "openai/outputTemplate": RESOURCE_URI,
-    "openai/widgetAccessible": true,
-  };
 
   registerAppTool(server, "open_simview", {
     title: "Open SimView",
     description: "Start or select a simulator session and open its interactive preview.",
     inputSchema: { udid: z.string().uuid().optional() },
-    _meta: appMeta,
+    _meta: OPEN_PREVIEW_META,
   }, async ({ udid }) => {
     const state = await session.open(udid);
     return toolResult(
@@ -49,11 +58,21 @@ export function createServer(): McpServer {
     );
   });
 
-  registerAppTool(server, "list_simulators", {
+  server.registerTool("connect_simulator", {
+    title: "Connect simulator",
+    description: "Start or select a simulator session without opening the interactive preview.",
+    inputSchema: { udid: z.string().uuid().optional() },
+    _meta: APP_CALLABLE_META,
+  }, async ({ udid }) => {
+    const state = await session.open(udid);
+    return toolResult(`SimView is connected to ${state.device?.name}.`, state);
+  });
+
+  server.registerTool("list_simulators", {
     title: "List simulators",
     description: "List local iOS Simulators and their current state.",
     inputSchema: {},
-    _meta: appMeta,
+    _meta: APP_CALLABLE_META,
   }, async () => {
     const existing = session.client;
     const temporary = existing
@@ -69,6 +88,7 @@ export function createServer(): McpServer {
   });
 
   registerInputTools(server);
+  registerAppBridgeTools(server);
   registerAccessibilityTools(server);
   registerAnnotationTools(server);
 
@@ -77,6 +97,7 @@ export function createServer(): McpServer {
     description:
       "Observe the selected simulator as a PNG. Use its pixel positions to choose normalized coordinates for tap, swipe, or long_press, then observe again.",
     inputSchema: {},
+    _meta: APP_CALLABLE_META,
   }, async () => {
     const screenshot = await session.screenshot();
     return {
@@ -100,6 +121,7 @@ export function createServer(): McpServer {
     title: "Get SimView state",
     description: "Get the current device, stream, frame, route context, and annotation count.",
     inputSchema: {},
+    _meta: APP_CALLABLE_META,
   }, async () => toolResult("Current SimView state.", session.state()));
 
   server.registerTool("set_orientation", {
@@ -121,7 +143,6 @@ export function createServer(): McpServer {
   registerAppResource(server, "SimView preview", RESOURCE_URI, {
     description: "Interactive local iOS Simulator preview and review surface.",
   }, async () => {
-    const origin = session.state().relayOrigin;
     const html = await appHtml();
     return {
       contents: [{
@@ -132,7 +153,7 @@ export function createServer(): McpServer {
           ui: {
             prefersBorder: false,
             csp: {
-              connectDomains: origin ? [origin, origin.replace("http://", "ws://")] : [],
+              connectDomains: [],
               resourceDomains: [],
             },
           },
@@ -197,6 +218,7 @@ function registerAccessibilityTools(server: McpServer): void {
       scope: z.enum(["interactive", "visible", "full"]).default("interactive"),
       maxNodes: z.number().int().min(1).max(1_200).default(1_200),
     },
+    _meta: APP_CALLABLE_META,
   }, async ({ scope, maxNodes }) => {
     const snapshot = await session.accessibilitySnapshot(scope, maxNodes);
     return toolResult(compactAccessibilityTree(snapshot), snapshot);
@@ -216,6 +238,7 @@ function registerAccessibilityTools(server: McpServer): void {
     description:
       "Re-resolve one accessible element, validate it, and physically tap its visible center through simulator HID.",
     inputSchema: selectorSchema,
+    _meta: APP_CALLABLE_META,
   }, async selector => {
     const result = await session.findElements(selector as AccessibilitySelector);
     const index = selector.index ?? 0;
@@ -246,6 +269,7 @@ function registerAccessibilityTools(server: McpServer): void {
       x: z.number().min(0).max(1),
       y: z.number().min(0).max(1),
     },
+    _meta: APP_CALLABLE_META,
   }, async ({ x, y }) => {
     const accessibility = await session.inspectPoint(x, y);
     const status = await session.probeStatus();
@@ -262,6 +286,7 @@ function registerAccessibilityTools(server: McpServer): void {
     description:
       "Get the optional UIKit probe status and active scene, window, and controller hierarchy.",
     inputSchema: {},
+    _meta: APP_CALLABLE_META,
   }, async () => {
     const status = await session.probeStatus();
     const target = status.connected ? undefined : await session.probeTarget();
@@ -281,6 +306,7 @@ function registerAccessibilityTools(server: McpServer): void {
         message: "Apple platform applications cannot load the UIKit probe",
       }),
     },
+    _meta: APP_CALLABLE_META,
   }, async ({ bundleId }) => toolResult(
     "The target app relaunched and connected to the UIKit probe.",
     await session.enableProbe(bundleId),
@@ -359,8 +385,54 @@ function registerInputTools(server: McpServer): void {
   }, ({ button }) => input("input.button", { button }));
 }
 
+function registerAppBridgeTools(server: McpServer): void {
+  server.registerTool("get_preview_packets", {
+    title: "Read preview packets",
+    description: "Read a bounded batch of H.264 preview packets for the embedded SimView app.",
+    inputSchema: {
+      afterSequence: z.number().int().min(0).optional(),
+      maxPackets: z.number().int().min(1).max(30).default(12),
+      timeoutMs: z.number().int().min(50).max(5_000).default(1_500),
+    },
+    _meta: APP_ONLY_META,
+  }, async ({ afterSequence, maxPackets, timeoutMs }) => {
+    const batch = await session.previewPackets(afterSequence, maxPackets, timeoutMs);
+    return {
+      content: [],
+      structuredContent: {
+        reset: batch.reset,
+        configuration: batch.configuration
+          ? Buffer.from(batch.configuration).toString("base64")
+          : undefined,
+        packets: batch.packets.map(packet => ({
+          sequence: packet.sequence,
+          kind: packet.kind,
+          data: Buffer.from(packet.payload).toString("base64"),
+        })),
+        nextSequence: batch.nextSequence,
+      },
+    };
+  });
+
+  server.registerTool("simulator_input", {
+    title: "Send simulator input",
+    description: "Forward an input event from the embedded SimView app to the selected Simulator.",
+    inputSchema: {
+      method: z.enum(["input.touch", "input.tap", "input.button", "input.typeText"]),
+      params: z.record(z.string(), z.unknown()),
+    },
+    _meta: APP_ONLY_META,
+  }, async ({ method, params }) => {
+    const result = await session.requireClient().request(method, params);
+    return {
+      content: [],
+      structuredContent: result as Record<string, unknown>,
+    };
+  });
+}
+
 function registerAnnotationTools(server: McpServer): void {
-  registerAppTool(server, "add_annotation", {
+  server.registerTool("add_annotation", {
     title: "Add annotation",
     description: "Add a comment at a normalized point on the current simulator frame.",
     inputSchema: {
@@ -375,16 +447,13 @@ function registerAnnotationTools(server: McpServer): void {
       }).optional(),
       context: z.any().optional(),
     },
-    _meta: {
-      ui: { resourceUri: RESOURCE_URI, visibility: ["model", "app"] },
-      "ui/resourceUri": RESOURCE_URI,
-    },
+    _meta: APP_CALLABLE_META,
   }, async input => {
     const annotation = session.addAnnotation(input);
     return toolResult("Added point annotation.", annotation);
   });
 
-  registerAppTool(server, "update_annotation", {
+  server.registerTool("update_annotation", {
     title: "Update annotation",
     description: "Edit an existing annotation in the current review.",
     inputSchema: {
@@ -392,20 +461,14 @@ function registerAnnotationTools(server: McpServer): void {
       note: z.string().min(1).max(2_000).optional(),
       geometry: geometry.optional(),
     },
-    _meta: {
-      ui: { resourceUri: RESOURCE_URI, visibility: ["app"] },
-      "ui/resourceUri": RESOURCE_URI,
-    },
+    _meta: APP_ONLY_META,
   }, async ({ id, ...patch }) => toolResult("Annotation updated.", session.updateAnnotation(id, patch)));
 
-  registerAppTool(server, "delete_annotation", {
+  server.registerTool("delete_annotation", {
     title: "Delete annotation",
     description: "Delete an annotation from the current review.",
     inputSchema: { id: z.string().uuid() },
-    _meta: {
-      ui: { resourceUri: RESOURCE_URI, visibility: ["app"] },
-      "ui/resourceUri": RESOURCE_URI,
-    },
+    _meta: APP_ONLY_META,
   }, async ({ id }) => toolResult("Annotation deleted.", { deleted: session.deleteAnnotation(id), id }));
 }
 

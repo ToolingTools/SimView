@@ -8,8 +8,10 @@ description: Open, control, annotate, and send visual feedback from a local iOS 
 Use SimView when a task needs visual inspection or physical input in an iOS
 Simulator.
 
-1. Call `open_simview` and select a booted simulator. Prefer an explicitly
-   supplied UDID; otherwise use the only booted device.
+1. Call `list_simulators` and select a booted simulator. Prefer an explicitly
+   supplied UDID; otherwise use the only booted device. Call `open_simview` only
+   when the user asks to view the interactive preview. Otherwise call
+   `connect_simulator` to control the simulator without opening a preview.
 2. Call `observe_screen` to receive one PNG and a compact accessibility tree.
    Prefer identifier, role, and accessible name selectors over coordinates.
 3. Use `tap_element` for semantic targets. It re-resolves the target and sends a

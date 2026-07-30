@@ -129,6 +129,22 @@ type Editor = {
   annotationId?: string;
   context?: AnnotationContext;
 };
+type PreviewPacketBatch = {
+  reset: boolean;
+  configuration?: string;
+  packets: Array<{
+    sequence: number;
+    kind: number;
+    data: string;
+  }>;
+  nextSequence: number;
+};
+type PointerInput = {
+  contactId: number;
+  phase: "down" | "move" | "up";
+  x: number;
+  y: number;
+};
 
 const bridge = new App(
   { name: "SimView", version: "0.1.0" },
@@ -169,14 +185,24 @@ function SimView() {
   const [embedded, setEmbedded] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   const [discardingAnnotations, setDiscardingAnnotations] = useState(false);
+  const [typeTextOpen, setTypeTextOpen] = useState(false);
+  const [typeText, setTypeText] = useState("");
+  const [typingText, setTypingText] = useState(false);
+  const [savingComment, setSavingComment] = useState(false);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const screenRef = useRef<HTMLDivElement>(null);
   const editorInputRef = useRef<HTMLTextAreaElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const deviceMenuRef = useRef<HTMLDivElement>(null);
   const decoderRef = useRef<VideoDecoder>();
+  const pendingVideoFrameRef = useRef<VideoFrame>();
+  const videoPaintRequestRef = useRef<number>();
+  const latestFrameIdRef = useRef<string>();
+  const lastFrameStateUpdateRef = useRef(0);
   const recordingRef = useRef<MediaRecorder>();
   const activePointer = useRef<number>();
+  const pointerInputQueueRef = useRef<PointerInput[]>([]);
+  const pointerInputRunningRef = useRef(false);
   const hoverRequest = useRef(0);
   const hoverRequestedAt = useRef(0);
   const hoverPending = useRef(false);
@@ -205,10 +231,17 @@ function SimView() {
     }
     setEmbedded(true);
     bridge.ontoolresult = result => {
-      if (result.structuredContent) setState(result.structuredContent as unknown as State);
+      if (isSessionState(result.structuredContent)) setState(result.structuredContent);
     };
     bridge.connect()
       .then(async () => {
+        const stateResult = await bridge.callServerTool({
+          name: "get_simview_state",
+          arguments: {},
+        });
+        if (isSessionState(stateResult.structuredContent)) {
+          setState(stateResult.structuredContent);
+        }
         const context = bridge.getHostContext();
         if (context?.availableDisplayModes?.includes("fullscreen")) {
           const result = await bridge.requestDisplayMode({ mode: "fullscreen" });
@@ -276,7 +309,7 @@ function SimView() {
   }, []);
 
   useEffect(() => {
-    if (!state.relayOrigin || !token) return;
+    if (embedded || !state.relayOrigin || !token) return;
     const url = state.relayOrigin.replace(/^http/, "ws")
       + `/stream?token=${encodeURIComponent(token)}&codec=${streamCodec}`;
     const socket = new WebSocket(url);
@@ -287,8 +320,73 @@ function SimView() {
       socket.close();
       decoderRef.current?.close();
       decoderRef.current = undefined;
+      pendingVideoFrameRef.current?.close();
+      pendingVideoFrameRef.current = undefined;
+      if (videoPaintRequestRef.current !== undefined) {
+        window.cancelAnimationFrame(videoPaintRequestRef.current);
+        videoPaintRequestRef.current = undefined;
+      }
     };
-  }, [state.relayOrigin, token, streamCodec]);
+  }, [embedded, state.relayOrigin, token, streamCodec]);
+
+  useEffect(() => {
+    if (!embedded || !state.connected || mode !== "interact") return;
+    let stopped = false;
+    let afterSequence: number | undefined;
+    let reportedError = false;
+    const controller = new AbortController();
+
+    const pump = async () => {
+      while (!stopped) {
+        try {
+          const result = await bridge.callServerTool(
+            {
+              name: "get_preview_packets",
+              arguments: {
+                ...(afterSequence === undefined ? {} : { afterSequence }),
+                maxPackets: 8,
+                timeoutMs: 500,
+              },
+            },
+            { signal: controller.signal },
+          );
+          if (stopped) return;
+          const batch = result.structuredContent as unknown as PreviewPacketBatch;
+          if (batch.reset && batch.configuration) {
+            consumeFrame(streamMessage(0x10, decodeBase64(batch.configuration)));
+          }
+          for (const packet of batch.packets) {
+            consumeFrame(streamMessage(packet.kind, decodeBase64(packet.data)));
+          }
+          afterSequence = batch.reset && batch.packets.length === 0
+            ? undefined
+            : batch.nextSequence;
+          reportedError = false;
+        } catch (error) {
+          if (stopped) return;
+          if (!reportedError) {
+            show(`Preview bridge interrupted: ${error instanceof Error ? error.message : String(error)}`);
+            reportedError = true;
+          }
+          await pause(250);
+        }
+      }
+    };
+
+    void pump();
+    return () => {
+      stopped = true;
+      controller.abort();
+      decoderRef.current?.close();
+      decoderRef.current = undefined;
+      pendingVideoFrameRef.current?.close();
+      pendingVideoFrameRef.current = undefined;
+      if (videoPaintRequestRef.current !== undefined) {
+        window.cancelAnimationFrame(videoPaintRequestRef.current);
+        videoPaintRequestRef.current = undefined;
+      }
+    };
+  }, [embedded, state.connected, state.device?.udid, mode]);
 
   async function loadBrowserState() {
     const hashToken = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
@@ -350,7 +448,7 @@ function SimView() {
     try {
       const nextState = embedded
         ? await bridge.callServerTool({
-            name: "open_simview",
+            name: "connect_simulator",
             arguments: { udid: device.udid },
           }).then(result => result.structuredContent as unknown as State)
         : await fetch(`/device?token=${encodeURIComponent(token)}`, {
@@ -362,6 +460,7 @@ function SimView() {
             return response.json() as Promise<State>;
           });
       frozenRef.current = false;
+      latestFrameIdRef.current = nextState.frameId;
       setFrozenFrameId(undefined);
       setMode("interact");
       setEditor(undefined);
@@ -396,15 +495,12 @@ function SimView() {
       decoderRef.current?.close();
       decoderRef.current = new VideoDecoder({
         output(frame) {
-          const canvas = canvasRef.current;
-          const context = canvas?.getContext("2d");
-          if (!frozenRef.current && canvas && context) {
-            canvas.width = frame.displayWidth;
-            canvas.height = frame.displayHeight;
-            context.drawImage(frame, 0, 0, canvas.width, canvas.height);
-            setState(current => ({ ...current, frameId: String(frame.timestamp) }));
+          const pending = pendingVideoFrameRef.current;
+          pendingVideoFrameRef.current = frame;
+          pending?.close();
+          if (videoPaintRequestRef.current === undefined) {
+            videoPaintRequestRef.current = window.requestAnimationFrame(paintLatestVideoFrame);
           }
-          frame.close();
         },
         error: error => fallbackToMjpeg(`H.264 decoder failed: ${error.message}`),
       });
@@ -429,27 +525,72 @@ function SimView() {
       const blob = new Blob([payload.slice().buffer as ArrayBuffer], { type: "image/jpeg" });
       createImageBitmap(blob).then(image => {
         const canvas = canvasRef.current;
-        const context = canvas?.getContext("2d");
+        const context = canvas?.getContext("2d", { alpha: false, desynchronized: true });
         if (!frozenRef.current && canvas && context) {
-          canvas.width = image.width;
-          canvas.height = image.height;
+          if (canvas.width !== image.width) canvas.width = image.width;
+          if (canvas.height !== image.height) canvas.height = image.height;
           context.drawImage(image, 0, 0);
           mjpegFrameRef.current += 1;
-          setState(current => ({ ...current, frameId: `mjpeg-${mjpegFrameRef.current}` }));
+          commitFrameId(`mjpeg-${mjpegFrameRef.current}`);
         }
         image.close();
       });
     }
   }
 
+  function paintLatestVideoFrame() {
+    videoPaintRequestRef.current = undefined;
+    const frame = pendingVideoFrameRef.current;
+    pendingVideoFrameRef.current = undefined;
+    if (!frame) return;
+    try {
+      const canvas = canvasRef.current;
+      const context = canvas?.getContext("2d", { alpha: false, desynchronized: true });
+      if (!frozenRef.current && canvas && context) {
+        if (canvas.width !== frame.displayWidth) canvas.width = frame.displayWidth;
+        if (canvas.height !== frame.displayHeight) canvas.height = frame.displayHeight;
+        context.drawImage(frame, 0, 0, canvas.width, canvas.height);
+        commitFrameId(String(frame.timestamp));
+      }
+    } finally {
+      frame.close();
+    }
+    if (pendingVideoFrameRef.current && videoPaintRequestRef.current === undefined) {
+      videoPaintRequestRef.current = window.requestAnimationFrame(paintLatestVideoFrame);
+    }
+  }
+
+  function commitFrameId(frameId: string) {
+    latestFrameIdRef.current = frameId;
+    const now = performance.now();
+    if (now - lastFrameStateUpdateRef.current < 100) return;
+    lastFrameStateUpdateRef.current = now;
+    setState(current => current.frameId === frameId ? current : { ...current, frameId });
+  }
+
   function fallbackToMjpeg(reason: string) {
     if (streamCodec !== "h264") return;
     console.warn(reason);
+    if (embedded) {
+      show("The embedded H.264 preview stopped; reopen SimView to retry");
+      return;
+    }
     show("H.264 unavailable; using MJPEG fallback");
     setStreamCodec("mjpeg");
   }
 
   async function relayInput(method: string, params: unknown) {
+    if (embedded) {
+      await bridge.callServerTool({
+        name: "simulator_input",
+        arguments: {
+          method,
+          params: params as Record<string, unknown>,
+        },
+      });
+      scheduleAccessibilityRefresh();
+      return;
+    }
     if (!state.relayOrigin || !token) return;
     const response = await fetch(`${state.relayOrigin}/input?token=${encodeURIComponent(token)}`, {
       method: "POST",
@@ -458,6 +599,22 @@ function SimView() {
     });
     if (!response.ok) throw new Error(`Simulator input failed (${response.status})`);
     scheduleAccessibilityRefresh();
+  }
+
+  async function submitTypedText(event: SubmitEvent) {
+    event.preventDefault();
+    if (!typeText || typingText) return;
+    setTypingText(true);
+    try {
+      await relayInput("input.typeText", { text: typeText });
+      setTypeTextOpen(false);
+      setTypeText("");
+      show("Text input accepted");
+    } catch (error) {
+      show(`Unable to type text: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setTypingText(false);
+    }
   }
 
   function scheduleAccessibilityRefresh(delay = 600) {
@@ -488,6 +645,36 @@ function SimView() {
     };
   }
 
+  function enqueuePointerInput(input: PointerInput) {
+    const queue = pointerInputQueueRef.current;
+    const last = queue.at(-1);
+    if (input.phase === "move" && last?.phase === "move"
+      && last.contactId === input.contactId) {
+      queue[queue.length - 1] = input;
+    } else {
+      queue.push(input);
+    }
+    if (!pointerInputRunningRef.current) void drainPointerInput();
+  }
+
+  async function drainPointerInput() {
+    if (pointerInputRunningRef.current) return;
+    pointerInputRunningRef.current = true;
+    try {
+      let input = pointerInputQueueRef.current.shift();
+      while (input) {
+        await relayInput("input.touch", input);
+        input = pointerInputQueueRef.current.shift();
+      }
+    } catch (error) {
+      pointerInputQueueRef.current = [];
+      show(`Simulator input failed: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      pointerInputRunningRef.current = false;
+      if (pointerInputQueueRef.current.length) void drainPointerInput();
+    }
+  }
+
   function onPointerDown(event: PointerEvent) {
     const point = coordinate(event);
     if (mode === "annotate") {
@@ -501,7 +688,7 @@ function SimView() {
       setEditor({
         point,
         note: "",
-        frameId: frozenFrameId ?? state.frameId ?? "current",
+        frameId: frozenFrameId ?? latestFrameIdRef.current ?? state.frameId ?? "current",
         context,
       });
       void inspectAnnotationPoint(point);
@@ -509,7 +696,7 @@ function SimView() {
     }
     activePointer.current = event.pointerId;
     screenRef.current?.setPointerCapture(event.pointerId);
-    void relayInput("input.touch", {
+    enqueuePointerInput({
       contactId: event.pointerId,
       phase: "down",
       x: point.x,
@@ -545,7 +732,7 @@ function SimView() {
       return;
     }
     if (activePointer.current !== event.pointerId) return;
-    void relayInput("input.touch", {
+    enqueuePointerInput({
       contactId: event.pointerId,
       phase: "move",
       x: point.x,
@@ -618,7 +805,7 @@ function SimView() {
     if (mode !== "interact" || activePointer.current !== event.pointerId) return;
     activePointer.current = undefined;
     const point = coordinate(event);
-    void relayInput("input.touch", {
+    enqueuePointerInput({
       contactId: event.pointerId,
       phase: "up",
       x: point.x,
@@ -627,57 +814,57 @@ function SimView() {
   }
 
   async function saveComment() {
-    if (!editor?.note.trim()) return;
-    if (editor.annotationId) {
-      const updated = embedded
-        ? await bridge.callServerTool({
-            name: "update_annotation",
-            arguments: { id: editor.annotationId, note: editor.note.trim() },
-          }).then(result => result.structuredContent as unknown as Annotation)
-        : await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "update", id: editor.annotationId, note: editor.note.trim() }),
-          }).then(response => response.json() as Promise<Annotation>);
-      setState(current => ({
-        ...current,
-        annotations: current.annotations.map(item => item.id === updated.id ? updated : item),
-      }));
-      sentAnnotationIds.current.delete(updated.id);
-    } else {
-      const annotation = embedded
-        ? await bridge.callServerTool({
-            name: "add_annotation",
-            arguments: {
-              frameId: editor.frameId,
-              geometry: editor.point,
-              note: editor.note.trim(),
-              context: editor.context,
-            },
-          }).then(result => result.structuredContent as unknown as Annotation)
-        : await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              action: "add",
-              frameId: editor.frameId,
-              geometry: editor.point,
-              note: editor.note.trim(),
-              context: editor.context,
-            }),
-          }).then(response => response.json() as Promise<Annotation>);
-      setState(current => ({ ...current, annotations: [...current.annotations, annotation] }));
+    const currentEditor = editor;
+    if (!currentEditor?.note.trim() || savingComment) return;
+    const note = currentEditor.note.trim();
+    setSavingComment(true);
+    try {
+      if (currentEditor.annotationId) {
+        const updated = embedded
+          ? updateDraftAnnotation(state.annotations, currentEditor.annotationId, note)
+          : await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                action: "update",
+                id: currentEditor.annotationId,
+                note,
+              }),
+            }).then(annotationResponse);
+        setState(current => ({
+          ...current,
+          annotations: current.annotations.map(item => item.id === updated.id ? updated : item),
+        }));
+        sentAnnotationIds.current.delete(updated.id);
+      } else {
+        const annotation = embedded
+          ? createDraftAnnotation(currentEditor, note)
+          : await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                action: "add",
+                frameId: currentEditor.frameId,
+                geometry: currentEditor.point,
+                note,
+                context: currentEditor.context,
+              }),
+            }).then(annotationResponse);
+        setState(current => ({ ...current, annotations: [...current.annotations, annotation] }));
+      }
+      setEditor(undefined);
+      show("Comment saved");
+    } catch (error) {
+      show(`Unable to save comment: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSavingComment(false);
     }
-    setEditor(undefined);
-    show("Comment saved");
   }
 
   async function deleteComment() {
     if (!editor?.annotationId) return;
     const annotationId = editor.annotationId;
-    if (embedded) {
-      await bridge.callServerTool({ name: "delete_annotation", arguments: { id: annotationId } });
-    } else {
+    if (!embedded) {
       await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -754,6 +941,7 @@ function SimView() {
       content,
     });
     visibleAnnotations.forEach(annotation => sentAnnotationIds.current.add(annotation.id));
+    completeEnterInteractMode();
     show("Sent screenshot, element crops, and comments to chat");
   }
 
@@ -800,7 +988,7 @@ function SimView() {
 
   function enterAnnotateMode() {
     frozenRef.current = true;
-    setFrozenFrameId(state.frameId ?? "current");
+    setFrozenFrameId(latestFrameIdRef.current ?? state.frameId ?? "current");
     setMode("annotate");
     setEditor(undefined);
     if (!accessibility) void loadAccessibility();
@@ -833,12 +1021,7 @@ function SimView() {
 
     setDiscardingAnnotations(true);
     try {
-      if (embedded) {
-        await Promise.all(annotationIds.map(id => bridge.callServerTool({
-          name: "delete_annotation",
-          arguments: { id },
-        })));
-      } else {
+      if (!embedded) {
         await Promise.all(annotationIds.map(id =>
           fetch(`/annotation?token=${encodeURIComponent(token)}`, {
             method: "POST",
@@ -1032,7 +1215,8 @@ function SimView() {
       y: frame.y + frame.height / 2,
     };
     frozenRef.current = true;
-    setFrozenFrameId(state.frameId ?? "current");
+    const currentFrameId = latestFrameIdRef.current ?? state.frameId ?? "current";
+    setFrozenFrameId(currentFrameId);
     if (activateMode) setMode("annotate");
     setElementsOpen(true);
     setSelectedElement(node);
@@ -1041,7 +1225,7 @@ function SimView() {
     setEditor({
       point,
       note: "",
-      frameId: frozenFrameId ?? state.frameId ?? "current",
+      frameId: frozenFrameId ?? currentFrameId,
       context: accessibility ? contextForNode(accessibility, node) : undefined,
     });
   }
@@ -1119,8 +1303,8 @@ function SimView() {
                 }}><Icon name="home" /><span>Home</span></button>
                 <button onClick={() => {
                   setToolsOpen(false);
-                  const text = window.prompt("Text to type");
-                  if (text) void relayInput("input.typeText", { text });
+                  setTypeText("");
+                  setTypeTextOpen(true);
                 }}><Icon name="type" /><span>Type text…</span></button>
                 <button onClick={() => {
                   setToolsOpen(false);
@@ -1299,8 +1483,10 @@ function SimView() {
               <div class="comment-actions">
                 {editor.annotationId && <button type="button" class="danger icon-action" aria-label="Delete comment" onClick={() => void deleteComment()}><Icon name="trash" /></button>}
                 <span />
-                <button type="button" onClick={() => setEditor(undefined)}>Cancel</button>
-                <button class="primary" type="submit" disabled={!editor.note.trim()}>Save</button>
+                <button type="button" disabled={savingComment} onClick={() => setEditor(undefined)}>Cancel</button>
+                <button class="primary" type="submit" disabled={!editor.note.trim() || savingComment}>
+                  {savingComment ? "Saving…" : "Save"}
+                </button>
               </div>
             </form>
           )}
@@ -1560,6 +1746,54 @@ function SimView() {
           </section>
         </div>
       )}
+      {typeTextOpen && (
+        <div class="alert-backdrop">
+          <form
+            class="discard-alert type-text-alert"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="type-text-title"
+            onSubmit={submitTypedText}
+            onKeyDown={event => {
+              if (event.key === "Escape" && !typingText) {
+                setTypeTextOpen(false);
+                setTypeText("");
+              }
+            }}
+          >
+            <div class="discard-alert-copy">
+              <span class="discard-alert-icon"><Icon name="type" /></span>
+              <div>
+                <strong id="type-text-title">Type text in Simulator</strong>
+                <p>Enter the text to send to the currently focused control.</p>
+              </div>
+            </div>
+            <textarea
+              autofocus
+              rows={3}
+              value={typeText}
+              aria-label="Text to type"
+              disabled={typingText}
+              onInput={event => setTypeText(event.currentTarget.value)}
+            />
+            <div class="discard-alert-actions">
+              <button
+                type="button"
+                disabled={typingText}
+                onClick={() => {
+                  setTypeTextOpen(false);
+                  setTypeText("");
+                }}
+              >Cancel</button>
+              <button
+                type="submit"
+                class="primary"
+                disabled={!typeText || typingText}
+              >{typingText ? "Typing…" : "Type Text"}</button>
+            </div>
+          </form>
+        </div>
+      )}
       {toast && <div class="toast" role="status">{toast}</div>}
     </main>
   );
@@ -1571,6 +1805,80 @@ function percent(value: number): string {
 
 function normalized(value: number): string {
   return value.toFixed(4);
+}
+
+function isSessionState(value: unknown): value is State {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<State>;
+  return Array.isArray(candidate.annotations)
+    && (candidate.codec === "h264" || candidate.codec === "mjpeg")
+    && typeof candidate.connected === "boolean";
+}
+
+function requireAnnotation(value: unknown): Annotation {
+  if (!value || typeof value !== "object") {
+    throw new Error("The annotation tool returned no annotation");
+  }
+  const candidate = value as Partial<Annotation>;
+  const point = candidate.geometry as Partial<Point> | undefined;
+  if (typeof candidate.id !== "string"
+    || typeof candidate.frameId !== "string"
+    || typeof candidate.createdAt !== "string"
+    || typeof candidate.note !== "string"
+    || point?.kind !== "point"
+    || typeof point.x !== "number"
+    || typeof point.y !== "number") {
+    throw new Error("The annotation tool returned an invalid annotation");
+  }
+  return candidate as Annotation;
+}
+
+function createDraftAnnotation(editor: Editor, note: string): Annotation {
+  return {
+    id: crypto.randomUUID(),
+    frameId: editor.frameId,
+    createdAt: new Date().toISOString(),
+    geometry: editor.point,
+    note,
+    context: editor.context,
+  };
+}
+
+function updateDraftAnnotation(
+  annotations: Annotation[],
+  id: string,
+  note: string,
+): Annotation {
+  const annotation = annotations.find(item => item.id === id);
+  if (!annotation) throw new Error("The annotation no longer exists");
+  return { ...annotation, note };
+}
+
+async function annotationResponse(response: Response): Promise<Annotation> {
+  if (!response.ok) {
+    throw new Error(await response.text() || `Annotation request failed (${response.status})`);
+  }
+  return requireAnnotation(await response.json());
+}
+
+function decodeBase64(value: string): Uint8Array {
+  const binary = window.atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
+
+function streamMessage(kind: number, payload: Uint8Array): Uint8Array {
+  const message = new Uint8Array(payload.byteLength + 1);
+  message[0] = kind;
+  message.set(payload, 1);
+  return message;
+}
+
+function pause(durationMs: number): Promise<void> {
+  return new Promise(resolve => window.setTimeout(resolve, durationMs));
 }
 
 function croppedAnnotationScreenshot(

@@ -67,6 +67,7 @@ bun packages/mcp/src/index.ts
 Tools:
 
 - `open_simview`
+- `connect_simulator`
 - `list_simulators`
 - `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`
 - `take_screenshot`
@@ -78,6 +79,8 @@ Tools:
 
 Video never travels through MCP results. It uses the authenticated localhost
 relay; MCP carries controls, screenshots, compact state, and session comments.
+`open_simview` is the only tool that renders the interactive MCP App preview;
+`connect_simulator` starts the same simulator session without opening UI.
 
 Agents navigate with a semantic visual loop: call `observe_screen`, choose an
 accessible identifier/role/name, call `tap_element`, wait for an observable

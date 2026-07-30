@@ -107,7 +107,8 @@ actor H264Encoder {
             (kVTCompressionPropertyKey_RealTime, kCFBooleanTrue),
             (kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel),
             (kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse),
-            (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: 6_000_000)),
+            (kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 1)),
+            (kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: 5_000_000)),
             (kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: 60)),
             (kVTCompressionPropertyKey_MaxKeyFrameInterval, NSNumber(value: 300)),
         ]
@@ -193,4 +194,3 @@ actor H264Encoder {
         return data
     }
 }
-

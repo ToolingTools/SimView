@@ -25,6 +25,10 @@ final class FrameCapture: @unchecked Sendable {
     private var ioClient: NSObject?
     private var callback: Callback?
     private var idleTimer: DispatchSourceTimer?
+    private var pixelBufferPool: CVPixelBufferPool?
+    private var poolWidth = 0
+    private var poolHeight = 0
+    private var poolPixelFormat: OSType = 0
     private var lastCapture = DispatchTime.now()
     private var frameCount: UInt64 = 0
     private(set) var width = 0
@@ -72,6 +76,10 @@ final class FrameCapture: @unchecked Sendable {
         lastSeeds.removeAll()
         ioClient = nil
         callback = nil
+        pixelBufferPool = nil
+        poolWidth = 0
+        poolHeight = 0
+        poolPixelFormat = 0
     }
 
     private func wireFramebuffers() throws {
@@ -167,7 +175,7 @@ final class FrameCapture: @unchecked Sendable {
             &unmanaged
         )
         guard status == kCVReturnSuccess, let source = unmanaged?.takeRetainedValue(),
-              let frame = deepCopy(source)
+              let frame = copyFrame(source)
         else { return }
         width = CVPixelBufferGetWidth(frame)
         height = CVPixelBufferGetHeight(frame)
@@ -176,35 +184,63 @@ final class FrameCapture: @unchecked Sendable {
         lastCapture = now
         callback?(frame, CMTime(value: CMTimeValue(frameCount), timescale: 60), "\(frameCount)")
     }
-}
 
-private func deepCopy(_ source: CVPixelBuffer) -> CVPixelBuffer? {
-    let width = CVPixelBufferGetWidth(source)
-    let height = CVPixelBufferGetHeight(source)
-    var destination: CVPixelBuffer?
-    guard CVPixelBufferCreate(
-        kCFAllocatorDefault,
-        width,
-        height,
-        CVPixelBufferGetPixelFormatType(source),
-        [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
-        &destination
-    ) == kCVReturnSuccess, let destination else { return nil }
-    CVPixelBufferLockBaseAddress(source, .readOnly)
-    CVPixelBufferLockBaseAddress(destination, [])
-    defer {
-        CVPixelBufferUnlockBaseAddress(destination, [])
-        CVPixelBufferUnlockBaseAddress(source, .readOnly)
+    private func copyFrame(_ source: CVPixelBuffer) -> CVPixelBuffer? {
+        let width = CVPixelBufferGetWidth(source)
+        let height = CVPixelBufferGetHeight(source)
+        let pixelFormat = CVPixelBufferGetPixelFormatType(source)
+        if pixelBufferPool == nil
+            || poolWidth != width
+            || poolHeight != height
+            || poolPixelFormat != pixelFormat {
+            let poolAttributes: [CFString: Any] = [
+                kCVPixelBufferPoolMinimumBufferCountKey: 3,
+            ]
+            let pixelBufferAttributes: [CFString: Any] = [
+                kCVPixelBufferWidthKey: width,
+                kCVPixelBufferHeightKey: height,
+                kCVPixelBufferPixelFormatTypeKey: pixelFormat,
+                kCVPixelBufferIOSurfacePropertiesKey: [:],
+            ]
+            var pool: CVPixelBufferPool?
+            guard CVPixelBufferPoolCreate(
+                kCFAllocatorDefault,
+                poolAttributes as CFDictionary,
+                pixelBufferAttributes as CFDictionary,
+                &pool
+            ) == kCVReturnSuccess, let pool else { return nil }
+            pixelBufferPool = pool
+            poolWidth = width
+            poolHeight = height
+            poolPixelFormat = pixelFormat
+        }
+        guard let pixelBufferPool else { return nil }
+        var destination: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(
+            kCFAllocatorDefault,
+            pixelBufferPool,
+            &destination
+        ) == kCVReturnSuccess, let destination else { return nil }
+        CVPixelBufferLockBaseAddress(source, .readOnly)
+        CVPixelBufferLockBaseAddress(destination, [])
+        defer {
+            CVPixelBufferUnlockBaseAddress(destination, [])
+            CVPixelBufferUnlockBaseAddress(source, .readOnly)
+        }
+        guard
+            let sourceBase = CVPixelBufferGetBaseAddress(source),
+            let destinationBase = CVPixelBufferGetBaseAddress(destination)
+        else { return nil }
+        let sourceStride = CVPixelBufferGetBytesPerRow(source)
+        let destinationStride = CVPixelBufferGetBytesPerRow(destination)
+        let copied = min(sourceStride, destinationStride)
+        for row in 0..<height {
+            memcpy(
+                destinationBase.advanced(by: row * destinationStride),
+                sourceBase.advanced(by: row * sourceStride),
+                copied
+            )
+        }
+        return destination
     }
-    guard
-        let sourceBase = CVPixelBufferGetBaseAddress(source),
-        let destinationBase = CVPixelBufferGetBaseAddress(destination)
-    else { return nil }
-    let sourceStride = CVPixelBufferGetBytesPerRow(source)
-    let destinationStride = CVPixelBufferGetBytesPerRow(destination)
-    let copied = min(sourceStride, destinationStride)
-    for row in 0..<height {
-        memcpy(destinationBase.advanced(by: row * destinationStride), sourceBase.advanced(by: row * sourceStride), copied)
-    }
-    return destination
 }

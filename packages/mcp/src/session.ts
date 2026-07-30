@@ -26,7 +26,27 @@ export interface SessionState {
 }
 
 type StreamCodec = "h264" | "mjpeg";
-type ViewerData = { codec: StreamCodec };
+type ViewerData = {
+  codec: StreamCodec;
+  paused: boolean;
+  waitingForKeyframe: boolean;
+};
+type PreviewPacket = {
+  sequence: number;
+  kind: FrameKind.H264Frame;
+  payload: Uint8Array;
+  keyframe: boolean;
+};
+
+export interface PreviewPacketBatch {
+  reset: boolean;
+  configuration?: Uint8Array;
+  packets: PreviewPacket[];
+  nextSequence: number;
+}
+
+const PREVIEW_PACKET_LIMIT = 120;
+const PREVIEW_MAX_LAG_PACKETS = 30;
 
 export class SimViewSession {
   readonly relayToken = randomBytes(32).toString("hex");
@@ -41,6 +61,9 @@ export class SimViewSession {
   codec: "h264" | "mjpeg" = "h264";
   #h264Configuration?: Uint8Array;
   #mjpegClientPromise?: Promise<SimViewClient>;
+  #previewSequence = 0;
+  #previewPackets: PreviewPacket[] = [];
+  #previewWaiters = new Set<() => void>();
   #unsubscribers: Array<() => void> = [];
 
   async open(udid?: string): Promise<SessionState> {
@@ -97,7 +120,7 @@ export class SimViewSession {
     this.device = nextDevice;
     this.frameId = undefined;
     this.lastAccessibility = undefined;
-    this.#h264Configuration = undefined;
+    this.#resetPreviewPackets();
     this.annotations.clear();
     this.#bindFrames();
     await this.requireClient().request("capture.start", { udid: nextDevice.udid });
@@ -178,6 +201,58 @@ export class SimViewSession {
       x,
       y,
     });
+  }
+
+  async previewPackets(
+    afterSequence?: number,
+    maxPackets = 12,
+    timeoutMs = 1_500,
+  ): Promise<PreviewPacketBatch> {
+    const packetLimit = Math.min(30, Math.max(1, maxPackets));
+    const waitLimit = Math.min(5_000, Math.max(50, timeoutMs));
+    const oldestSequence = this.#previewPackets[0]?.sequence;
+    const reset = afterSequence === undefined
+      || afterSequence > this.#previewSequence
+      || this.#previewSequence - afterSequence > PREVIEW_MAX_LAG_PACKETS
+      || (oldestSequence !== undefined && afterSequence < oldestSequence - 1);
+
+    if (reset) {
+      const requestedAfter = this.#previewSequence;
+      await this.requireClient().request("capture.keyframe");
+      await this.#waitForPreview(
+        () => Boolean(
+          this.#h264Configuration
+          && this.#previewPackets.some(packet =>
+            packet.keyframe && packet.sequence > requestedAfter),
+        ),
+        waitLimit,
+      );
+
+      const keyframeIndex = this.#previewPackets.findIndex(packet =>
+        packet.keyframe && packet.sequence > requestedAfter);
+      const packets = keyframeIndex < 0
+        ? []
+        : this.#previewPackets.slice(keyframeIndex, keyframeIndex + packetLimit);
+      return {
+        reset: true,
+        configuration: this.#h264Configuration?.slice(),
+        packets,
+        nextSequence: packets.at(-1)?.sequence ?? afterSequence ?? 0,
+      };
+    }
+
+    await this.#waitForPreview(
+      () => this.#previewSequence > afterSequence,
+      waitLimit,
+    );
+    const packets = this.#previewPackets
+      .filter(packet => packet.sequence > afterSequence)
+      .slice(0, packetLimit);
+    return {
+      reset: false,
+      packets,
+      nextSequence: packets.at(-1)?.sequence ?? afterSequence,
+    };
   }
 
   probeStatus() {
@@ -282,7 +357,9 @@ export class SimViewSession {
           const codec: StreamCodec = url.searchParams.get("codec") === "mjpeg"
             ? "mjpeg"
             : "h264";
-          const upgraded = server.upgrade(request, { data: { codec } });
+          const upgraded = server.upgrade(request, {
+            data: { codec, paused: false, waitingForKeyframe: false },
+          });
           return upgraded ? undefined : new Response("WebSocket upgrade required", { status: 426 });
         }
         if (url.pathname === "/input" && request.method === "POST") {
@@ -373,6 +450,13 @@ export class SimViewSession {
         close(socket) {
           session.viewers.delete(socket);
         },
+        drain(socket) {
+          socket.data.paused = false;
+          if (socket.data.codec === "h264") {
+            socket.data.waitingForKeyframe = true;
+            void session.requireClient().request("capture.keyframe").catch(() => {});
+          }
+        },
         message() {},
       },
     });
@@ -394,7 +478,7 @@ export class SimViewSession {
     if (this.client) await this.client.close();
     this.client = undefined;
     this.device = undefined;
-    this.#h264Configuration = undefined;
+    this.#resetPreviewPackets();
   }
 
   #bindFrames(): void {
@@ -404,19 +488,47 @@ export class SimViewSession {
         if (kind === FrameKind.H264Configuration) {
           this.#h264Configuration = payload.slice();
         }
-        if (kind === FrameKind.H264Frame && payload.byteLength >= 8) {
+        if (kind === FrameKind.H264Frame && payload.byteLength >= 9) {
           this.frameId = new DataView(
             payload.buffer,
             payload.byteOffset,
             payload.byteLength,
           ).getBigUint64(0, false).toString();
+          this.#previewSequence += 1;
+          this.#previewPackets.push({
+            sequence: this.#previewSequence,
+            kind: FrameKind.H264Frame,
+            payload: payload.slice(),
+            keyframe: payload[8] === 1,
+          });
+          if (this.#previewPackets.length > PREVIEW_PACKET_LIMIT) {
+            this.#previewPackets.splice(
+              0,
+              this.#previewPackets.length - PREVIEW_PACKET_LIMIT,
+            );
+          }
         }
+        this.#notifyPreviewWaiters();
         const message = new Uint8Array(payload.length + 1);
         message[0] = kind;
         message.set(payload, 1);
         for (const viewer of this.viewers) {
           if (viewer.data.codec === "h264" && viewer.readyState === WebSocket.OPEN) {
-            viewer.send(message);
+            if (viewer.data.paused) continue;
+            if (kind === FrameKind.H264Frame && viewer.data.waitingForKeyframe) {
+              if (payload[8] !== 1) continue;
+              if (this.#h264Configuration) {
+                this.#sendFrame(viewer, FrameKind.H264Configuration, this.#h264Configuration);
+              }
+              viewer.data.waitingForKeyframe = false;
+            }
+            const status = viewer.send(message);
+            if (status < 0) {
+              viewer.data.paused = true;
+            } else if (status === 0 && kind === FrameKind.H264Frame) {
+              viewer.data.waitingForKeyframe = true;
+              void this.requireClient().request("capture.keyframe").catch(() => {});
+            }
           }
         }
       }));
@@ -436,7 +548,10 @@ export class SimViewSession {
       this.#unsubscribers.push(client.on(FrameKind.JpegFrame, payload => {
         for (const viewer of this.viewers) {
           if (viewer.data.codec === "mjpeg" && viewer.readyState === WebSocket.OPEN) {
-            this.#sendFrame(viewer, FrameKind.JpegFrame, payload);
+            if (viewer.data.paused) continue;
+            if (this.#sendFrame(viewer, FrameKind.JpegFrame, payload) < 0) {
+              viewer.data.paused = true;
+            }
           }
         }
       }));
@@ -451,11 +566,44 @@ export class SimViewSession {
     viewer: ServerWebSocket<ViewerData>,
     kind: FrameKind,
     payload: Uint8Array,
-  ): void {
+  ): number {
     const message = new Uint8Array(payload.length + 1);
     message[0] = kind;
     message.set(payload, 1);
-    viewer.send(message);
+    return viewer.send(message);
+  }
+
+  async #waitForPreview(predicate: () => boolean, timeoutMs: number): Promise<void> {
+    const deadline = performance.now() + timeoutMs;
+    while (!predicate()) {
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) return;
+      await new Promise<void>(resolve => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          this.#previewWaiters.delete(finish);
+          resolve();
+        };
+        const timeout = setTimeout(finish, remaining);
+        this.#previewWaiters.add(finish);
+      });
+    }
+  }
+
+  #notifyPreviewWaiters(): void {
+    const waiters = [...this.#previewWaiters];
+    this.#previewWaiters.clear();
+    for (const waiter of waiters) waiter();
+  }
+
+  #resetPreviewPackets(): void {
+    this.#h264Configuration = undefined;
+    this.#previewSequence = 0;
+    this.#previewPackets = [];
+    this.#notifyPreviewWaiters();
   }
 }
 
