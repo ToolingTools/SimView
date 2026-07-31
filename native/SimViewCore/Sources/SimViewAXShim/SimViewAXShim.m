@@ -85,7 +85,10 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
       if (![responseClass respondsToSelector:NSSelectorFromString(@"empty")]) {
         return nil;
       }
-      return ((id (*)(id, SEL))objc_msgSend)(responseClass, NSSelectorFromString(@"empty"));
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+      return [responseClass performSelector:NSSelectorFromString(@"empty")];
+#pragma clang diagnostic pop
     }
 
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
