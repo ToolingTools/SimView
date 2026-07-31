@@ -1,10 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import type { AccessibilityNode, AccessibilitySnapshot } from "@simview/contracts";
+import type { AccessibilityNode, AccessibilitySnapshot, Annotation } from "@simview/contracts";
 import {
   ANNOTATION_IMPLEMENTATION_PROMPT,
   annotationCropRect,
   annotationMessageContent,
   annotationMessageContext,
+  annotationMessageScreenContext,
   claimFullscreenRequest,
   commentableNodeAtPoint,
   contextForNode,
@@ -99,7 +100,7 @@ describe("app helpers", () => {
   });
 
   test("builds an implementation-first annotation handoff", () => {
-    const context = annotationMessageContext({
+    const annotation: Annotation = {
       id: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
       frameId: "frame-1",
       createdAt: "2026-07-31T10:00:00.000Z",
@@ -128,8 +129,51 @@ describe("app helpers", () => {
           sceneIdentifier: "scene-1",
         },
       },
-    });
-    const content = annotationMessageContent("full-frame", [
+    };
+    const context = annotationMessageContext(annotation);
+    const screenContext = annotationMessageScreenContext(
+      {
+        device: {
+          udid: "device-1",
+          name: "iPhone 17 Pro",
+          state: "Booted",
+          runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-0",
+        },
+        frameId: "frame-1",
+        route: "/inbox",
+        component: {
+          label: "InboxScreen",
+          testID: "inbox-screen",
+          source: "src/InboxScreen.tsx",
+        },
+      },
+      {
+        status: { bundled: true, connected: true, bundleId: "com.example.Inbox" },
+        target: { source: "probe", bundleId: "com.example.Inbox" },
+        context: {
+          schemaVersion: 1,
+          scenes: [
+            {
+              persistentIdentifier: "scene-1",
+              role: "UIWindowSceneSessionRoleApplication",
+              activationState: "foregroundActive",
+              configurationName: "Default Configuration",
+              delegateClass: "InboxSceneDelegate",
+              windows: [
+                {
+                  className: "UIWindow",
+                  key: true,
+                  hidden: false,
+                  visibleControllerPath: ["UINavigationController", "InboxViewController"],
+                },
+              ],
+            },
+          ],
+        },
+      },
+      [annotation],
+    );
+    const content = annotationMessageContent("full-frame", screenContext, [
       { text: "Increase title contrast", context, crop: "element-crop" },
     ]);
 
@@ -146,7 +190,19 @@ describe("app helpers", () => {
       "Test ID: inbox-cta",
       "Source: src/InboxButton.tsx",
       "View: UIButton",
-      "Controller: InboxViewController",
+    ]);
+    expect(screenContext).toEqual([
+      "Simulator: iPhone 17 Pro · iOS 26.0",
+      "App: com.example.Inbox",
+      "Screen: UINavigationController › InboxViewController",
+      "Route: /inbox",
+      "Component: InboxScreen",
+      "Test ID: inbox-screen",
+      "Source: src/InboxScreen.tsx",
+      "Window: UIWindow",
+      "Scene delegate: InboxSceneDelegate",
+      "Scene configuration: Default Configuration",
+      "Frame: frame-1",
     ]);
     expect(context.join("\n")).not.toContain("AXPress");
     expect(context.join("\n")).not.toContain("0.2");
@@ -154,6 +210,10 @@ describe("app helpers", () => {
     expect(content).toEqual([
       { type: "text", text: ANNOTATION_IMPLEMENTATION_PROMPT },
       { type: "image", data: "full-frame", mimeType: "image/png" },
+      {
+        type: "text",
+        text: `## Screen context\n\n${screenContext.map((value) => `- ${value}`).join("\n")}`,
+      },
       {
         type: "text",
         text: `## Annotations\n\n1. Annotation: Increase title contrast\nContext:\n${context.map((value) => `- ${value}`).join("\n")}`,
@@ -166,11 +226,16 @@ describe("app helpers", () => {
     expect(
       annotationMessageContent(
         "full-frame",
+        ["Screen: InboxViewController"],
         [{ text: "Increase title contrast", context: ["Object: Button"], crop: "crop" }],
         false,
       ),
     ).toEqual([
       { type: "text", text: ANNOTATION_IMPLEMENTATION_PROMPT },
+      {
+        type: "text",
+        text: "## Screen context\n\n- Screen: InboxViewController",
+      },
       {
         type: "text",
         text: "## Annotations\n\n1. Annotation: Increase title contrast\nContext:\n- Object: Button",

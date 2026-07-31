@@ -22,6 +22,7 @@ import {
   annotationCropRect,
   annotationMessageContent,
   annotationMessageContext,
+  annotationMessageScreenContext,
   claimFullscreenRequest,
   commentableNodeAtPoint,
   compactIdentifier,
@@ -896,10 +897,15 @@ function SimView() {
       context: annotationMessageContext(annotation),
       crop: includeImages ? croppedAnnotationScreenshot(canvas, annotation) : undefined,
     }));
+    const screenContext = annotationMessageScreenContext(
+      { ...state, frameId: activeFrameId },
+      uiContext,
+      visibleAnnotations,
+    );
     try {
       const result = await bridge.sendMessage({
         role: "user",
-        content: annotationMessageContent(imageData, annotations, includeImages),
+        content: annotationMessageContent(imageData, screenContext, annotations, includeImages),
       });
       if (result.isError) throw new Error("The MCP host rejected the message");
     } catch (error) {

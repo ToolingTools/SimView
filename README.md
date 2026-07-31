@@ -143,8 +143,9 @@ durations/timeouts use millisecond-bearing options. See
 [docs/protocol.md](docs/protocol.md) for the wire contract.
 
 Point annotations remain in memory for the current session. **Send to Chat**
-sends an implementation prompt, the exact frozen canvas, and then each concise
-annotation/context block followed by its element crop. Images are standard MCP
+sends an implementation prompt, the exact frozen canvas, screen-level route or
+view-controller context, and then each concise annotation/context block followed
+by its element crop. Images are standard MCP
 image content blocks when the host advertises image-message support; otherwise
 SimView sends the prompt and annotations as text. The handoff tells the agent to
 implement the saved feedback in the current project without opening another

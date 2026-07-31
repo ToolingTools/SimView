@@ -7,6 +7,7 @@ import {
   annotationSchema,
   type SessionState,
   sessionStateSchema,
+  type UiContext,
 } from "@simview/contracts";
 
 export type Point = AnnotationGeometry;
@@ -35,10 +36,6 @@ export function annotationMessageContext(annotation: Annotation): string[] {
   const component = metro?.component ?? annotation.component?.label;
   const testID = metro?.testID ?? annotation.component?.testID;
   const source = metro?.source ?? annotation.component?.source;
-  const controller = native?.controllerPath?.length
-    ? native.controllerPath.join(" › ")
-    : native?.controllerClass;
-
   return [
     object && `Object: ${object.replace(/^AX/, "")}`,
     `Coordinate: x=${percent(annotation.geometry.x)}, y=${percent(annotation.geometry.y)}`,
@@ -52,12 +49,49 @@ export function annotationMessageContext(annotation: Annotation): string[] {
     testID && testID !== accessibility?.identifier && `Test ID: ${testID}`,
     source && `Source: ${source}`,
     native?.viewClass && native.viewClass !== object && `View: ${native.viewClass}`,
-    controller && `Controller: ${controller}`,
+  ].filter((value): value is string => Boolean(value));
+}
+
+export function annotationMessageScreenContext(
+  state: Pick<SessionState, "device" | "frameId" | "route" | "component">,
+  uiContext: UiContext | undefined,
+  annotations: readonly Annotation[],
+): string[] {
+  const activeScene =
+    uiContext?.context?.scenes?.find((scene) => scene.activationState === "foregroundActive") ??
+    uiContext?.context?.scenes?.[0];
+  const keyWindow =
+    activeScene?.windows?.find((window) => window.key && !window.hidden) ??
+    activeScene?.windows?.find((window) => !window.hidden);
+  const native = annotations.find((annotation) => annotation.context?.native)?.context?.native;
+  const controllerPath = keyWindow?.visibleControllerPath?.length
+    ? keyWindow.visibleControllerPath
+    : native?.controllerPath?.length
+      ? native.controllerPath
+      : native?.controllerClass
+        ? [native.controllerClass]
+        : undefined;
+  const bundleId = uiContext?.target?.bundleId ?? uiContext?.status.bundleId;
+
+  return [
+    state.device && `Simulator: ${state.device.name} · ${formatRuntime(state.device.runtime)}`,
+    bundleId && `App: ${bundleId}`,
+    controllerPath?.length && `Screen: ${controllerPath.join(" › ")}`,
+    state.route && `Route: ${state.route}`,
+    state.component?.label && `Component: ${state.component.label}`,
+    state.component?.testID && `Test ID: ${state.component.testID}`,
+    state.component?.source && `Source: ${state.component.source}`,
+    (keyWindow?.className ?? native?.windowClass) &&
+      `Window: ${keyWindow?.className ?? native?.windowClass}`,
+    activeScene?.delegateClass && `Scene delegate: ${activeScene.delegateClass}`,
+    activeScene?.configurationName && `Scene configuration: ${activeScene.configurationName}`,
+    state.frameId && `Frame: ${state.frameId}`,
   ].filter((value): value is string => Boolean(value));
 }
 
 export function annotationMessageContent(
   screenshot: string,
+  screenContext: readonly string[],
   annotations: readonly AnnotationMessageItem[],
   includeImages = true,
 ): AnnotationMessageContent[] {
@@ -67,6 +101,10 @@ export function annotationMessageContent(
   if (includeImages) {
     content.push({ type: "image", data: screenshot, mimeType: "image/png" });
   }
+  content.push({
+    type: "text",
+    text: `## Screen context\n\n${screenContext.length ? screenContext.map((value) => `- ${value}`).join("\n") : "- No screen identifiers were available."}`,
+  });
   for (const [index, annotation] of annotations.entries()) {
     const context = annotation.context.length
       ? annotation.context.map((value) => `- ${value}`).join("\n")

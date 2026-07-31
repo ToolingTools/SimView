@@ -40,9 +40,10 @@ request to start another SimView review.
 
 - Treat each annotation comment as a user-authored change request for the
   current project. Start by inspecting and editing that project's source.
-- Use the full-screen image, element crops, coordinates, and accessibility
-  context as supporting evidence. The annotation comment expresses the user's
-  intent and takes priority over inferred visual changes.
+- Use the full-screen image, screen-level route or native view-controller path,
+  element crops, coordinates, and accessibility context as supporting evidence.
+  The annotation comment expresses the user's intent and takes priority over
+  inferred visual changes.
 - Use judgment when the requested change is clear. Ask a concise question only
   when the annotation is genuinely ambiguous or requires a product decision.
 - Do not call `open_simview`, `connect_simulator`, or recreate the annotations
