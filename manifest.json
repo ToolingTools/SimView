@@ -8,9 +8,9 @@
   "author": {
     "name": "SimView contributors"
   },
-  "homepage": "https://github.com/steve228uk/SimView",
-  "documentation": "https://github.com/steve228uk/SimView#readme",
-  "support": "https://github.com/steve228uk/SimView/issues",
+  "homepage": "https://github.com/toolingtools/SimView",
+  "documentation": "https://github.com/toolingtools/SimView#readme",
+  "support": "https://github.com/toolingtools/SimView/issues",
   "icon": "assets/icon.png",
   "server": {
     "type": "binary",

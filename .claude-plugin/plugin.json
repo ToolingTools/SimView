@@ -4,10 +4,10 @@
   "description": "Control and review a local iOS Simulator.",
   "author": {
     "name": "SimView contributors",
-    "url": "https://github.com/steve228uk/SimView"
+    "url": "https://github.com/toolingtools/SimView"
   },
-  "homepage": "https://github.com/steve228uk/SimView",
-  "repository": "https://github.com/steve228uk/SimView",
+  "homepage": "https://github.com/toolingtools/SimView",
+  "repository": "https://github.com/toolingtools/SimView",
   "license": "Apache-2.0",
   "keywords": ["ios", "simulator", "mcp"]
 }

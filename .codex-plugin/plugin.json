@@ -4,10 +4,10 @@
   "description": "Control and review a local iOS Simulator in a live MCP App preview.",
   "author": {
     "name": "SimView contributors",
-    "url": "https://github.com/steve228uk/SimView"
+    "url": "https://github.com/toolingtools/SimView"
   },
-  "homepage": "https://github.com/steve228uk/SimView",
-  "repository": "https://github.com/steve228uk/SimView",
+  "homepage": "https://github.com/toolingtools/SimView",
+  "repository": "https://github.com/toolingtools/SimView",
   "license": "Apache-2.0",
   "keywords": ["ios", "simulator", "preview", "review", "mcp"],
   "skills": "./skills/",
@@ -20,8 +20,8 @@
     "category": "Developer Tools",
     "capabilities": ["Interactive"],
     "defaultPrompt": [
-      "Use $simview to review the booted simulator.",
-      "Open SimView and annotate visual mismatches.",
+      "Use $simview to view the booted simulator.",
+      "Open SimView and navigate to the Account tab.",
       "Capture the simulator and send coordinate comments."
     ],
     "brandColor": "#171717",

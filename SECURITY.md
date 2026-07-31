@@ -1,7 +1,7 @@
 # Security policy
 
 Do not disclose suspected vulnerabilities in a public issue. Use GitHub's
-[private vulnerability reporting](https://github.com/steve228uk/SimView/security/advisories/new)
+[private vulnerability reporting](https://github.com/toolingtools/SimView/security/advisories/new)
 to contact the maintainers. Include affected versions, reproduction steps,
 impact, and any suggested mitigation. A maintainer will acknowledge a complete
 report within seven days.

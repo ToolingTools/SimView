@@ -23,9 +23,9 @@ Release archives contain compiled Bun clients and a universal Swift executable.
 End users do not need Bun, Node, Homebrew, AXe, IDB, a simulator helper app, or
 Screen Recording permission.
 
-## Install
+## Quick Start
 
-The generated npm package can be run without installing SimView globally:
+Run SimView from npm without a global install:
 
 ```sh
 npx simview doctor --json
@@ -35,6 +35,39 @@ bunx simview preview
 `npx` requires Node and `bunx` requires Bun only as the package runner. The
 SimView command they launch is a standalone universal executable. GitHub
 release archives and agent plugins do not require either runtime.
+
+### Codex plugin
+
+Install the [ToolingTools plugin marketplace](https://github.com/ToolingTools/Plugins),
+then install SimView:
+
+```sh
+codex plugin marketplace add toolingtools/plugins
+codex plugin add simview@toolingtools
+```
+
+The marketplace is catalog-only: Codex downloads the versioned `simview` npm
+package, which includes the plugin manifest, MCP server, skills, and assets.
+
+### MCP server
+
+SimView can also be used directly by any MCP host. Configure it to run the
+packaged command:
+
+```json
+{
+  "mcpServers": {
+    "simview": {
+      "command": "npx",
+      "args": ["-y", "simview", "mcp"]
+    }
+  }
+}
+```
+
+For a local npm installation, replace `npx` and its arguments with the
+installed `simview` executable and `mcp` argument. Run `simview mcp` directly
+while developing from source.
 
 ## Build from source
 

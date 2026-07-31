@@ -1,4 +1,4 @@
-export const repositoryUrl = "https://github.com/steve228uk/SimView";
+export const repositoryUrl = "https://github.com/toolingtools/SimView";
 
 export function createNpmPackageManifest(
   version: string,
