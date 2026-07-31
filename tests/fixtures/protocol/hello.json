@@ -15,7 +15,7 @@
       "protocolVersion": 1,
       "codec": "h264",
       "maxFrameRate": 60,
-      "server": "simview-core/0.1.0",
+      "server": "simview-core/0.1.5",
       "capabilities": {
         "capture": true,
         "input": true,

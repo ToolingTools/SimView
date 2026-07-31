@@ -28,6 +28,20 @@ export const accessibilityNodeSchema: z.ZodType<AccessibilityNode> = z.lazy(() =
       focused: z.boolean().optional(),
       expanded: z.boolean().optional(),
       actions: z.array(z.string()).optional(),
+      kind: z.enum(["component", "host"]).optional(),
+      component: z.string().optional(),
+      componentPath: z.array(z.string()).optional(),
+      hostComponent: z.string().optional(),
+      testID: z.string().optional(),
+      text: z.string().optional(),
+      interactive: z.boolean().optional(),
+      sourceLocation: z
+        .object({
+          file: z.string(),
+          line: z.number().int().positive().optional(),
+          column: z.number().int().positive().optional(),
+        })
+        .optional(),
       frame: z
         .object({
           points: normalizedRectSchema,
@@ -56,6 +70,16 @@ export interface AccessibilityNode {
   focused?: boolean | undefined;
   expanded?: boolean | undefined;
   actions?: string[] | undefined;
+  kind?: "component" | "host" | undefined;
+  component?: string | undefined;
+  componentPath?: string[] | undefined;
+  hostComponent?: string | undefined;
+  testID?: string | undefined;
+  text?: string | undefined;
+  interactive?: boolean | undefined;
+  sourceLocation?:
+    | { file: string; line?: number | undefined; column?: number | undefined }
+    | undefined;
   frame?: { points: NormalizedRect; normalized: NormalizedRect } | undefined;
   children?: AccessibilityNode[] | undefined;
   [key: string]: unknown;

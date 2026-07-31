@@ -1,6 +1,7 @@
 import {
   type AccessibilityNode,
   type AccessibilitySnapshot,
+  type ElementSnapshot,
   MAXIMUM_FRAME_BYTES,
 } from "@simview/contracts";
 
@@ -25,14 +26,22 @@ export function flattenAccessibilityTree(root: AccessibilityNode): Accessibility
   return nodes;
 }
 
-export function compactAccessibilityTree(snapshot: AccessibilitySnapshot): string {
+export function compactAccessibilityTree(
+  snapshot: AccessibilitySnapshot | ElementSnapshot,
+): string {
   const nodes = flattenAccessibilityTree(snapshot.root).filter(
     (node) => node !== snapshot.root && node.hidden !== true,
   );
   const lines = nodes.map((node, index) => {
     const label = node.label ?? node.title;
     const name = label ? ` "${label.replace(/\s+/g, " ").slice(0, 120)}"` : "";
-    const identifier = node.identifier ? ` id=${node.identifier}` : "";
+    const identifierValue = node.testID ?? node.identifier;
+    const identifier = identifierValue ? ` id=${identifierValue}` : "";
+    const component = node.component ? ` component=${node.component}` : "";
+    const host = node.hostComponent ? ` host=${node.hostComponent}` : "";
+    const source = node.sourceLocation
+      ? ` source=${node.sourceLocation.file}${node.sourceLocation.line ? `:${node.sourceLocation.line}` : ""}`
+      : "";
     const frame = node.frame?.normalized;
     const bounds = frame
       ? ` [${frame.x.toFixed(3)},${frame.y.toFixed(3)} ${frame.width.toFixed(3)}x${frame.height.toFixed(3)}]`
@@ -44,7 +53,7 @@ export function compactAccessibilityTree(snapshot: AccessibilitySnapshot): strin
     ]
       .filter(Boolean)
       .join(" ");
-    return `@${index + 1} ${node.role ?? "element"}${name}${identifier}${bounds}${state ? ` ${state}` : ""}`;
+    return `@${index + 1} ${node.role ?? "element"}${name}${identifier}${component}${host}${source}${bounds}${state ? ` ${state}` : ""}`;
   });
   const screen = snapshot.screen;
   return [

@@ -1,8 +1,9 @@
 {
   "mcpServers": {
     "simview": {
-      "command": "${CLAUDE_PLUGIN_ROOT}/bin/simview",
-      "args": ["mcp"]
+      "command": "./bin/simview",
+      "args": ["mcp"],
+      "cwd": "."
     }
   }
 }

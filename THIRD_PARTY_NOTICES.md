@@ -15,6 +15,8 @@ complete resolved production dependency graph for each binary build.
 - **Preact 10.29.7**, copyright the Preact authors, licensed under the MIT
   License.
 - **Zod 4.4.3**, copyright Colin McDonnell, licensed under the MIT License.
+- **metro-bridge 0.2.8**, licensed under the MIT License.
+- **ws 8.21.1**, copyright Einar Otto Stangvik, licensed under the MIT License.
 
 The compiled command includes the Bun runtime. Bun itself is MIT licensed and
 statically links additional libraries documented by the Bun project. In

@@ -1,24 +1,34 @@
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type AccessibilitySelector,
   type AccessibilitySnapshot,
   type Annotation,
   type DeviceDescription,
+  type ElementSnapshot,
   FrameKind,
   flattenAccessibilityTree,
+  type ScreenContext,
   SimViewClient,
 } from "@simview/client";
 import {
   annotationMutationSchema,
+  type ElementFallbackReason,
+  type ElementTreeOutput,
   normalizedPointSchema,
   relayAuthenticationSchema,
   relayInputSchema,
+  type SaveReviewImagesInput,
+  type SaveReviewImagesOutput,
   type SessionState,
+  uiContextSchema,
 } from "@simview/contracts";
 import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { previewScriptResponse, resolveAppRoot } from "./app-assets";
+import { MetroInspector } from "./metro";
 
 export type { SessionState } from "@simview/contracts";
 
@@ -63,6 +73,8 @@ export class SimViewSession {
   device: DeviceDescription | undefined = undefined;
   frameId: string | undefined = undefined;
   lastAccessibility: AccessibilitySnapshot | undefined = undefined;
+  lastElements: ElementSnapshot | undefined = undefined;
+  lastScreenContext: ScreenContext | undefined = undefined;
   relay: ReturnType<typeof Bun.serve> | undefined = undefined;
   codec: "h264" | "mjpeg" = "h264";
   #h264Configuration: Uint8Array | undefined = undefined;
@@ -73,8 +85,14 @@ export class SimViewSession {
   #screenshotOperation: Promise<Screenshot> | undefined = undefined;
   #unsubscribers: Array<() => void> = [];
   #annotationsByDevice = new Map<string, Map<string, Annotation>>();
+  #reviewImageDirectories = new Set<string>();
   #closePromise: Promise<void> | undefined = undefined;
   #connectionGeneration = 0;
+  #metroInspector = new MetroInspector();
+
+  get connectionGeneration(): number {
+    return this.#connectionGeneration;
+  }
 
   get annotations(): Map<string, Annotation> {
     const udid = this.device?.udid ?? "unselected";
@@ -86,7 +104,7 @@ export class SimViewSession {
     return annotations;
   }
 
-  async open(udid?: string): Promise<SessionState> {
+  async open(udid?: string, options: { startRelay?: boolean } = {}): Promise<SessionState> {
     if (!this.client) {
       const devices = await SimViewClient.listDevices();
       const booted = devices.filter((device) => device.state === "Booted");
@@ -99,7 +117,7 @@ export class SimViewSession {
         this.#connectionGeneration += 1;
         this.#bindFrames();
         await this.client.request("capture.start", { udid: this.device.udid });
-        this.startRelay();
+        if (options.startRelay !== false) this.startRelay();
       } catch (error) {
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
         this.#unsubscribers = [];
@@ -146,6 +164,9 @@ export class SimViewSession {
       this.device = nextDevice;
       this.frameId = undefined;
       this.lastAccessibility = undefined;
+      this.lastElements = undefined;
+      this.lastScreenContext = undefined;
+      this.#metroInspector.close();
       this.#resetPreviewPackets();
       this.#bindFrames();
       if ([...this.viewers].some((viewer) => viewer.data.codec === "mjpeg")) {
@@ -159,10 +180,29 @@ export class SimViewSession {
   }
 
   state(): SessionState {
+    const screenContext = this.lastScreenContext;
+    const componentName =
+      screenContext?.kind === "react-native"
+        ? screenContext.screenComponent
+        : screenContext?.component;
+    const componentSource =
+      screenContext?.kind === "react-native"
+        ? screenContext.sourceLocation?.file
+        : screenContext?.source;
+    const componentTestID = screenContext?.testID;
     return {
       reviewId: this.reviewId,
       device: this.device,
       frameId: this.frameId,
+      route: screenContext?.route,
+      component:
+        componentName || componentSource || componentTestID
+          ? {
+              label: componentName,
+              source: componentSource,
+              testID: componentTestID,
+            }
+          : undefined,
       annotations: [...this.annotations.values()],
       codec: this.codec,
       connected: Boolean(this.client),
@@ -182,6 +222,31 @@ export class SimViewSession {
       return await operation;
     } finally {
       if (this.#screenshotOperation === operation) this.#screenshotOperation = undefined;
+    }
+  }
+
+  async saveReviewImages(input: SaveReviewImagesInput): Promise<SaveReviewImagesOutput> {
+    const directory = await mkdtemp(join(tmpdir(), `simview-review-${this.reviewId}-`));
+    this.#reviewImageDirectories.add(directory);
+    try {
+      await chmod(directory, 0o700);
+      const screenshotPath = join(directory, "frozen-frame.png");
+      await writePng(screenshotPath, input.screenshot);
+      const annotations = await Promise.all(
+        input.annotations.map(async (annotation, index) => {
+          const screenshotPath = join(
+            directory,
+            `annotation-${String(index + 1).padStart(2, "0")}-${annotation.id}.png`,
+          );
+          await writePng(screenshotPath, annotation.screenshot);
+          return { id: annotation.id, screenshotPath };
+        }),
+      );
+      return { directory, screenshotPath, annotations };
+    } catch (error) {
+      this.#reviewImageDirectories.delete(directory);
+      await rm(directory, { recursive: true, force: true }).catch(() => {});
+      throw error;
     }
   }
 
@@ -217,8 +282,62 @@ export class SimViewSession {
     return snapshot;
   }
 
+  async elementSnapshot(
+    scope: "interactive" | "visible" | "full" = "interactive",
+    maxNodes = 1_200,
+  ): Promise<ElementTreeOutput> {
+    const accessibility = await this.accessibilitySnapshot(scope, maxNodes);
+    const device = this.device;
+    const frameId = this.frameId ?? "current";
+    const metro = device
+      ? await this.#metroInspector.inspect(device, accessibility, frameId, maxNodes)
+      : undefined;
+    if (metro) {
+      if (!metro.screenContext.bundleId) {
+        try {
+          const target = await this.probeTarget();
+          metro.screenContext.bundleId = target.bundleId;
+        } catch {
+          // The Metro target remains useful when simctl cannot identify the focal app.
+        }
+      }
+      this.lastElements = metro.snapshot;
+      this.lastScreenContext = metro.screenContext;
+      return { snapshot: metro.snapshot, screenContext: metro.screenContext };
+    }
+
+    return this.#accessibilityElementOutput(
+      accessibility,
+      frameId,
+      this.#metroInspector.fallbackReason ?? "metro-target-unavailable",
+    );
+  }
+
+  async accessibilityElementSnapshot(
+    scope: "interactive" | "visible" | "full" = "interactive",
+    maxNodes = 1_200,
+  ): Promise<ElementTreeOutput> {
+    const accessibility = await this.accessibilitySnapshot(scope, maxNodes);
+    return this.#accessibilityElementOutput(accessibility, this.frameId ?? "current");
+  }
+
+  async #accessibilityElementOutput(
+    accessibility: AccessibilitySnapshot,
+    frameId: string,
+    fallbackReason?: ElementFallbackReason,
+  ): Promise<ElementTreeOutput> {
+    const screenContext = await this.#uiKitScreenContext(accessibility, frameId);
+    this.lastElements = accessibility;
+    this.lastScreenContext = screenContext;
+    return {
+      snapshot: accessibility,
+      screenContext,
+      ...(fallbackReason ? { fallback: { reason: fallbackReason } } : {}),
+    };
+  }
+
   async findElements(selector: AccessibilitySelector) {
-    const snapshot = this.lastAccessibility ?? (await this.accessibilitySnapshot("visible"));
+    const snapshot = this.lastElements ?? (await this.elementSnapshot("visible")).snapshot;
     const exact = selector.exact ?? true;
     const match = (actual: string | undefined, expected: string | undefined) =>
       expected === undefined ||
@@ -450,6 +569,18 @@ export class SimViewSession {
               ),
             );
           }
+          if (url.pathname === "/elements") {
+            const scope = url.searchParams.get("scope");
+            const requestedMaxNodes = Number(url.searchParams.get("maxNodes"));
+            return Response.json(
+              await session.elementSnapshot(
+                scope === "visible" || scope === "full" ? scope : "interactive",
+                Number.isFinite(requestedMaxNodes)
+                  ? Math.min(1_200, Math.max(1, requestedMaxNodes))
+                  : 1_200,
+              ),
+            );
+          }
           if (url.pathname === "/inspect-point") {
             const { x, y } = normalizedPointSchema.parse({
               x: Number(url.searchParams.get("x")),
@@ -593,8 +724,60 @@ export class SimViewSession {
     this.device = undefined;
     this.frameId = undefined;
     this.lastAccessibility = undefined;
+    this.lastElements = undefined;
+    this.lastScreenContext = undefined;
+    this.#metroInspector.close();
     this.#annotationsByDevice.clear();
     this.#resetPreviewPackets();
+    await Promise.all(
+      [...this.#reviewImageDirectories].map((directory) =>
+        rm(directory, { recursive: true, force: true }).catch(() => {}),
+      ),
+    );
+    this.#reviewImageDirectories.clear();
+  }
+
+  async #uiKitScreenContext(
+    accessibility: AccessibilitySnapshot,
+    frameId: string,
+  ): Promise<ScreenContext> {
+    const device = this.device;
+    const base = {
+      schemaVersion: 1 as const,
+      kind: "uikit" as const,
+      capturedAt: new Date().toISOString(),
+      frameId,
+      simulatorName: device?.name,
+      runtime: device?.runtime,
+      viewport: accessibility.screen,
+      orientation:
+        accessibility.screen.width > accessibility.screen.height
+          ? ("landscape" as const)
+          : ("portrait" as const),
+    };
+    try {
+      const status = await this.probeStatus();
+      const target = status.connected ? undefined : await this.probeTarget();
+      const context = status.connected
+        ? uiContextSchema.shape.context.unwrap().parse(await this.probeContext())
+        : undefined;
+      const scene =
+        context?.scenes?.find((candidate) => candidate.activationState === "foregroundActive") ??
+        context?.scenes?.[0];
+      const window =
+        scene?.windows?.find((candidate) => candidate.key && !candidate.hidden) ??
+        scene?.windows?.find((candidate) => !candidate.hidden);
+      return {
+        ...base,
+        bundleId: target?.bundleId ?? status.bundleId,
+        controllerPath: window?.visibleControllerPath,
+        windowClass: window?.className,
+        sceneDelegate: scene?.delegateClass,
+        sceneConfiguration: scene?.configurationName,
+      };
+    } catch {
+      return base;
+    }
   }
 
   #bindFrames(): void {
@@ -721,6 +904,22 @@ export class SimViewSession {
     this.#previewPackets = [];
     this.#notifyPreviewWaiters();
   }
+}
+
+async function writePng(path: string, encoded: string): Promise<void> {
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded) || encoded.length % 4 !== 0) {
+    throw new Error("Review image is not valid base64");
+  }
+  const bytes = Buffer.from(encoded, "base64");
+  const signature = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  if (
+    bytes.byteLength < signature.length ||
+    !signature.every((value, index) => bytes[index] === value)
+  ) {
+    throw new Error("Review image is not a PNG");
+  }
+  if (bytes.byteLength > 15_000_000) throw new Error("Review image exceeds 15 MB");
+  await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
 }
 
 async function browserHtml(): Promise<string> {

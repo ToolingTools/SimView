@@ -72,6 +72,8 @@ bun packages/cli/src/index.ts devices --json
 bun packages/cli/src/index.ts doctor --json
 bun packages/cli/src/index.ts preview
 bun packages/cli/src/index.ts screenshot --output ./simulator.png
+bun packages/cli/src/index.ts tree --json
+bun packages/cli/src/index.ts ax-tree --json
 bun packages/cli/src/index.ts tap --x 0.5 --y 0.75
 bun packages/cli/src/index.ts swipe --from 0.5,0.8 --to 0.5,0.2 --duration-ms 350
 bun packages/cli/src/index.ts type "Hello 👋"
@@ -80,6 +82,12 @@ bun packages/cli/src/index.ts daemon status --json
 bun packages/cli/src/index.ts daemon stop --udid <uuid>
 bun packages/cli/src/index.ts daemon prune
 ```
+
+`tree` and `observe` use the same unified inspection path as the preview: they
+return a matching development-mode React Native Fiber tree and screen/route
+context when Metro is available, with a diagnostic AX fallback otherwise.
+`ax-tree` explicitly bypasses Metro and reads only the native accessibility
+hierarchy.
 
 `preview` binds an authenticated relay to a random port on `127.0.0.1`. The
 session token is random, endpoints reject unauthenticated requests, and the
@@ -109,14 +117,18 @@ Tools:
 - `list_simulators`
 - `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`
 - `take_screenshot`
-- `observe_screen`, `get_accessibility_tree`, `find_elements`, `tap_element`
+- `observe_screen`, `get_element_tree`, `get_accessibility_tree`, `find_elements`, `tap_element`
 - `inspect_point`, `wait_for_element`
 - `get_ui_context`, `enable_ui_probe`
 - `get_simview_state`
 - `add_annotation`, `update_annotation`, `delete_annotation`
 
-Video never travels through MCP results. It uses the authenticated localhost
-relay; MCP carries controls, screenshots, compact state, and session comments.
+The standalone browser preview uses the authenticated localhost stream. The
+embedded MCP App does not make localhost HTTP or WebSocket requests: Codex
+requires secure network origins, so it carries bounded video packet batches and
+byte-paged React Native/AX element snapshots through app-only bridge tools. A
+priority gate pauses video polling while element pages are transferred, keeping
+the host's serialized bridge responsive without requiring a local certificate.
 `connect_simulator` starts the simulator session without opening UI. Always call
 it first and proceed only if it succeeds. When an interactive preview is
 requested, follow it with `open_simview` using the same UDID; the preview then
@@ -131,8 +143,16 @@ accessible identifier/role/name, call `tap_element`, wait for an observable
 state, and observe again. Input still uses physical SimulatorKit HID. Pixel
 coordinates remain the fallback for inaccessible or purely visual targets.
 
-SimView reads the frontmost accessibility hierarchy host-side through
-CoreSimulator, with no simulator service or separate install. An optional
+When a development-mode React Native target is available on a local Metro
+port, SimView uses `metro-bridge` to project its Fiber tree into visual elements
+with component ancestry, test IDs, measured host bounds, focused route, and
+project-relative source locations. When Metro MCP's daemon is already running,
+SimView reuses its loopback CDP multiplexer instead of competing for Hermes'
+debugger connection; Metro MCP itself is not required. SimView never
+starts Metro, serializes component props or navigation params, or attaches an
+ambiguous target to a Simulator.
+Without a matching target it atomically falls back to the frontmost
+accessibility hierarchy read host-side through CoreSimulator. An optional
 bundled UIKit probe can explicitly relaunch one third-party app to add concrete
 view class, hit-test, controller, window, and scene context.
 
@@ -143,13 +163,14 @@ durations/timeouts use millisecond-bearing options. See
 [docs/protocol.md](docs/protocol.md) for the wire contract.
 
 Point annotations remain in memory for the current session. **Send to Chat**
-sends an implementation prompt, the exact frozen canvas, screen-level route or
-view-controller context, and then each concise annotation/context block followed
-by its element crop. Images are standard MCP
-image content blocks when the host advertises image-message support; otherwise
-SimView sends the prompt and annotations as text. The handoff tells the agent to
-implement the saved feedback in the current project without opening another
-SimView review. No review files are written. Annotations are
+saves the exact frozen canvas and element crops as private PNGs in a
+session-owned temporary directory, then sends an implementation prompt, their
+absolute paths, frame-scoped React Native screen/route or UIKit view-controller
+context, and each concise annotation/context block. This avoids relying on host
+image-message support while keeping the images available to the local agent.
+The handoff tells the agent to implement the saved feedback in the current
+project without opening another SimView review. Temporary review images are
+removed when the session closes. Annotations are
 isolated by review and Simulator UDID, survive switching away and back during
 that live review, and are deleted when its MCP bridge closes. Entering
 **Annotate** freezes the visible frame and returning to **Interact** resumes the

@@ -116,6 +116,16 @@ Accessibility selectors must include at least one of `ref`, `identifier`,
 inspection exposes `probe.target` so callers can see the currently selected
 bundle before requesting context or changing it.
 
+At the MCP layer, `get_element_tree` and its app-only alias return a versioned
+element snapshot plus frame-scoped screen context. The snapshot source is
+`react-native-fiber` when a matching local Metro/Hermes development target can
+be inspected, otherwise `core-simulator-ax`. React Native nodes use
+generation-scoped `rn:<ordinal>` references and may include component ancestry,
+host type, test ID, visible text, measured bounds, and a project-relative source
+location. AX results from this unified layer include a bounded Metro fallback
+reason. The native protocol, CLI `ax-tree`, and `get_accessibility_tree` remain
+AX-only.
+
 `health.get` is a diagnostic response. It reports server status, native PID,
 instance ID, configured UDID, selected device, capture state, idle deadline,
 capabilities, authenticated client counts (including counts by codec), and

@@ -1,3 +1,4 @@
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -14,6 +15,13 @@ import {
   accessibilitySnapshotSchema,
   annotationContextSchema,
   annotationSchema,
+  ELEMENT_TREE_PAGE_RAW_BYTES,
+  ELEMENT_TREE_TRANSFER_MAX_BYTES,
+  type ElementTreeOutput,
+  type ElementTreePage,
+  elementSnapshotSchema,
+  elementTreeOutputSchema,
+  elementTreePageSchema,
   inspectPointOutputSchema,
   jsonObjectSchema,
   jsonValueSchema,
@@ -22,6 +30,9 @@ import {
   relayInputSchema,
   type SessionState,
   SIMVIEW_VERSION,
+  saveReviewImagesInputSchema,
+  saveReviewImagesOutputSchema,
+  screenContextSchema,
   sessionStateSchema,
   simulatorListSchema,
   uiContextSchema,
@@ -32,6 +43,7 @@ import { inlineAppModule } from "./app-html";
 import { SimViewSession } from "./session";
 
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? SIMVIEW_VERSION;
+const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
 
 function resourceMetadata(reviewId: string) {
   const resourceUri = `ui://simview/${VERSION}/reviews/${reviewId}/preview.html`;
@@ -54,6 +66,62 @@ function resourceMetadata(reviewId: string) {
 }
 
 type ResourceMetadata = ReturnType<typeof resourceMetadata>;
+type ElementTreePageCache = {
+  transferId: string;
+  deviceUdid: string | undefined;
+  connectionGeneration: number;
+  expiresAt: number;
+  bytes: Buffer;
+  sha256: string;
+  cursors: string[];
+};
+
+const fallbackMessages = {
+  "metro-target-unavailable": "No matching React Native Metro target was found.",
+  "metro-fiber-unavailable": "The matching React Native target exposed no Fiber root.",
+  "metro-inspection-failed": "React Native inspection failed; retrying can reconnect Hermes.",
+} as const;
+
+function compactElementTree(result: ElementTreeOutput): string {
+  const context = result.screenContext;
+  const summary =
+    context.kind === "react-native"
+      ? [
+          `source=react-native-fiber renderer=${context.renderer}`,
+          context.navigationPath?.length
+            ? `screen=${context.navigationPath.join(" > ")}`
+            : context.route
+              ? `screen=${context.route}`
+              : undefined,
+          context.screenComponent ? `component=${context.screenComponent}` : undefined,
+        ]
+          .filter(Boolean)
+          .join(" ")
+      : `source=core-simulator-ax${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
+  const fallback = result.fallback ? fallbackMessages[result.fallback.reason] : undefined;
+  return [summary, fallback, compactAccessibilityTree(result.snapshot)].filter(Boolean).join("\n");
+}
+
+function elementTreePage(cache: ElementTreePageCache, pageIndex: number): ElementTreePage {
+  const pageCount = Math.ceil(cache.bytes.byteLength / ELEMENT_TREE_PAGE_RAW_BYTES);
+  if (pageIndex < 0 || pageIndex >= pageCount) {
+    throw new Error("Element tree page cursor is invalid or expired");
+  }
+  const start = pageIndex * ELEMENT_TREE_PAGE_RAW_BYTES;
+  const chunk = cache.bytes.subarray(start, start + ELEMENT_TREE_PAGE_RAW_BYTES);
+  return {
+    schemaVersion: 1 as const,
+    transferId: cache.transferId,
+    encoding: "base64-json",
+    pageIndex,
+    pageCount,
+    chunk: chunk.toString("base64"),
+    chunkBytes: chunk.byteLength,
+    totalBytes: cache.bytes.byteLength,
+    sha256: cache.sha256,
+    ...(pageIndex + 1 < pageCount ? { nextCursor: cache.cursors[pageIndex + 1] } : {}),
+  };
+}
 
 const geometry = z.object({
   kind: z.literal("point"),
@@ -87,8 +155,12 @@ const observeOutputSchema = z.object({
   frameId: z.string(),
   frameCapturedAt: z.string(),
   snapshot: accessibilitySnapshotSchema,
+  elements: elementSnapshotSchema,
+  screenContext: screenContextSchema,
   accessibilityCapturedAt: z.string(),
+  elementsCapturedAt: z.string(),
   captureDeltaMs: z.number().nonnegative(),
+  fallback: elementTreeOutputSchema.shape.fallback,
 });
 
 export function createServer(session = new SimViewSession()): McpServer {
@@ -325,6 +397,78 @@ function registerAccessibilityTools(
     const snapshot = await session.accessibilitySnapshot(scope, maxNodes);
     return toolResult(compactAccessibilityTree(snapshot), snapshot);
   };
+  const getElementTree = async (scope: "interactive" | "visible" | "full", maxNodes: number) => {
+    const result = await session.elementSnapshot(scope, maxNodes);
+    return toolResult(compactElementTree(result), result);
+  };
+  let pageCache: ElementTreePageCache | undefined;
+  server.registerTool(
+    "app_get_element_tree_page",
+    {
+      title: "Get preview element tree page",
+      description:
+        "Read one bounded page of the React Native Fiber or accessibility hierarchy for the open SimView preview.",
+      inputSchema: {
+        action: z.enum(["start", "continue"]),
+        source: z.enum(["elements", "accessibility"]).optional(),
+        scope: z.enum(["interactive", "visible", "full"]).optional(),
+        maxNodes: z.number().int().min(1).max(5_000).optional(),
+        cursor: z.string().max(128).optional(),
+      },
+      outputSchema: elementTreePageSchema,
+      _meta: metadata.appOnly,
+    },
+    async ({ action, source, scope, maxNodes, cursor }) => {
+      let pageIndex = 0;
+      if (action === "continue") {
+        if (!cursor || source || scope || maxNodes !== undefined) {
+          throw new Error("Continuing an element tree transfer requires only its cursor");
+        }
+        if (
+          !pageCache ||
+          Date.now() >= pageCache.expiresAt ||
+          pageCache.deviceUdid !== session.device?.udid ||
+          pageCache.connectionGeneration !== session.connectionGeneration
+        ) {
+          pageCache = undefined;
+          throw new Error("Element tree page cursor is invalid or expired");
+        }
+        pageIndex = pageCache.cursors.indexOf(cursor);
+        if (pageIndex <= 0) throw new Error("Element tree page cursor is invalid or expired");
+      } else {
+        if (cursor) throw new Error("Starting an element tree transfer does not accept a cursor");
+        const captureScope = scope ?? "full";
+        const nodeLimit = maxNodes ?? 1_200;
+        const result =
+          source === "accessibility"
+            ? await session.accessibilityElementSnapshot(captureScope, nodeLimit)
+            : await session.elementSnapshot(captureScope, nodeLimit);
+        const validated = elementTreeOutputSchema.parse(result);
+        const bytes = Buffer.from(JSON.stringify(validated), "utf8");
+        if (bytes.byteLength > ELEMENT_TREE_TRANSFER_MAX_BYTES) {
+          throw new Error(
+            `Element tree is ${bytes.byteLength} bytes; the preview limit is ${ELEMENT_TREE_TRANSFER_MAX_BYTES}`,
+          );
+        }
+        const pageCount = Math.ceil(bytes.byteLength / ELEMENT_TREE_PAGE_RAW_BYTES);
+        pageCache = {
+          transferId: randomUUID(),
+          deviceUdid: session.device?.udid,
+          connectionGeneration: session.connectionGeneration,
+          expiresAt: Date.now() + ELEMENT_TREE_TRANSFER_TTL_MS,
+          bytes,
+          sha256: createHash("sha256").update(bytes).digest("hex"),
+          cursors: Array.from({ length: pageCount }, () => randomBytes(32).toString("base64url")),
+        };
+      }
+      if (!pageCache) throw new Error("Element tree page cache is unavailable");
+      const page = elementTreePage(pageCache, pageIndex);
+      return toolResult(
+        `Element tree transfer page ${page.pageIndex + 1} of ${page.pageCount}.`,
+        page,
+      );
+    },
+  );
   const tapElement = async (selector: unknown) => {
     const parsedSelector = accessibilitySelectorSchema.parse(selector);
     const result = await session.findElements(parsedSelector);
@@ -382,7 +526,7 @@ function registerAccessibilityTools(
     {
       title: "Observe screen",
       description:
-        "Capture the simulator as a PNG and return a compact interactive accessibility tree. Use element selectors for navigation when possible.",
+        "Capture the simulator as a PNG and return the React Native Fiber tree when available, otherwise the accessibility tree. Use element selectors for navigation when possible.",
       inputSchema: {},
       outputSchema: observeOutputSchema,
     },
@@ -390,7 +534,9 @@ function registerAccessibilityTools(
       const frameStarted = new Date();
       const screenshot = await session.screenshot();
       const frameCapturedAt = new Date();
-      const snapshot = await session.accessibilitySnapshot("interactive");
+      const result = await session.elementSnapshot("interactive");
+      const snapshot = session.lastAccessibility;
+      if (!snapshot) throw new Error("Accessibility fallback was not captured");
       const accessibilityCapturedAt = new Date(snapshot.capturedAt);
       return {
         content: [
@@ -401,18 +547,54 @@ function registerAccessibilityTools(
           },
           {
             type: "text" as const,
-            text: compactAccessibilityTree(snapshot),
+            text: compactElementTree(result),
           },
         ],
         structuredContent: {
           frameId: screenshot.frameId,
           frameCapturedAt: frameCapturedAt.toISOString(),
           snapshot,
+          elements: result.snapshot,
+          screenContext: result.screenContext,
           accessibilityCapturedAt: snapshot.capturedAt,
+          elementsCapturedAt: result.snapshot.capturedAt,
           captureDeltaMs: Math.max(0, accessibilityCapturedAt.getTime() - frameStarted.getTime()),
+          fallback: result.fallback,
         },
       };
     },
+  );
+
+  server.registerTool(
+    "get_element_tree",
+    {
+      title: "Get element tree",
+      description:
+        "Read the React Native visual Fiber tree when a matching Metro target is available, otherwise return the Simulator accessibility tree.",
+      inputSchema: {
+        scope: z.enum(["interactive", "visible", "full"]).default("interactive"),
+        maxNodes: z.number().int().min(1).max(1_200).default(1_200),
+      },
+      outputSchema: elementTreeOutputSchema,
+      _meta: metadata.modelOnly,
+    },
+    ({ scope, maxNodes }) => getElementTree(scope, maxNodes),
+  );
+
+  server.registerTool(
+    "app_get_element_tree",
+    {
+      title: "Get preview element tree",
+      description:
+        "Read the React Native Fiber or accessibility hierarchy for the open SimView preview.",
+      inputSchema: {
+        scope: z.enum(["interactive", "visible", "full"]).default("interactive"),
+        maxNodes: z.number().int().min(1).max(1_200).default(1_200),
+      },
+      outputSchema: elementTreeOutputSchema,
+      _meta: metadata.appOnly,
+    },
+    ({ scope, maxNodes }) => getElementTree(scope, maxNodes),
   );
 
   server.registerTool(
@@ -451,7 +633,7 @@ function registerAccessibilityTools(
     {
       title: "Find elements",
       description:
-        "Find accessible elements by identifier, role, name, value, or a generation-scoped ref.",
+        "Find React Native or accessible elements by identifier, role, name, value, or a generation-scoped ref.",
       inputSchema: selectorSchema,
       outputSchema: findElementsOutputSchema,
     },
@@ -466,7 +648,7 @@ function registerAccessibilityTools(
     {
       title: "Tap element",
       description:
-        "Re-resolve one accessible element, validate it, and physically tap its visible center through simulator HID.",
+        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through simulator HID.",
       inputSchema: selectorSchema,
       outputSchema: z.object({
         selector: accessibilitySelectorSchema,
@@ -694,6 +876,22 @@ function registerAppBridgeTools(
   session: SimViewSession,
   metadata: ResourceMetadata,
 ): void {
+  server.registerTool(
+    "save_review_images",
+    {
+      title: "Save review images",
+      description:
+        "Persist the frozen frame and annotation crops in a session-owned temporary directory.",
+      inputSchema: saveReviewImagesInputSchema,
+      outputSchema: saveReviewImagesOutputSchema,
+      _meta: metadata.appOnly,
+    },
+    async (input) => ({
+      content: [],
+      structuredContent: await session.saveReviewImages(input),
+    }),
+  );
+
   server.registerTool(
     "get_preview_packets",
     {

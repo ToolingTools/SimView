@@ -43,11 +43,11 @@ flowchart LR
 ```
 
 The native token is supplied through a launch-time file descriptor and is not
-placed in the process list. The browser relay has a separate random token. HTTP
-requests use `Authorization: Bearer`; WebSockets authenticate in their first
-message and are rejected after a short handshake deadline. Capability tokens
-must never be logged or returned in ordinary MCP structured state. The CLI only
-prints a browser URL when the caller explicitly requests `--no-open` or
+placed in the process list. The standalone browser relay has a separate random
+token. HTTP requests use `Authorization: Bearer`; WebSockets authenticate in
+their first message and are rejected after a short handshake deadline.
+Capability tokens must never be logged or returned in ordinary MCP structured
+state. The CLI only prints a browser URL when the caller explicitly requests `--no-open` or
 `--print-url`.
 
 The process model has two layers:
@@ -62,6 +62,34 @@ The process model has two layers:
   annotation tools explicitly omit a resource URI so their results cannot
   instantiate or replace the preview. The mounted app uses resource-scoped,
   app-only aliases for its internal device and inspection calls.
+- Embedded video uses bounded, sequenced `get_preview_packets` responses over
+  the host bridge. Full React Native or AX element output is validated and
+  serialized once, split into bounded UTF-8 byte chunks, and reassembled and
+  validated in the app. A priority gate pauses the short video poll while the
+  element transfer is active. This is the primary embedded transport because
+  Codex cannot open insecure localhost HTTP/WebSocket origins and a local TLS
+  certificate would impose user setup. A second MCP resource would still use
+  the same host bridge rather than creating a separate network lane.
+- Element inspection first captures the native AX snapshot as a safe fallback,
+  then optionally discovers loopback Metro targets through `metro-bridge`. A
+  target must match the selected Simulator by logical device ID, device name,
+  or be the sole unambiguous target. React Native inspection returns only a
+  bounded visual Fiber projection and whitelisted semantic fields; component
+  props, route params, raw Fiber objects, external paths, and dependencies are
+  not returned. If Metro MCP owns the older single-client Hermes connection,
+  SimView validates and reuses its loopback CDP multiplexer record; newer
+  multi-debugger targets connect directly. Any discovery, CDP, measurement, or
+  validation failure returns the complete AX snapshot with a bounded fallback
+  reason instead of a partially merged tree. Every CDP evaluation is
+  deadline-bounded so a stale Hermes session cannot leave the preview request
+  pending indefinitely. Source paths are reduced relative to an explicit
+  `SIMVIEW_PROJECT_ROOT` or the nearest package root inferred from symbolicated
+  app sources; absolute paths and dependency sources are never returned.
+- **Send to Chat** persists the frozen frame and each annotation crop under a
+  newly created mode-0700 directory in the system temporary directory. PNG
+  files use mode 0600, only generated filenames are accepted, and the handoff
+  exposes their absolute paths as text. The session tracks and removes every
+  directory it creates when its MCP bridge closes.
 - `SimViewClient.acquire({ udid, codec })` shares one detached native backend
   per Simulator UDID and compatible protocol/version/binary identity. The
   backend record lives under `${tmpdir()}/simview-daemons/<uid>/<instanceId>`;
@@ -87,9 +115,9 @@ Every native method is represented in the `SimViewMethodMap` in
 `packages/contracts/src/protocol.ts`. The client validates parameters before
 encoding a request and validates the selected result schema after decoding a
 response. MCP tools expose `outputSchema` and parse structured results before
-returning them. Browser relay input, relay authentication, annotations,
-accessibility selectors, probe status/target, and recursive JSON values have
-dedicated schemas.
+returning them. Browser relay input, relay authentication, annotations, unified
+element and screen context, accessibility selectors, probe status/target, and
+recursive JSON values have dedicated schemas.
 
 Swift mirrors the wire protocol with explicit `Codable` request/result handling
 and a recursive JSON representation. Shared fixtures under `tests/fixtures`

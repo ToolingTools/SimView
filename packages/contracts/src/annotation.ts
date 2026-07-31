@@ -38,8 +38,21 @@ export const annotationContextSchema = z.object({
     .object({
       route: z.string().optional(),
       component: z.string().optional(),
+      componentPath: z.array(z.string()).optional(),
+      hostComponent: z.string().optional(),
       testID: z.string().optional(),
       source: z.string().optional(),
+      sourceLocation: z
+        .object({
+          file: z.string(),
+          line: z.number().int().positive().optional(),
+          column: z.number().int().positive().optional(),
+        })
+        .optional(),
+      accessibilityLabel: z.string().optional(),
+      role: z.string().optional(),
+      text: z.string().optional(),
+      frame: normalizedRectSchema.optional(),
     })
     .optional(),
 });

@@ -927,7 +927,7 @@
         display: flex;
         align-items: center;
         gap: 3px;
-        padding: 2px 7px 2px calc(4px + var(--tree-depth) * 15px);
+        padding: 2px 7px 2px min(calc(4px + var(--tree-depth) * 15px), 64px);
         border: 0;
         border-radius: 6px;
         text-align: left;

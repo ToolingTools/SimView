@@ -46,4 +46,37 @@ describe("accessibility helpers", () => {
     expect(compact).toContain('AXButton "Continue" id=continue');
     expect(compact).toContain("[0.047,0.858 0.907x0.064]");
   });
+
+  test("includes React Native component and project source context", () => {
+    const text = compactAccessibilityTree({
+      ...snapshot,
+      source: "react-native-fiber",
+      root: {
+        ...snapshot.root,
+        children: [
+          {
+            ref: "rn:1",
+            role: "button",
+            label: "Open inbox",
+            component: "InboxButton",
+            hostComponent: "RCTView",
+            testID: "inbox-button",
+            sourceLocation: { file: "src/InboxButton.tsx", line: 24 },
+          },
+        ],
+      },
+      metro: {
+        host: "127.0.0.1",
+        port: 8081,
+        targetId: "target-1",
+        targetTitle: "Hermes React Native",
+        renderer: "paper",
+      },
+    });
+
+    expect(text).toContain("id=inbox-button");
+    expect(text).toContain("component=InboxButton");
+    expect(text).toContain("host=RCTView");
+    expect(text).toContain("source=src/InboxButton.tsx:24");
+  });
 });

@@ -4,6 +4,7 @@ import { parseArgs } from "node:util";
 import {
   compactAccessibilityTree,
   daemonStatuses,
+  type ElementTreeOutput,
   FrameKind,
   pruneDaemons,
   SimViewClient,
@@ -36,6 +37,7 @@ const commandOptions: Record<string, Record<string, OptionDefinition>> = {
     output: { type: "string", short: "o" },
   },
   tree: { ...commonOptions, scope: { type: "string" } },
+  "ax-tree": { ...commonOptions, scope: { type: "string" } },
   find: selectorOptions(true),
   "inspect-point": {
     ...commonOptions,
@@ -125,6 +127,19 @@ async function withClient<T>(
   }
 }
 
+async function withSession<T>(
+  udid: string | undefined,
+  body: (session: SimViewSession) => Promise<T>,
+): Promise<T> {
+  const session = new SimViewSession();
+  try {
+    await session.open(udid, { startRelay: false });
+    return await body(session);
+  } finally {
+    await session.close();
+  }
+}
+
 export async function run(argv = process.argv): Promise<void> {
   const { command, positional, options } = parse(argv);
   const udid = stringOption(options, "udid", false);
@@ -206,21 +221,39 @@ export async function run(argv = process.argv): Promise<void> {
       });
       break;
     }
-    case "tree":
-    case "observe": {
+    case "ax-tree": {
       await withClient(udid, async (client) => {
         const snapshot = await client.request("accessibility.snapshot", {
           udid,
           scope: scopeOption(options),
         });
-        if (command === "observe" && typeof options.output === "string") {
-          await client.request("capture.start", { udid });
-          const bytes = nextFrame(client, FrameKind.PngScreenshot);
-          await client.request("capture.screenshot", {});
-          await writeFile(options.output, await bytes);
-        }
-        console.log(
+        await writeOutput(
           options.json === true ? JSON.stringify(snapshot) : compactAccessibilityTree(snapshot),
+        );
+      });
+      break;
+    }
+    case "tree":
+    case "observe": {
+      await withSession(udid, async (session) => {
+        let screenshot:
+          | { output: string; frameId: string; width: number; height: number }
+          | undefined;
+        if (command === "observe" && typeof options.output === "string") {
+          const captured = await session.screenshot();
+          await writeFile(options.output, captured.bytes);
+          screenshot = {
+            output: options.output,
+            frameId: captured.frameId,
+            width: captured.width,
+            height: captured.height,
+          };
+        }
+        const result = await session.elementSnapshot(scopeOption(options));
+        await writeOutput(
+          options.json === true
+            ? JSON.stringify({ ...result, ...(screenshot ? { screenshot } : {}) })
+            : formatElementTree(result),
         );
       });
       break;
@@ -435,6 +468,34 @@ function printJson(value: unknown, compact: boolean): void {
   console.log(JSON.stringify(value, null, compact ? 0 : 2));
 }
 
+async function writeOutput(value: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    process.stdout.write(`${value}\n`, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
+
+export function formatElementTree(result: ElementTreeOutput): string {
+  const context = result.screenContext;
+  const summary =
+    context.kind === "react-native"
+      ? [
+          `source=react-native-fiber renderer=${context.renderer}`,
+          context.navigationPath?.length
+            ? `screen=${context.navigationPath.join(" > ")}`
+            : context.route
+              ? `screen=${context.route}`
+              : undefined,
+          context.screenComponent ? `component=${context.screenComponent}` : undefined,
+        ]
+          .filter(Boolean)
+          .join(" ")
+      : `source=core-simulator-ax${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
+  return `${summary}\n${compactAccessibilityTree(result.snapshot)}`;
+}
+
 function helpText(): string {
   return `SimView ${SIMVIEW_VERSION}
 
@@ -446,6 +507,7 @@ Usage:
   simview screenshot --output <path> [--udid <udid>]
   simview observe [--scope interactive|visible|full] [--output <png>] [--json]
   simview tree [--scope interactive|visible|full] [--json]
+  simview ax-tree [--scope interactive|visible|full] [--json]
   simview find [--id <identifier>] [--role <role>] [--name <name>]
   simview inspect-point --x <0..1> --y <0..1>
   simview tap-element [--id <identifier>] [--role <role>] [--name <name>]

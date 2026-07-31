@@ -28,8 +28,8 @@ export const daemonRecordSchema = z.object({
   udid: z.string().min(1),
   socketPath: z.string().min(1),
   token: z.string().length(64),
-  protocolVersion: z.literal(PROTOCOL_VERSION),
-  simviewVersion: z.literal(SIMVIEW_VERSION),
+  protocolVersion: z.number().int().positive(),
+  simviewVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
   binarySha256: z.string().regex(/^[a-f0-9]{64}$/),
   instanceId: z.string().regex(/^[a-f0-9]{20}$/),
   startedAt: z.string().datetime(),
@@ -202,6 +202,8 @@ async function validatedRecord(
   }
   if (
     record.udid !== expected.udid ||
+    record.protocolVersion !== PROTOCOL_VERSION ||
+    record.simviewVersion !== SIMVIEW_VERSION ||
     record.binarySha256 !== expected.binarySha256 ||
     record.instanceId !== expected.instanceId
   ) {

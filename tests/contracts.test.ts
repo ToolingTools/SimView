@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   accessibilitySelectorSchema,
+  ELEMENT_TREE_PAGE_RAW_BYTES,
+  elementTreeOutputSchema,
+  elementTreePageSchema,
   inspectPointOutputSchema,
   methodSchemas,
   parseMethodParams,
@@ -69,6 +72,36 @@ describe("shared protocol contracts", () => {
     });
   });
 
+  test("bounds element tree chunks by UTF-8 bytes", () => {
+    const chunk = Buffer.alloc(ELEMENT_TREE_PAGE_RAW_BYTES).toString("base64");
+    expect(
+      elementTreePageSchema.safeParse({
+        schemaVersion: 1,
+        transferId: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
+        encoding: "base64-json",
+        pageIndex: 0,
+        pageCount: 1,
+        chunk,
+        chunkBytes: ELEMENT_TREE_PAGE_RAW_BYTES,
+        totalBytes: ELEMENT_TREE_PAGE_RAW_BYTES,
+        sha256: "a".repeat(64),
+      }).success,
+    ).toBe(true);
+    expect(
+      elementTreePageSchema.safeParse({
+        schemaVersion: 1,
+        transferId: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
+        encoding: "base64-json",
+        pageIndex: 0,
+        pageCount: 1,
+        chunk: `${chunk}AAAA`,
+        chunkBytes: ELEMENT_TREE_PAGE_RAW_BYTES + 3,
+        totalBytes: ELEMENT_TREE_PAGE_RAW_BYTES + 3,
+        sha256: "a".repeat(64),
+      }).success,
+    ).toBe(false);
+  });
+
   test("wraps point inspection as an element instead of mislabeling it as a snapshot", () => {
     const output = inspectPointOutputSchema.parse({
       element: { ref: "node:1", role: "button" },
@@ -81,5 +114,56 @@ describe("shared protocol contracts", () => {
         probe: { bundled: true, connected: false },
       }),
     ).toThrow();
+  });
+
+  test("accepts a React Native Fiber element tree and screen context", () => {
+    expect(
+      elementTreeOutputSchema.safeParse({
+        snapshot: {
+          schemaVersion: 1,
+          snapshotId: "fiber-1",
+          capturedAt: "2026-07-31T12:00:00.000Z",
+          source: "react-native-fiber",
+          scope: "full",
+          screen: { x: 0, y: 0, width: 430, height: 932 },
+          root: {
+            ref: "rn:root",
+            kind: "component",
+            label: "Screen",
+            children: [
+              {
+                ref: "rn:1",
+                kind: "host",
+                component: "InboxButton",
+                hostComponent: "View",
+                testID: "inbox-button",
+                sourceLocation: { file: "src/InboxButton.tsx", line: 12 },
+              },
+            ],
+          },
+          stats: { nodeCount: 2, truncated: false },
+          metro: {
+            host: "127.0.0.1",
+            port: 8081,
+            targetId: "target-1",
+            targetTitle: "Hermes React Native",
+            renderer: "fabric",
+          },
+        },
+        screenContext: {
+          schemaVersion: 1,
+          kind: "react-native",
+          capturedAt: "2026-07-31T12:00:00.000Z",
+          frameId: "frame-1",
+          renderer: "fabric",
+          target: "Hermes React Native",
+          route: "Inbox",
+          navigationPath: ["Root", "Inbox"],
+          screenComponent: "InboxScreen",
+          sourceLocation: { file: "src/InboxScreen.tsx", line: 8 },
+          confidence: "exact",
+        },
+      }).success,
+    ).toBe(true);
   });
 });

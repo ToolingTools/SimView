@@ -15,8 +15,11 @@ Simulator.
    preview, then call `open_simview` with the same UDID; its already-connected
    initial state requests fullscreen immediately. Otherwise, use the connected
    session without opening the preview.
-2. Call `observe_screen` to receive one PNG and a compact accessibility tree.
-   Prefer identifier, role, and accessible name selectors over coordinates.
+2. Call `observe_screen` to receive one PNG and a compact element tree. When a
+   matching development-mode React Native target is available through Metro,
+   SimView uses its visual Fiber tree and screen/route context; otherwise it
+   uses the Simulator accessibility tree. Prefer identifier, role, and
+   accessible name selectors over coordinates.
 3. Use `tap_element` for semantic targets. It re-resolves the target and sends a
    physical HID tap. Use `wait_for_element` or observe again to verify outcome;
    input acknowledgement is not proof that navigation completed.
@@ -25,12 +28,13 @@ Simulator.
 5. Use `inspect_point` to attach semantic context to a coordinate. Enable the
    UIKit probe only when class, controller, window, or scene context is needed
    and relaunching an explicitly selected third-party app is acceptable.
-6. If Metro MCP is connected, include its route, component, and testID context,
-   but label that context as optional and never block on it.
+6. Treat React Native route, component, testID, and source context as optional;
+   never block on Metro or require Metro MCP itself to be installed.
 7. Add point annotations at the exact mismatch coordinates. Keep comments brief
    and specific.
-8. Annotations remain session-local. Use **Send to Chat** to capture the current
-   PNG and send it with the compact coordinate comments.
+8. Annotations remain session-local. Use **Send to Chat** to save the current
+   PNG and crops in a private temporary directory and send their paths with the
+   compact coordinate comments.
 
 ## Implementing annotations sent to chat
 

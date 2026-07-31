@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "simview",
   "display_name": "SimView",
-  "version": "0.1.0",
+  "version": "0.1.5",
   "description": "Control and review a local iOS Simulator.",
   "long_description": "A local-only iOS Simulator preview with physical input and review annotations.",
   "author": {

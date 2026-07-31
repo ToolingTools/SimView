@@ -5,6 +5,11 @@ import {
   type AnnotationContext,
   type AnnotationGeometry,
   annotationSchema,
+  type ElementSnapshot,
+  type ElementTreeOutput,
+  type ElementTreePage,
+  elementTreeOutputSchema,
+  type ScreenContext,
   type SessionState,
   sessionStateSchema,
   type UiContext,
@@ -12,14 +17,90 @@ import {
 
 export type Point = AnnotationGeometry;
 export type Rect = { x: number; y: number; width: number; height: number };
-export type AnnotationMessageContent =
-  | { type: "image"; data: string; mimeType: "image/png" }
-  | { type: "text"; text: string };
+export type AnnotationMessageContent = { type: "text"; text: string };
 export type AnnotationMessageItem = {
   text: string;
   context: readonly string[];
-  crop?: string | undefined;
+  screenshotPath: string;
 };
+
+export class PreviewBridgeGate {
+  #priorityRequests = 0;
+
+  get priorityPending(): boolean {
+    return this.#priorityRequests > 0;
+  }
+
+  beginPriority(): () => void {
+    this.#priorityRequests += 1;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.#priorityRequests = Math.max(0, this.#priorityRequests - 1);
+    };
+  }
+}
+
+export async function assembleElementTreePages(
+  pages: readonly ElementTreePage[],
+): Promise<ElementTreeOutput> {
+  const first = pages[0];
+  if (!first) throw new Error("Element tree response contained no pages");
+  if (pages.at(-1)?.nextCursor)
+    throw new Error("Element tree response ended before the final page");
+
+  if (pages.length !== first.pageCount) {
+    throw new Error(`Element tree response contained ${pages.length} of ${first.pageCount} pages`);
+  }
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+  for (const [pageIndex, page] of pages.entries()) {
+    if (
+      page.transferId !== first.transferId ||
+      page.encoding !== first.encoding ||
+      page.pageIndex !== pageIndex ||
+      page.pageCount !== first.pageCount ||
+      page.totalBytes !== first.totalBytes ||
+      page.sha256 !== first.sha256
+    ) {
+      throw new Error("Element tree pages are inconsistent or out of order");
+    }
+    const chunk = decodeBase64Bytes(page.chunk);
+    if (chunk.byteLength !== page.chunkBytes) {
+      throw new Error(`Element tree page ${pageIndex + 1} has an invalid byte length`);
+    }
+    chunks.push(chunk);
+    receivedBytes += chunk.byteLength;
+  }
+  if (receivedBytes !== first.totalBytes) {
+    throw new Error(
+      `Element tree response contained ${receivedBytes} of ${first.totalBytes} bytes`,
+    );
+  }
+  const serialized = new Uint8Array(receivedBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    serialized.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  const digest = await crypto.subtle.digest("SHA-256", serialized);
+  const sha256 = [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+  if (sha256 !== first.sha256) throw new Error("Element tree response failed its integrity check");
+  const json = new TextDecoder("utf-8", { fatal: true }).decode(serialized);
+  return elementTreeOutputSchema.parse(JSON.parse(json));
+}
+
+function decodeBase64Bytes(value: string): Uint8Array {
+  const binary = atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+}
 
 export const ANNOTATION_IMPLEMENTATION_PROMPT = `Implement all clear UI changes requested in the SimView annotations below in the current project.
 
@@ -35,7 +116,10 @@ export function annotationMessageContext(annotation: Annotation): string[] {
   const route = metro?.route ?? annotation.route;
   const component = metro?.component ?? annotation.component?.label;
   const testID = metro?.testID ?? annotation.component?.testID;
-  const source = metro?.source ?? annotation.component?.source;
+  const sourceLocation = metro?.sourceLocation;
+  const source = sourceLocation
+    ? formatSourceLocation(sourceLocation)
+    : (metro?.source ?? annotation.component?.source);
   return [
     object && `Object: ${object.replace(/^AX/, "")}`,
     `Coordinate: x=${percent(annotation.geometry.x)}, y=${percent(annotation.geometry.y)}`,
@@ -46,17 +130,19 @@ export function annotationMessageContext(annotation: Annotation): string[] {
     accessibility?.path?.length && `Hierarchy: ${accessibility.path.join(" › ")}`,
     route && `Route: ${route}`,
     component && `Component: ${component}`,
+    metro?.componentPath?.length && `Component path: ${metro.componentPath.join(" › ")}`,
+    metro?.hostComponent && `Host: ${metro.hostComponent}`,
     testID && testID !== accessibility?.identifier && `Test ID: ${testID}`,
     source && `Source: ${source}`,
     native?.viewClass && native.viewClass !== object && `View: ${native.viewClass}`,
   ].filter((value): value is string => Boolean(value));
 }
 
-export function annotationMessageScreenContext(
+export function createUIKitScreenContext(
   state: Pick<SessionState, "device" | "frameId" | "route" | "component">,
   uiContext: UiContext | undefined,
   annotations: readonly Annotation[],
-): string[] {
+): ScreenContext {
   const activeScene =
     uiContext?.context?.scenes?.find((scene) => scene.activationState === "foregroundActive") ??
     uiContext?.context?.scenes?.[0];
@@ -73,34 +159,78 @@ export function annotationMessageScreenContext(
         : undefined;
   const bundleId = uiContext?.target?.bundleId ?? uiContext?.status.bundleId;
 
+  return {
+    schemaVersion: 1,
+    kind: "uikit",
+    capturedAt: new Date().toISOString(),
+    frameId: state.frameId ?? "current",
+    simulatorName: state.device?.name,
+    runtime: state.device?.runtime,
+    bundleId,
+    route: state.route,
+    component: state.component?.label,
+    testID: state.component?.testID,
+    source: state.component?.source,
+    controllerPath,
+    windowClass: keyWindow?.className ?? native?.windowClass,
+    sceneDelegate: activeScene?.delegateClass,
+    sceneConfiguration: activeScene?.configurationName,
+  };
+}
+
+export function annotationMessageScreenContext(context: ScreenContext | undefined): string[] {
+  if (!context) return [];
+  if (context.kind === "react-native") {
+    return [
+      context.simulatorName &&
+        `Simulator: ${context.simulatorName}${context.runtime ? ` · ${formatRuntime(context.runtime)}` : ""}`,
+      context.bundleId && `App: ${context.bundleId}`,
+      context.route && `Route: ${context.route}`,
+      context.navigationPath?.length && `Navigation: ${context.navigationPath.join(" › ")}`,
+      context.screenComponent && `Screen component: ${context.screenComponent}`,
+      context.componentPath?.length && `Component path: ${context.componentPath.join(" › ")}`,
+      context.testID && `Screen test ID: ${context.testID}`,
+      context.sourceLocation && `Screen source: ${formatSourceLocation(context.sourceLocation)}`,
+      context.viewport &&
+        `Viewport: ${Math.round(context.viewport.width)} × ${Math.round(context.viewport.height)}${context.orientation ? ` · ${context.orientation}` : ""}`,
+      `Renderer: ${context.renderer}`,
+      context.confidence !== "exact" && `Screen match: ${context.confidence}`,
+      `Frame: ${context.frameId}`,
+    ].filter((value): value is string => Boolean(value));
+  }
   return [
-    state.device && `Simulator: ${state.device.name} · ${formatRuntime(state.device.runtime)}`,
-    bundleId && `App: ${bundleId}`,
-    controllerPath?.length && `Screen: ${controllerPath.join(" › ")}`,
-    state.route && `Route: ${state.route}`,
-    state.component?.label && `Component: ${state.component.label}`,
-    state.component?.testID && `Test ID: ${state.component.testID}`,
-    state.component?.source && `Source: ${state.component.source}`,
-    (keyWindow?.className ?? native?.windowClass) &&
-      `Window: ${keyWindow?.className ?? native?.windowClass}`,
-    activeScene?.delegateClass && `Scene delegate: ${activeScene.delegateClass}`,
-    activeScene?.configurationName && `Scene configuration: ${activeScene.configurationName}`,
-    state.frameId && `Frame: ${state.frameId}`,
+    context.simulatorName &&
+      `Simulator: ${context.simulatorName}${context.runtime ? ` · ${formatRuntime(context.runtime)}` : ""}`,
+    context.bundleId && `App: ${context.bundleId}`,
+    context.controllerPath?.length && `Screen: ${context.controllerPath.join(" › ")}`,
+    context.route && `Route: ${context.route}`,
+    context.component && `Component: ${context.component}`,
+    context.testID && `Test ID: ${context.testID}`,
+    context.source && `Source: ${context.source}`,
+    context.windowClass && `Window: ${context.windowClass}`,
+    context.sceneDelegate && `Scene delegate: ${context.sceneDelegate}`,
+    context.sceneConfiguration && `Scene configuration: ${context.sceneConfiguration}`,
+    `Frame: ${context.frameId}`,
   ].filter((value): value is string => Boolean(value));
 }
 
+function formatSourceLocation(location: {
+  file: string;
+  line?: number | undefined;
+  column?: number | undefined;
+}): string {
+  return `${location.file}${location.line ? `:${location.line}${location.column ? `:${location.column}` : ""}` : ""}`;
+}
+
 export function annotationMessageContent(
-  screenshot: string,
+  screenshotPath: string,
   screenContext: readonly string[],
   annotations: readonly AnnotationMessageItem[],
-  includeImages = true,
 ): AnnotationMessageContent[] {
   const content: AnnotationMessageContent[] = [
     { type: "text", text: ANNOTATION_IMPLEMENTATION_PROMPT },
+    { type: "text", text: `Frozen frame screenshot: ${screenshotPath}` },
   ];
-  if (includeImages) {
-    content.push({ type: "image", data: screenshot, mimeType: "image/png" });
-  }
   content.push({
     type: "text",
     text: `## Screen context\n\n${screenContext.length ? screenContext.map((value) => `- ${value}`).join("\n") : "- No screen identifiers were available."}`,
@@ -111,11 +241,8 @@ export function annotationMessageContent(
       : "- No UI identifiers were available.";
     content.push({
       type: "text",
-      text: `${index === 0 ? "## Annotations\n\n" : ""}${index + 1}. Annotation: ${annotation.text}\nContext:\n${context}`,
+      text: `${index === 0 ? "## Annotations\n\n" : ""}${index + 1}. Annotation: ${annotation.text}\nContext:\n${context}\nCropped screenshot: ${annotation.screenshotPath}`,
     });
-    if (includeImages && annotation.crop) {
-      content.push({ type: "image", data: annotation.crop, mimeType: "image/png" });
-    }
   }
   return content;
 }
@@ -185,16 +312,71 @@ export function flattenTree(root: AccessibilityNode): AccessibilityNode[] {
   return result;
 }
 
+export type InspectorTreeRow = {
+  node: AccessibilityNode;
+  depth: number;
+  isRoot: boolean;
+  hasChildren: boolean;
+  ancestorRefs: string[];
+};
+
+export function inspectorTreeRows(
+  root: AccessibilityNode,
+  renderedOnly = false,
+): InspectorTreeRow[] {
+  type Entry = { node: AccessibilityNode; children: Entry[] };
+  const viewport = root.frame?.points;
+  const intersectsViewport = (node: AccessibilityNode) => {
+    const frame = node.frame?.points;
+    if (!frame || frame.width <= 0 || frame.height <= 0) return false;
+    if (!viewport) return true;
+    return (
+      frame.x < viewport.x + viewport.width &&
+      frame.y < viewport.y + viewport.height &&
+      frame.x + frame.width > viewport.x &&
+      frame.y + frame.height > viewport.y
+    );
+  };
+  const build = (node: AccessibilityNode, isRoot: boolean): Entry[] => {
+    if (node.hidden) return [];
+    const children = node.children?.flatMap((child) => build(child, false)) ?? [];
+    if (isRoot || !renderedOnly || (node.kind === "host" && intersectsViewport(node))) {
+      return [{ node, children }];
+    }
+    return children;
+  };
+  const rows: InspectorTreeRow[] = [];
+  const visit = (entry: Entry, depth: number, ancestorRefs: string[]) => {
+    rows.push({
+      node: entry.node,
+      depth,
+      isRoot: depth === 0,
+      hasChildren: entry.children.length > 0,
+      ancestorRefs,
+    });
+    const nextAncestors = [...ancestorRefs, entry.node.ref];
+    entry.children.forEach((child) => {
+      visit(child, depth + 1, nextAncestors);
+    });
+  };
+  build(root, true).forEach((entry) => {
+    visit(entry, 0, []);
+  });
+  return rows;
+}
+
 export function visibleTree(
   root: AccessibilityNode,
   expanded: Set<string>,
   search: string,
-): { node: AccessibilityNode; depth: number; isRoot: boolean }[] {
+  renderedOnly = false,
+): InspectorTreeRow[] {
   const query = search.trim().toLowerCase();
+  const allRows = inspectorTreeRows(root, renderedOnly);
   if (query) {
-    return flattenTree(root)
-      .filter((node) => node !== root && !node.hidden)
-      .filter((node) =>
+    return allRows
+      .filter(({ node }) => node !== root)
+      .filter(({ node }) =>
         [
           node.role,
           node.roleDescription,
@@ -205,19 +387,11 @@ export function visibleTree(
           node.value,
         ].some((value) => value?.toLowerCase().includes(query)),
       )
-      .map((node) => ({ node, depth: 0, isRoot: false }));
+      .map((row) => ({ ...row, depth: 0, isRoot: false, ancestorRefs: [] }));
   }
-  const rows: { node: AccessibilityNode; depth: number; isRoot: boolean }[] = [];
-  const visit = (node: AccessibilityNode, depth: number) => {
-    if (!node.hidden) rows.push({ node, depth, isRoot: node === root });
-    if (expanded.has(node.ref)) {
-      node.children?.forEach((child) => {
-        visit(child, depth + 1);
-      });
-    }
-  };
-  visit(root, 0);
-  return rows;
+  return allRows.filter(({ ancestorRefs }) =>
+    ancestorRefs.every((ancestorRef) => expanded.has(ancestorRef)),
+  );
 }
 
 export function elementName(node: AccessibilityNode): string {
@@ -266,7 +440,8 @@ export function commentableNodeAtPoint(
     });
   };
   visit(root, 0);
-  return matches
+  const renderedHosts = matches.filter((match) => match.node.kind === "host");
+  return (renderedHosts.length ? renderedHosts : matches)
     .filter((match) => match.node !== root)
     .sort((left, right) => {
       const areaDifference = left.area - right.area;
@@ -297,9 +472,24 @@ export function formatFrame(frame?: Rect): string {
 }
 
 export function contextForNode(
-  snapshot: AccessibilitySnapshot,
+  snapshot: AccessibilitySnapshot | ElementSnapshot,
   node: AccessibilityNode,
 ): AnnotationContext {
+  const metro =
+    snapshot.source === "react-native-fiber"
+      ? {
+          route: undefined,
+          component: node.component,
+          componentPath: node.componentPath,
+          hostComponent: node.hostComponent,
+          testID: node.testID ?? node.identifier,
+          sourceLocation: node.sourceLocation,
+          accessibilityLabel: node.label,
+          role: node.role,
+          text: node.text ?? node.value,
+          frame: node.frame?.normalized,
+        }
+      : undefined;
   return {
     capturedAt: snapshot.capturedAt,
     accessibility: {
@@ -315,11 +505,12 @@ export function contextForNode(
       frame: node.frame?.normalized,
       path: elementPath(snapshot.root, node),
     },
+    metro,
   };
 }
 
 export function contextForInspectedNode(
-  snapshot: AccessibilitySnapshot | undefined,
+  snapshot: AccessibilitySnapshot | ElementSnapshot | undefined,
   node: AccessibilityNode,
 ): AnnotationContext {
   if (snapshot) return contextForNode(snapshot, node);

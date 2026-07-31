@@ -44,8 +44,14 @@ describe("shared backend registry contracts", () => {
 
   test("rejects malformed compatibility metadata and path escapes", () => {
     expect(daemonRecordSchema.safeParse({ ...record, binarySha256: "short" }).success).toBe(false);
+    expect(daemonRecordSchema.safeParse({ ...record, simviewVersion: "" }).success).toBe(false);
     expect(isPathInside("/tmp/registry/instance", "/tmp/registry/instance/core.sock")).toBe(true);
     expect(isPathInside("/tmp/registry/instance", "/tmp/registry/other/core.sock")).toBe(false);
+  });
+
+  test("can inspect trusted records from an earlier SimView version", () => {
+    const historical = daemonRecordSchema.parse({ ...record, simviewVersion: "0.1.0" });
+    expect(historical.simviewVersion).toBe("0.1.0");
   });
 
   test("serializes simultaneous starters and keeps the backend alive for remaining clients", async () => {

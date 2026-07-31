@@ -2,15 +2,20 @@ import { App } from "@modelcontextprotocol/ext-apps";
 import {
   type AnnotationContext,
   type AnnotationGeometry,
-  accessibilitySnapshotSchema,
   type AccessibilityNode as ContractAccessibilityNode,
-  type AccessibilitySnapshot as ContractAccessibilitySnapshot,
   type Annotation as ContractAnnotation,
+  type ElementSnapshot as ContractElementSnapshot,
   type DeviceDescription,
+  type ElementFallbackReason,
+  type ElementTreePage,
+  elementTreeOutputSchema,
+  elementTreePageSchema,
   inspectPointOutputSchema,
   previewPacketBatchSchema,
+  type ScreenContext,
   type SessionState,
   SIMVIEW_VERSION,
+  saveReviewImagesOutputSchema,
   sessionStateSchema,
   simulatorListSchema,
   type UiContext,
@@ -23,16 +28,20 @@ import {
   annotationMessageContent,
   annotationMessageContext,
   annotationMessageScreenContext,
+  assembleElementTreePages,
   claimFullscreenRequest,
   commentableNodeAtPoint,
   compactIdentifier,
   contextForInspectedNode,
   contextForNode,
+  createUIKitScreenContext,
   elementName,
   flattenTree,
   formatFrame,
   formatProbeValue,
   formatRuntime,
+  inspectorTreeRows,
+  PreviewBridgeGate,
   parseSessionState,
   percent,
   requireAnnotation,
@@ -42,7 +51,7 @@ import {
 
 type Point = AnnotationGeometry;
 type AccessibilityNode = ContractAccessibilityNode;
-type AccessibilitySnapshot = ContractAccessibilitySnapshot & {
+type AccessibilitySnapshot = ContractElementSnapshot & {
   native?: {
     viewClass?: string;
     controllerClass?: string;
@@ -83,6 +92,11 @@ const bridge = new App(
   { autoResize: true },
 );
 const HOVER_SLOP_PX = 10;
+const elementFallbackLabels: Record<ElementFallbackReason, string> = {
+  "metro-target-unavailable": "No matching React Native Metro target",
+  "metro-fiber-unavailable": "React Native Fiber root unavailable",
+  "metro-inspection-failed": "React Native inspection failed",
+};
 const initialState = parseSessionState(window.__SIMVIEW_INITIAL_STATE__);
 
 function SimView() {
@@ -102,6 +116,9 @@ function SimView() {
   const [editor, setEditor] = useState<Editor>();
   const [toast, setToast] = useState("");
   const [accessibility, setAccessibility] = useState<AccessibilitySnapshot>();
+  const [screenContext, setScreenContext] = useState<ScreenContext>();
+  const [elementFallback, setElementFallback] = useState<ElementFallbackReason>();
+  const [frozenScreenContext, setFrozenScreenContext] = useState<ScreenContext>();
   const [uiContext, setUiContext] = useState<UiContext>();
   const [probeBundleId, setProbeBundleId] = useState("");
   const [probeEnabling, setProbeEnabling] = useState(false);
@@ -151,6 +168,8 @@ function SimView() {
   const hoverPending = useRef(false);
   const accessibilityRefreshTimer = useRef<number>();
   const accessibilityRequestPending = useRef(false);
+  const elementTreeAbortRef = useRef<AbortController>();
+  const metroRetryCountRef = useRef(0);
   const accessibilityInitialized = useRef(false);
   const editorOpenRef = useRef(false);
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number }>();
@@ -162,6 +181,7 @@ function SimView() {
   const bridgeConnectedRef = useRef(false);
   const connectedForFullscreenRef = useRef(Boolean(initialState?.connected));
   const fullscreenRequestGateRef = useRef({ claimed: false });
+  const previewBridgeGateRef = useRef(new PreviewBridgeGate());
   editorOpenRef.current = Boolean(editor);
 
   const token = useMemo(() => {
@@ -262,6 +282,7 @@ function SimView() {
       if (accessibilityRefreshTimer.current) {
         window.clearTimeout(accessibilityRefreshTimer.current);
       }
+      elementTreeAbortRef.current?.abort();
     },
     [],
   );
@@ -293,9 +314,12 @@ function SimView() {
     let afterSequence: number | undefined;
     let reportedError = false;
     const controller = new AbortController();
-
     const pump = async () => {
       while (!stopped) {
+        while (!stopped && previewBridgeGateRef.current.priorityPending) {
+          await pause(16);
+        }
+        if (stopped) return;
         try {
           const result = await bridge.callServerTool(
             {
@@ -303,7 +327,7 @@ function SimView() {
               arguments: {
                 ...(afterSequence === undefined ? {} : { afterSequence }),
                 maxPackets: 8,
-                timeoutMs: 500,
+                timeoutMs: 100,
               },
             },
             { signal: controller.signal },
@@ -319,19 +343,17 @@ function SimView() {
           afterSequence =
             batch.reset && batch.packets.length === 0 ? undefined : batch.nextSequence;
           reportedError = false;
+          await pause(16);
         } catch (error) {
           if (stopped) return;
           if (!reportedError) {
-            show(
-              `Preview bridge interrupted: ${error instanceof Error ? error.message : String(error)}`,
-            );
+            show(`Preview bridge interrupted: ${errorMessage(error)}`);
             reportedError = true;
           }
           await pause(250);
         }
       }
     };
-
     void pump();
     return () => {
       stopped = true;
@@ -375,6 +397,36 @@ function SimView() {
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${token}`);
     return fetch(path, { ...init, headers });
+  }
+
+  async function loadPagedElementTree(source: "elements" | "accessibility", signal: AbortSignal) {
+    const pages: ElementTreePage[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      throwIfAborted(signal);
+      const result = await bridge.callServerTool(
+        {
+          name: "app_get_element_tree_page",
+          arguments: cursor
+            ? { action: "continue", cursor }
+            : { action: "start", source, scope: "full", maxNodes: 1_200 },
+        },
+        { signal },
+      );
+      if (result.isError) throw new Error(toolResultError(result.content));
+      const page = elementTreePageSchema.parse(result.structuredContent);
+      pages.push(page);
+      if (pages.length > page.pageCount) {
+        throw new Error(`Element tree exceeded its declared ${page.pageCount}-page limit`);
+      }
+      cursor = page.nextCursor;
+      if (cursor && seenCursors.has(cursor)) {
+        throw new Error("Element tree response repeated a page cursor");
+      }
+      if (cursor) seenCursors.add(cursor);
+    } while (cursor);
+    return await assembleElementTreePages(pages);
   }
 
   async function loadBootedDevices() {
@@ -430,6 +482,9 @@ function SimView() {
     setStartupError("");
     setStartupPhase("connecting");
     setSwitchingDevice(device.udid);
+    elementTreeAbortRef.current?.abort();
+    elementTreeAbortRef.current = undefined;
+    accessibilityRequestPending.current = false;
     try {
       const nextState = embedded
         ? await bridge
@@ -458,6 +513,9 @@ function SimView() {
       setHoveredElement(undefined);
       setHoveredContext(undefined);
       setAccessibility(undefined);
+      setScreenContext(undefined);
+      setElementFallback(undefined);
+      setFrozenScreenContext(undefined);
       accessibilityInitialized.current = false;
       setUiContext(undefined);
       sentAnnotationIds.current.clear();
@@ -646,6 +704,22 @@ function SimView() {
     };
   }
 
+  function elementContext(node: AccessibilityNode): AnnotationContext | undefined {
+    if (!accessibility) return undefined;
+    const context = contextForNode(accessibility, node);
+    const activeContext = frozenScreenContext ?? screenContext;
+    if (accessibility.source !== "react-native-fiber" || activeContext?.kind !== "react-native") {
+      return context;
+    }
+    return {
+      ...context,
+      metro: {
+        ...context.metro,
+        route: activeContext.route,
+      },
+    };
+  }
+
   function enqueuePointerInput(input: PointerInput) {
     const queue = pointerInputQueueRef.current;
     const last = queue.at(-1);
@@ -681,7 +755,7 @@ function SimView() {
       const node = accessibility
         ? commentableNodeAtPoint(accessibility.root, point, hoverSlop())
         : undefined;
-      const context = node && accessibility ? contextForNode(accessibility, node) : hoveredContext;
+      const context = node ? elementContext(node) : hoveredContext;
       setSelectedElement(node);
       setEditor({
         point,
@@ -710,7 +784,7 @@ function SimView() {
         const node = commentableNodeAtPoint(accessibility.root, point, slop);
         if (node?.ref !== hoveredElement?.ref) {
           setHoveredElement(node);
-          setHoveredContext(node ? contextForNode(accessibility, node) : undefined);
+          setHoveredContext(node ? elementContext(node) : undefined);
         }
         if (node) return;
       }
@@ -891,21 +965,42 @@ function SimView() {
     if (!canvas?.width || !canvas.height) return show("No simulator frame to send");
     const imageData = canvas.toDataURL("image/png").split(",", 2)[1];
     if (!imageData) return show("Screenshot capture failed");
-    const includeImages = Boolean(bridge.getHostCapabilities()?.message?.image);
     const annotations = visibleAnnotations.map((annotation) => ({
+      id: annotation.id,
       text: annotation.note,
       context: annotationMessageContext(annotation),
-      crop: includeImages ? croppedAnnotationScreenshot(canvas, annotation) : undefined,
+      screenshot: croppedAnnotationScreenshot(canvas, annotation),
     }));
-    const screenContext = annotationMessageScreenContext(
-      { ...state, frameId: activeFrameId },
-      uiContext,
-      visibleAnnotations,
-    );
+    const capturedScreenContext =
+      frozenScreenContext ??
+      screenContext ??
+      createUIKitScreenContext({ ...state, frameId: activeFrameId }, uiContext, visibleAnnotations);
     try {
+      const savedImages = saveReviewImagesOutputSchema.parse(
+        (
+          await bridge.callServerTool({
+            name: "save_review_images",
+            arguments: {
+              screenshot: imageData,
+              annotations: annotations.map(({ id, screenshot }) => ({ id, screenshot })),
+            },
+          })
+        ).structuredContent,
+      );
+      const annotationPaths = new Map(
+        savedImages.annotations.map((annotation) => [annotation.id, annotation.screenshotPath]),
+      );
       const result = await bridge.sendMessage({
         role: "user",
-        content: annotationMessageContent(imageData, screenContext, annotations, includeImages),
+        content: annotationMessageContent(
+          savedImages.screenshotPath,
+          annotationMessageScreenContext(capturedScreenContext),
+          annotations.map(({ id, text, context }) => ({
+            text,
+            context,
+            screenshotPath: annotationPaths.get(id) ?? savedImages.screenshotPath,
+          })),
+        ),
       });
       if (result.isError) throw new Error("The MCP host rejected the message");
     } catch (error) {
@@ -916,11 +1011,7 @@ function SimView() {
       sentAnnotationIds.current.add(annotation.id);
     });
     completeEnterInteractMode();
-    show(
-      includeImages
-        ? "Sent frozen frame, annotations, and crops to chat"
-        : "Sent annotations to chat; this host does not support image attachments",
-    );
+    show("Sent frozen frame and annotation image paths to chat");
   }
 
   async function captureOnly() {
@@ -968,7 +1059,13 @@ function SimView() {
 
   function enterAnnotateMode() {
     frozenRef.current = true;
-    setFrozenFrameId(latestFrameIdRef.current ?? state.frameId ?? "current");
+    const frameId = latestFrameIdRef.current ?? state.frameId ?? "current";
+    setFrozenFrameId(frameId);
+    setFrozenScreenContext(
+      screenContext
+        ? { ...screenContext, frameId }
+        : createUIKitScreenContext({ ...state, frameId }, uiContext, visibleAnnotations),
+    );
     setMode("annotate");
     setEditor(undefined);
     if (!accessibility) void loadAccessibility();
@@ -986,6 +1083,7 @@ function SimView() {
   function completeEnterInteractMode() {
     frozenRef.current = false;
     setFrozenFrameId(undefined);
+    setFrozenScreenContext(undefined);
     setMode("interact");
     setEditor(undefined);
     setSelectedElement(undefined);
@@ -1037,44 +1135,96 @@ function SimView() {
   async function loadAccessibility(quiet = false) {
     if (accessibilityRequestPending.current) return undefined;
     accessibilityRequestPending.current = true;
+    const controller = new AbortController();
+    elementTreeAbortRef.current = controller;
+    const timeout = window.setTimeout(
+      () => controller.abort(new DOMException("Element tree transfer timed out", "TimeoutError")),
+      15_000,
+    );
+    const releasePreviewBridge = embedded
+      ? previewBridgeGateRef.current.beginPriority()
+      : undefined;
     try {
-      const snapshot = embedded
-        ? await bridge
-            .callServerTool({
-              name: "app_get_accessibility_tree",
-              arguments: { scope: "full", maxNodes: 1_200 },
-            })
-            .then((result) => accessibilitySnapshotSchema.parse(result.structuredContent))
-        : await relayFetch("/accessibility?scope=full&maxNodes=1200").then(async (response) => {
-            if (!response.ok) throw new Error(`Accessibility request failed (${response.status})`);
-            return accessibilitySnapshotSchema.parse(await response.json());
-          });
-      const nodes = flattenTree(snapshot.root);
-      const branchRefs = new Set(
-        nodes.filter((node) => node.children?.length).map((node) => node.ref),
-      );
-      setAccessibility(snapshot);
-      setExpandedElements((current) => {
-        if (!accessibilityInitialized.current) {
-          accessibilityInitialized.current = true;
-          return branchRefs;
+      try {
+        const result = embedded
+          ? await loadPagedElementTree("elements", controller.signal)
+          : await relayFetch("/elements?scope=full&maxNodes=1200").then(async (response) => {
+              if (!response.ok) throw new Error(`Element request failed (${response.status})`);
+              return elementTreeOutputSchema.parse(await response.json());
+            });
+        throwIfAborted(controller.signal);
+        applyElementTree(result.snapshot, result.screenContext, result.fallback?.reason);
+        if (result.snapshot.source === "react-native-fiber") {
+          metroRetryCountRef.current = 0;
+        } else if (
+          result.fallback?.reason === "metro-inspection-failed" &&
+          metroRetryCountRef.current < 1
+        ) {
+          metroRetryCountRef.current += 1;
+          scheduleAccessibilityRefresh(800);
         }
-        return new Set([...current].filter((ref) => branchRefs.has(ref)));
-      });
-      setSelectedElement((current) =>
-        current ? nodes.find((node) => node.ref === current.ref) : current,
-      );
-      return snapshot;
+        return result.snapshot;
+      } catch (error) {
+        throwIfAborted(controller.signal);
+        if (!embedded) throw error;
+        const fallback = await loadPagedElementTree("accessibility", controller.signal);
+        throwIfAborted(controller.signal);
+        applyElementTree(fallback.snapshot, fallback.screenContext);
+        if (!quiet) {
+          const reason = error instanceof Error ? error.message : String(error);
+          show(`React Native elements unavailable (${reason}); showing accessibility tree`);
+        }
+        return fallback.snapshot;
+      }
     } catch (error) {
-      if (!quiet) {
-        show(
-          `Accessibility unavailable: ${error instanceof Error ? error.message : String(error)}`,
-        );
+      if (!isAbortError(error) && !quiet) {
+        show(`Element tree unavailable: ${error instanceof Error ? error.message : String(error)}`);
       }
       return undefined;
     } finally {
-      accessibilityRequestPending.current = false;
+      window.clearTimeout(timeout);
+      releasePreviewBridge?.();
+      if (elementTreeAbortRef.current === controller) {
+        elementTreeAbortRef.current = undefined;
+        accessibilityRequestPending.current = false;
+      }
     }
+  }
+
+  function applyElementTree(
+    snapshot: AccessibilitySnapshot,
+    context: ScreenContext,
+    fallback?: ElementFallbackReason,
+  ) {
+    const nodes = flattenTree(snapshot.root);
+    const inspectorRows = inspectorTreeRows(
+      snapshot.root,
+      snapshot.source === "react-native-fiber",
+    );
+    const branchRefs = new Set(
+      inspectorRows.filter((row) => row.hasChildren).map((row) => row.node.ref),
+    );
+    const inspectorRefs = new Set(inspectorRows.map((row) => row.node.ref));
+    setAccessibility(snapshot);
+    setScreenContext(context);
+    setElementFallback(fallback);
+    if (frozenRef.current) {
+      const frameId = frozenFrameId ?? latestFrameIdRef.current ?? state.frameId ?? "current";
+      setFrozenScreenContext({ ...context, frameId });
+    }
+    setExpandedElements((current) => {
+      if (!accessibilityInitialized.current) {
+        accessibilityInitialized.current = true;
+        return branchRefs;
+      }
+      const retained = [...current].filter((ref) => branchRefs.has(ref));
+      return retained.length ? new Set(retained) : branchRefs;
+    });
+    setSelectedElement((current) =>
+      current && inspectorRefs.has(current.ref)
+        ? nodes.find((node) => node.ref === current.ref)
+        : undefined,
+    );
   }
 
   async function loadUiContext() {
@@ -1183,6 +1333,7 @@ function SimView() {
                   native: snapshot.native
                     ? { ...snapshot.native, matchConfidence: "strong" }
                     : undefined,
+                  metro: current.context?.metro,
                 },
               };
             })()
@@ -1213,6 +1364,15 @@ function SimView() {
     frozenRef.current = true;
     const currentFrameId = latestFrameIdRef.current ?? state.frameId ?? "current";
     setFrozenFrameId(currentFrameId);
+    setFrozenScreenContext(
+      screenContext
+        ? { ...screenContext, frameId: currentFrameId }
+        : createUIKitScreenContext(
+            { ...state, frameId: currentFrameId },
+            uiContext,
+            visibleAnnotations,
+          ),
+    );
     if (activateMode) setMode("annotate");
     setElementsOpen(true);
     setSelectedElement(node);
@@ -1222,7 +1382,7 @@ function SimView() {
       point,
       note: "",
       frameId: frozenFrameId ?? currentFrameId,
-      context: accessibility ? contextForNode(accessibility, node) : undefined,
+      context: elementContext(node),
     });
   }
 
@@ -1237,14 +1397,17 @@ function SimView() {
 
   function toggleAllElements() {
     if (!accessibility) return;
-    const branches = flattenTree(accessibility.root).filter((node) => node.children?.length);
-    const allExpanded = branches.every((node) => expandedElements.has(node.ref));
-    setExpandedElements(new Set(allExpanded ? [] : branches.map((node) => node.ref)));
+    const branches = inspectorTreeRows(
+      accessibility.root,
+      accessibility.source === "react-native-fiber",
+    ).filter((row) => row.hasChildren);
+    const allExpanded = branches.every(({ node }) => expandedElements.has(node.ref));
+    setExpandedElements(new Set(allExpanded ? [] : branches.map(({ node }) => node.ref)));
   }
 
   async function tapSelectedElement() {
     if (!selectedElement) return;
-    if (embedded) {
+    if (embedded && accessibility?.source !== "react-native-fiber") {
       await bridge.callServerTool({
         name: "app_tap_element",
         arguments: { ref: selectedElement.ref },
@@ -1262,9 +1425,12 @@ function SimView() {
     show("Physical element tap accepted");
   }
 
+  const renderedOnly = accessibility?.source === "react-native-fiber";
+  const allInspectorRows = accessibility ? inspectorTreeRows(accessibility.root, renderedOnly) : [];
   const elementRows = accessibility
-    ? visibleTree(accessibility.root, expandedElements, elementSearch)
+    ? visibleTree(accessibility.root, expandedElements, elementSearch, renderedOnly)
     : [];
+  const visibleElementCount = Math.max(0, allInspectorRows.length - 1);
   const inspectedElement = hoveredElement ?? selectedElement;
   const highlightedElement = inspectedElement ?? selectedElement;
   const activeScene =
@@ -1274,6 +1440,7 @@ function SimView() {
     activeScene?.windows?.find((window) => window.key && !window.hidden) ??
     activeScene?.windows?.find((window) => !window.hidden);
   const visibleController = keyWindow?.visibleControllerPath?.at(-1);
+  const displayedScreenContext = frozenScreenContext ?? screenContext;
 
   return (
     <main
@@ -1595,9 +1762,32 @@ function SimView() {
               <div>
                 <strong>Elements</strong>
                 <small>
-                  {accessibility
-                    ? `${accessibility.stats.nodeCount}${accessibility.stats.truncated ? "+" : ""}`
-                    : "—"}
+                  {accessibility ? (
+                    <span
+                      title={
+                        elementFallback
+                          ? elementFallbackLabels[elementFallback]
+                          : accessibility.source === "react-native-fiber"
+                            ? `${accessibility.stats.nodeCount} Fiber nodes inspected`
+                            : undefined
+                      }
+                    >
+                      {accessibility.source === "react-native-fiber"
+                        ? "React Native · "
+                        : elementFallback
+                          ? "AX fallback · "
+                          : "AX · "}
+                      {accessibility.source === "react-native-fiber"
+                        ? `${visibleElementCount} visible`
+                        : accessibility.stats.nodeCount}
+                      {accessibility.source !== "react-native-fiber" &&
+                      accessibility.stats.truncated
+                        ? "+"
+                        : ""}
+                    </span>
+                  ) : (
+                    "—"
+                  )}
                 </small>
               </div>
               <div class="section-actions">
@@ -1633,7 +1823,7 @@ function SimView() {
               onInput={(event) => setElementSearch(event.currentTarget.value)}
             />
             <div class="element-tree" role="tree" onMouseLeave={() => setHoveredElement(undefined)}>
-              {elementRows.map(({ node, depth, isRoot }) => (
+              {elementRows.map(({ node, depth, isRoot, hasChildren }) => (
                 <button
                   type="button"
                   key={node.ref}
@@ -1641,13 +1831,13 @@ function SimView() {
                   role="treeitem"
                   onClick={() => {
                     chooseElement(node);
-                    if (node.children?.length) toggleElement(node.ref);
+                    if (hasChildren) toggleElement(node.ref);
                   }}
                   onMouseEnter={() => setHoveredElement(node)}
                   style={{ "--tree-depth": depth }}
-                  aria-expanded={node.children?.length ? expandedElements.has(node.ref) : undefined}
+                  aria-expanded={hasChildren ? expandedElements.has(node.ref) : undefined}
                 >
-                  {!!node.children?.length && (
+                  {hasChildren && (
                     <span class="disclosure">
                       <Icon
                         name={expandedElements.has(node.ref) ? "chevron-down" : "chevron-right"}
@@ -1659,7 +1849,7 @@ function SimView() {
                   </span>
                 </button>
               ))}
-              {!elementRows.length && <p>No matching accessible elements.</p>}
+              {!elementRows.length && <p>No matching elements.</p>}
             </div>
           </section>
           <section
@@ -1739,8 +1929,25 @@ function SimView() {
                   </div>
                   <div>
                     <dt>Identifier</dt>
-                    <dd>{inspectedElement.identifier ?? "—"}</dd>
+                    <dd>{inspectedElement.testID ?? inspectedElement.identifier ?? "—"}</dd>
                   </div>
+                  {inspectedElement.component && (
+                    <div>
+                      <dt>Component</dt>
+                      <dd>{inspectedElement.component}</dd>
+                    </div>
+                  )}
+                  {inspectedElement.sourceLocation && (
+                    <div>
+                      <dt>Source</dt>
+                      <dd>
+                        {inspectedElement.sourceLocation.file}
+                        {inspectedElement.sourceLocation.line
+                          ? `:${inspectedElement.sourceLocation.line}`
+                          : ""}
+                      </dd>
+                    </div>
+                  )}
                   <div>
                     <dt>Value</dt>
                     <dd>{inspectedElement.value ?? "—"}</dd>
@@ -1785,10 +1992,50 @@ function SimView() {
                 <Icon name={sceneOpen ? "chevron-down" : "chevron-right"} />
                 <strong>Scene</strong>
               </button>
-              {uiContext?.status.connected && <span class="probe-live">UIKit</span>}
+              {displayedScreenContext?.kind === "react-native" ? (
+                <span class="probe-live">React Native</span>
+              ) : (
+                uiContext?.status.connected && <span class="probe-live">UIKit</span>
+              )}
             </div>
             {sceneOpen &&
-              (activeScene ? (
+              (displayedScreenContext?.kind === "react-native" ? (
+                <dl>
+                  <div>
+                    <dt>Route</dt>
+                    <dd>{displayedScreenContext.route ?? "—"}</dd>
+                  </div>
+                  {!!displayedScreenContext.navigationPath?.length && (
+                    <div class="controller-path">
+                      <dt>Path</dt>
+                      <dd>{displayedScreenContext.navigationPath.join(" › ")}</dd>
+                    </div>
+                  )}
+                  <div>
+                    <dt>Screen</dt>
+                    <dd>{displayedScreenContext.screenComponent ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Renderer</dt>
+                    <dd>{formatProbeValue(displayedScreenContext.renderer)}</dd>
+                  </div>
+                  <div>
+                    <dt>Match</dt>
+                    <dd>{formatProbeValue(displayedScreenContext.confidence)}</dd>
+                  </div>
+                  {displayedScreenContext.sourceLocation && (
+                    <div class="controller-path">
+                      <dt>Source</dt>
+                      <dd>
+                        {displayedScreenContext.sourceLocation.file}
+                        {displayedScreenContext.sourceLocation.line
+                          ? `:${displayedScreenContext.sourceLocation.line}`
+                          : ""}
+                      </dd>
+                    </div>
+                  )}
+                </dl>
+              ) : activeScene ? (
                 <dl>
                   <div>
                     <dt>State</dt>
@@ -1994,6 +2241,35 @@ async function annotationResponse(response: Response): Promise<Annotation> {
     throw new Error((await response.text()) || `Annotation request failed (${response.status})`);
   }
   return requireAnnotation(await response.json());
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function throwIfAborted(signal: AbortSignal): void {
+  if (!signal.aborted) return;
+  throw signal.reason instanceof Error
+    ? signal.reason
+    : new DOMException("Element tree transfer was cancelled", "AbortError");
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+function toolResultError(content: unknown): string {
+  if (Array.isArray(content)) {
+    const text = content.find(
+      (item): item is { type: "text"; text: string } =>
+        typeof item === "object" &&
+        item !== null &&
+        (item as { type?: unknown }).type === "text" &&
+        typeof (item as { text?: unknown }).text === "string",
+    );
+    if (text) return text.text;
+  }
+  return "Element tree page request failed";
 }
 
 function decodeBase64(value: string): Uint8Array {

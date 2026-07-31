@@ -1,6 +1,14 @@
 import { describe, expect, test } from "bun:test";
+import { stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import {
+  type ElementTreeOutput,
+  type ElementTreePage,
+  elementTreePageSchema,
+} from "@simview/contracts";
+import { assembleElementTreePages } from "../packages/app/src/helpers";
 import { createServer } from "../packages/mcp/src/server";
 import { SimViewSession } from "../packages/mcp/src/session";
 
@@ -8,10 +16,13 @@ const appCalledTools = [
   "app_connect_simulator",
   "app_enable_ui_probe",
   "app_get_accessibility_tree",
+  "app_get_element_tree",
+  "app_get_element_tree_page",
   "app_get_ui_context",
   "app_inspect_point",
   "app_list_simulators",
   "app_take_screenshot",
+  "save_review_images",
   "app_tap_element",
   "delete_annotation",
   "get_preview_packets",
@@ -35,7 +46,8 @@ const modelOnlyTools = [
 describe("MCP app tools", () => {
   test("authorizes app calls and persists annotation mutations", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const server = createServer();
+    const session = new SimViewSession();
+    const server = createServer(session);
     const client = new Client({ name: "simview-test", version: "1.0.0" });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
 
@@ -78,6 +90,16 @@ describe("MCP app tools", () => {
       expect(resource.contents).toHaveLength(1);
       expect(resource.contents[0]?.uri).toBe(openMeta?.ui?.resourceUri);
       expect(resource.contents[0]?.mimeType).toBe("text/html;profile=mcp-app");
+      expect(
+        (
+          resource.contents[0]?._meta as {
+            ui?: { csp?: { connectDomains?: string[]; resourceDomains?: string[] } };
+          }
+        )?.ui?.csp,
+      ).toEqual({
+        connectDomains: [],
+        resourceDomains: [],
+      });
 
       for (const name of appCalledTools) {
         const meta = byName.get(name)?._meta as
@@ -166,6 +188,93 @@ describe("MCP app tools", () => {
       }
       await client.close();
       await server.close();
+      await session.close();
+    }
+  });
+
+  test("pages one exact Fiber capture into host-safe bridge responses", async () => {
+    const session = new SimViewSession();
+    session.device = {
+      udid: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
+      name: "iPhone",
+      state: "Booted",
+      runtime: "iOS 26.0",
+    };
+    const children = Array.from({ length: 653 }, (_, index) => ({
+      ref: `rn:${index}`,
+      kind: "host" as const,
+      label: `Element ${index} — 日本語 👋 ${"x".repeat(80)}`,
+      ...(index === 0 ? { children: [] } : {}),
+    }));
+    const output: ElementTreeOutput = {
+      snapshot: {
+        schemaVersion: 1,
+        snapshotId: "fiber-654",
+        capturedAt: "2026-07-31T10:00:00.000Z",
+        source: "react-native-fiber",
+        scope: "full",
+        screen: { x: 0, y: 0, width: 430, height: 932 },
+        root: { ref: "rn:root", kind: "component", children },
+        stats: { nodeCount: 654, truncated: false },
+        metro: {
+          host: "127.0.0.1",
+          port: 8081,
+          targetId: "target-1",
+          targetTitle: "Shop",
+          renderer: "fabric",
+        },
+      },
+      screenContext: {
+        schemaVersion: 1,
+        kind: "react-native",
+        capturedAt: "2026-07-31T10:00:00.000Z",
+        frameId: "frame-1",
+        renderer: "fabric",
+        target: "Shop",
+        route: "ShopMenuRoot",
+        screenComponent: "ShopMenuScreen",
+        confidence: "exact",
+      },
+    };
+    let captures = 0;
+    session.elementSnapshot = async () => {
+      captures += 1;
+      return output;
+    };
+    const server = createServer(session);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "paged-elements", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const pages: ElementTreePage[] = [];
+      let result = await client.callTool({
+        name: "app_get_element_tree_page",
+        arguments: { action: "start", source: "elements", scope: "full", maxNodes: 1_200 },
+      });
+      while (true) {
+        expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(80 * 1_024);
+        const page = elementTreePageSchema.parse(result.structuredContent);
+        pages.push(page);
+        if (!page.nextCursor) break;
+        if (page.pageIndex === 0) {
+          const retry = await client.callTool({
+            name: "app_get_element_tree_page",
+            arguments: { action: "continue", cursor: page.nextCursor },
+          });
+          result = retry;
+          continue;
+        }
+        result = await client.callTool({
+          name: "app_get_element_tree_page",
+          arguments: { action: "continue", cursor: page.nextCursor },
+        });
+      }
+
+      expect(captures).toBe(1);
+      expect(pages.length).toBeGreaterThan(1);
+      expect(await assembleElementTreePages(pages)).toEqual(output);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
     }
   });
 
@@ -221,6 +330,86 @@ describe("MCP app tools", () => {
         second.close(),
       ]);
     }
+  });
+
+  test("stores review images in a private temporary directory and removes them on close", async () => {
+    const session = new SimViewSession();
+    const png =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+3MxZ5wAAAABJRU5ErkJggg==";
+    const annotationId = "e7787f9d-cfd8-4f52-b136-f16d02d30d30";
+    const saved = await session.saveReviewImages({
+      screenshot: png,
+      annotations: [{ id: annotationId, screenshot: png }],
+    });
+
+    expect(saved.directory).toStartWith(`${tmpdir()}/simview-review-`);
+    expect((await stat(saved.directory)).mode & 0o777).toBe(0o700);
+    expect((await stat(saved.screenshotPath)).mode & 0o777).toBe(0o600);
+    expect(saved.annotations[0]).toMatchObject({ id: annotationId });
+    expect(await Bun.file(saved.annotations[0]?.screenshotPath ?? "").exists()).toBe(true);
+
+    await session.close();
+    expect(await Bun.file(saved.screenshotPath).exists()).toBe(false);
+  });
+
+  test("reuses React Native elements for selectors and reports the focused screen in state", async () => {
+    const session = new SimViewSession();
+    session.lastElements = {
+      schemaVersion: 1,
+      snapshotId: "fiber-1",
+      capturedAt: "2026-07-31T10:00:00.000Z",
+      source: "react-native-fiber",
+      scope: "interactive",
+      screen: { x: 0, y: 0, width: 430, height: 932 },
+      root: {
+        ref: "rn:root",
+        children: [
+          {
+            ref: "rn:1",
+            identifier: "shop-menu-screen",
+            label: "Shop menu",
+            kind: "component",
+          },
+        ],
+      },
+      stats: { nodeCount: 2, truncated: false },
+      metro: {
+        host: "127.0.0.1",
+        port: 8081,
+        targetId: "target-1",
+        targetTitle: "Shop",
+        renderer: "fabric",
+      },
+    };
+    session.lastScreenContext = {
+      schemaVersion: 1,
+      kind: "react-native",
+      capturedAt: "2026-07-31T10:00:00.000Z",
+      frameId: "frame-1",
+      renderer: "fabric",
+      target: "Shop",
+      route: "ShopMenuRoot",
+      screenComponent: "ShopMenuScreen",
+      testID: "shop-menu-screen",
+      sourceLocation: { file: "src/ShopMenuScreen.tsx", line: 10 },
+      confidence: "exact",
+    };
+
+    expect(
+      await session.findElements({ identifier: "shop-menu-screen", exact: true }),
+    ).toMatchObject({
+      snapshotId: "fiber-1",
+      count: 1,
+      matches: [{ ref: "rn:1" }],
+    });
+    expect(session.state()).toMatchObject({
+      route: "ShopMenuRoot",
+      component: {
+        label: "ShopMenuScreen",
+        testID: "shop-menu-screen",
+        source: "src/ShopMenuScreen.tsx",
+      },
+    });
   });
 });
 
