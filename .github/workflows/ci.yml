@@ -26,6 +26,7 @@ jobs:
       - run: bun run check:version
       - run: bun run check:format
       - run: bun run typecheck
+      - run: bun run build:test-fixtures
       - run: bun test --coverage --coverage-reporter=text
       - run: swift test --disable-sandbox --package-path native/SimViewCore
       - name: Audit production dependencies
