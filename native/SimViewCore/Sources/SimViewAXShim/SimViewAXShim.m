@@ -82,9 +82,10 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
     NSObject *device = [self.devices objectForKey:token];
     if (!device) {
       Class responseClass = NSClassFromString(@"AXPTranslatorResponse");
-      return [responseClass respondsToSelector:NSSelectorFromString(@"empty")]
-                 ? ((id (*)(id, SEL))objc_msgSend)(responseClass, NSSelectorFromString(@"empty"))
-                 : nil;
+      if (![responseClass respondsToSelector:NSSelectorFromString(@"empty")]) {
+        return nil;
+      }
+      return ((id (*)(id, SEL))objc_msgSend)(responseClass, NSSelectorFromString(@"empty"));
     }
 
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
