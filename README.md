@@ -127,8 +127,10 @@ The standalone browser preview uses the authenticated localhost stream. The
 embedded MCP App does not make localhost HTTP or WebSocket requests: Codex
 requires secure network origins, so it carries bounded video packet batches and
 byte-paged React Native/AX element snapshots through app-only bridge tools. A
-priority gate pauses video polling while element pages are transferred, keeping
-the host's serialized bridge responsive without requiring a local certificate.
+priority gate pauses video polling only while an explicitly opened or refreshed
+Inspector (or the already-frozen Annotate mode) transfers element pages. SimView
+does not refresh the tree in the background while both surfaces are closed, so
+normal interaction leaves the serialized bridge dedicated to video and input.
 `connect_simulator` starts the simulator session without opening UI. Always call
 it first and proceed only if it succeeds. When an interactive preview is
 requested, follow it with `open_simview` using the same UDID; the preview then

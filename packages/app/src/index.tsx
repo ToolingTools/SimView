@@ -158,7 +158,7 @@ function SimView() {
   const pendingVideoFrameRef = useRef<VideoFrame>();
   const videoPaintRequestRef = useRef<number>();
   const latestFrameIdRef = useRef<string>();
-  const lastFrameStateUpdateRef = useRef(0);
+  const previewReadyRef = useRef(false);
   const recordingRef = useRef<MediaRecorder>();
   const activePointer = useRef<number>();
   const pointerInputQueueRef = useRef<PointerInput[]>([]);
@@ -166,12 +166,9 @@ function SimView() {
   const hoverRequest = useRef(0);
   const hoverRequestedAt = useRef(0);
   const hoverPending = useRef(false);
-  const accessibilityRefreshTimer = useRef<number>();
   const accessibilityRequestPending = useRef(false);
   const elementTreeAbortRef = useRef<AbortController>();
-  const metroRetryCountRef = useRef(0);
   const accessibilityInitialized = useRef(false);
-  const editorOpenRef = useRef(false);
   const sidebarResize = useRef<{ pointerId: number; startX: number; startWidth: number }>();
   const infoResize = useRef<{ pointerId: number; startY: number; startHeight: number }>();
   const frozenRef = useRef(false);
@@ -182,7 +179,6 @@ function SimView() {
   const connectedForFullscreenRef = useRef(Boolean(initialState?.connected));
   const fullscreenRequestGateRef = useRef({ claimed: false });
   const previewBridgeGateRef = useRef(new PreviewBridgeGate());
-  editorOpenRef.current = Boolean(editor);
 
   const token = useMemo(() => {
     const match = location.href.match(/[#&]token=([^&]+)/);
@@ -279,9 +275,6 @@ function SimView() {
 
   useEffect(
     () => () => {
-      if (accessibilityRefreshTimer.current) {
-        window.clearTimeout(accessibilityRefreshTimer.current);
-      }
       elementTreeAbortRef.current?.abort();
     },
     [],
@@ -326,7 +319,7 @@ function SimView() {
               name: "get_preview_packets",
               arguments: {
                 ...(afterSequence === undefined ? {} : { afterSequence }),
-                maxPackets: 8,
+                maxPackets: 12,
                 timeoutMs: 100,
               },
             },
@@ -343,7 +336,6 @@ function SimView() {
           afterSequence =
             batch.reset && batch.packets.length === 0 ? undefined : batch.nextSequence;
           reportedError = false;
-          await pause(16);
         } catch (error) {
           if (stopped) return;
           if (!reportedError) {
@@ -506,6 +498,7 @@ function SimView() {
           });
       frozenRef.current = false;
       latestFrameIdRef.current = nextState.frameId;
+      previewReadyRef.current = false;
       setFrozenFrameId(undefined);
       setMode("interact");
       setEditor(undefined);
@@ -522,7 +515,7 @@ function SimView() {
       setState(nextState);
       setStartupPhase("waiting-for-frame");
       setDeviceMenuOpen(false);
-      scheduleAccessibilityRefresh();
+      if (elementsOpen) void loadAccessibility(true);
       show(`Switched to ${nextState.device?.name ?? device.name}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -558,7 +551,7 @@ function SimView() {
         error: (error) => fallbackToMjpeg(`H.264 decoder failed: ${error.message}`),
       });
       try {
-        decoderRef.current.configure({ codec, description: payload });
+        decoderRef.current.configure({ codec, description: payload, optimizeForLatency: true });
       } catch (error) {
         fallbackToMjpeg(`H.264 is unavailable: ${String(error)}`);
       }
@@ -617,12 +610,10 @@ function SimView() {
 
   function commitFrameId(frameId: string) {
     latestFrameIdRef.current = frameId;
+    if (previewReadyRef.current) return;
+    previewReadyRef.current = true;
     setStartupError("");
     setStartupPhase("ready");
-    const now = performance.now();
-    if (now - lastFrameStateUpdateRef.current < 100) return;
-    lastFrameStateUpdateRef.current = now;
-    setState((current) => (current.frameId === frameId ? current : { ...current, frameId }));
   }
 
   function fallbackToMjpeg(reason: string) {
@@ -645,7 +636,6 @@ function SimView() {
           params: params as Record<string, unknown>,
         },
       });
-      scheduleAccessibilityRefresh();
       return;
     }
     if (!state.relayOrigin || !token) return;
@@ -655,7 +645,6 @@ function SimView() {
       body: JSON.stringify({ method, params }),
     });
     if (!response.ok) throw new Error(`Simulator input failed (${response.status})`);
-    scheduleAccessibilityRefresh();
   }
 
   async function submitTypedText(event: SubmitEvent) {
@@ -672,17 +661,6 @@ function SimView() {
     } finally {
       setTypingText(false);
     }
-  }
-
-  function scheduleAccessibilityRefresh(delay = 600) {
-    if (accessibilityRefreshTimer.current) {
-      window.clearTimeout(accessibilityRefreshTimer.current);
-    }
-    accessibilityRefreshTimer.current = window.setTimeout(() => {
-      accessibilityRefreshTimer.current = undefined;
-      if (editorOpenRef.current) return;
-      void loadAccessibility(true);
-    }, delay);
   }
 
   function coordinate(event: PointerEvent): Point {
@@ -1048,7 +1026,7 @@ function SimView() {
     window.setTimeout(() => setToast(""), 2_200);
   }
 
-  const activeFrameId = frozenFrameId ?? state.frameId;
+  const activeFrameId = frozenFrameId ?? latestFrameIdRef.current ?? state.frameId;
   const visibleAnnotations = state.annotations.filter(
     (annotation) => annotation.frameId === activeFrameId || annotation.frameId === "current",
   );
@@ -1068,7 +1046,7 @@ function SimView() {
     );
     setMode("annotate");
     setEditor(undefined);
-    if (!accessibility) void loadAccessibility();
+    void loadAccessibility();
     void loadUiContext();
   }
 
@@ -1087,6 +1065,7 @@ function SimView() {
     setMode("interact");
     setEditor(undefined);
     setSelectedElement(undefined);
+    if (!elementsOpen) elementTreeAbortRef.current?.abort();
   }
 
   async function clearUnsentAndEnterInteract() {
@@ -1154,15 +1133,6 @@ function SimView() {
             });
         throwIfAborted(controller.signal);
         applyElementTree(result.snapshot, result.screenContext, result.fallback?.reason);
-        if (result.snapshot.source === "react-native-fiber") {
-          metroRetryCountRef.current = 0;
-        } else if (
-          result.fallback?.reason === "metro-inspection-failed" &&
-          metroRetryCountRef.current < 1
-        ) {
-          metroRetryCountRef.current += 1;
-          scheduleAccessibilityRefresh(800);
-        }
         return result.snapshot;
       } catch (error) {
         throwIfAborted(controller.signal);
@@ -1291,7 +1261,7 @@ function SimView() {
         }
       }
       await loadUiContext();
-      void loadAccessibility();
+      if (elementsOpen || mode === "annotate") void loadAccessibility();
       show("UIKit probe connected");
     } catch (error) {
       setProbeError(error instanceof Error ? error.message : String(error));
@@ -1412,7 +1382,6 @@ function SimView() {
         name: "app_tap_element",
         arguments: { ref: selectedElement.ref },
       });
-      scheduleAccessibilityRefresh();
     } else {
       const frame = selectedElement.frame?.normalized;
       if (!frame) return;
@@ -1426,10 +1395,12 @@ function SimView() {
   }
 
   const renderedOnly = accessibility?.source === "react-native-fiber";
-  const allInspectorRows = accessibility ? inspectorTreeRows(accessibility.root, renderedOnly) : [];
-  const elementRows = accessibility
-    ? visibleTree(accessibility.root, expandedElements, elementSearch, renderedOnly)
-    : [];
+  const allInspectorRows =
+    elementsOpen && accessibility ? inspectorTreeRows(accessibility.root, renderedOnly) : [];
+  const elementRows =
+    elementsOpen && accessibility
+      ? visibleTree(accessibility.root, expandedElements, elementSearch, renderedOnly)
+      : [];
   const visibleElementCount = Math.max(0, allInspectorRows.length - 1);
   const inspectedElement = hoveredElement ?? selectedElement;
   const highlightedElement = inspectedElement ?? selectedElement;
@@ -1582,13 +1553,14 @@ function SimView() {
             aria-label={elementsOpen ? "Hide inspector" : "Show inspector"}
             aria-pressed={elementsOpen}
             onClick={() => {
-              setElementsOpen((value) => {
-                if (!value) {
-                  void loadAccessibility();
-                  void loadUiContext();
-                }
-                return !value;
-              });
+              if (elementsOpen) {
+                setElementsOpen(false);
+                if (mode !== "annotate") elementTreeAbortRef.current?.abort();
+              } else {
+                setElementsOpen(true);
+                void loadAccessibility();
+                void loadUiContext();
+              }
             }}
           >
             <Icon name="sidebar" /> <span>Inspector</span>

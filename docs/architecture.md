@@ -65,8 +65,11 @@ The process model has two layers:
 - Embedded video uses bounded, sequenced `get_preview_packets` responses over
   the host bridge. Full React Native or AX element output is validated and
   serialized once, split into bounded UTF-8 byte chunks, and reassembled and
-  validated in the app. A priority gate pauses the short video poll while the
-  element transfer is active. This is the primary embedded transport because
+  validated in the app. Tree capture runs only when Inspector or Annotate is
+  opened or Inspector is explicitly refreshed. Inspector transfers temporarily
+  pause video polling, while Annotate already holds a frozen frame; with both
+  surfaces closed, the bridge performs no background tree refresh. This is the
+  primary embedded transport because
   Codex cannot open insecure localhost HTTP/WebSocket origins and a local TLS
   certificate would impose user setup. A second MCP resource would still use
   the same host bridge rather than creating a separate network lane.
