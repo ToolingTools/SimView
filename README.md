@@ -117,8 +117,10 @@ Tools:
 
 Video never travels through MCP results. It uses the authenticated localhost
 relay; MCP carries controls, screenshots, compact state, and session comments.
-`open_simview` is the only tool that renders the interactive MCP App preview;
-`connect_simulator` starts the same simulator session without opening UI.
+`connect_simulator` starts the simulator session without opening UI. Always call
+it first and proceed only if it succeeds. When an interactive preview is
+requested, follow it with `open_simview` using the same UDID; the preview then
+boots from the connected session and immediately requests fullscreen.
 
 Agents navigate with a semantic visual loop: call `observe_screen`, choose an
 accessible identifier/role/name, call `tap_element`, wait for an observable
@@ -137,11 +139,14 @@ durations/timeouts use millisecond-bearing options. See
 [docs/protocol.md](docs/protocol.md) for the wire contract.
 
 Point annotations remain in memory for the current session. **Send to Chat**
-sends the exact displayed canvas as a PNG with compact normalized coordinate
-comments; no review files are written. Annotations are isolated by review and
-Simulator UDID, survive switching away and back during that live review, and
-are deleted when its MCP bridge closes. Entering **Annotate** freezes the
-visible frame and returning to **Interact** resumes the live stream.
+sends a structured `/SimView` implementation handoff before the exact displayed
+canvas, element crops, and compact normalized coordinate comments. The handoff
+tells the agent to implement the saved feedback in the current project without
+opening another SimView review. No review files are written. Annotations are
+isolated by review and Simulator UDID, survive switching away and back during
+that live review, and are deleted when its MCP bridge closes. Entering
+**Annotate** freezes the visible frame and returning to **Interact** resumes the
+live stream.
 
 ## Repository map
 

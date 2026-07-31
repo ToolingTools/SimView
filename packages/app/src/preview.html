@@ -365,6 +365,31 @@
         font-size: 24px;
         letter-spacing: .04em;
       }
+      .startup {
+        z-index: 5;
+        padding: 28px;
+        background:
+          radial-gradient(circle at 50% 42%, rgba(22, 131, 255, .14), transparent 38%),
+          #080b0f;
+      }
+      .startup > span:last-child {
+        max-width: 320px;
+        line-height: 1.5;
+      }
+      .startup-spinner {
+        width: 30px;
+        height: 30px;
+        justify-self: center;
+        border: 2px solid rgba(255, 255, 255, .18);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: startup-spin .8s linear infinite;
+      }
+      .startup-error strong { color: var(--alert); }
+      @keyframes startup-spin { to { transform: rotate(360deg); } }
+      @media (prefers-reduced-motion: reduce) {
+        .startup-spinner { animation-duration: 1.8s; }
+      }
       .annotation-mark {
         position: absolute;
         border: 1.5px solid var(--warn);

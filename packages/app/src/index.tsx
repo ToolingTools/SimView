@@ -19,6 +19,7 @@ import {
 import { type ComponentChildren, render } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
+  annotationMessageContent,
   commentableNodeAtPoint,
   compactIdentifier,
   contextForInspectedNode,
@@ -65,6 +66,13 @@ type PointerInput = {
   x: number;
   y: number;
 };
+type StartupPhase = "connecting" | "waiting-for-frame" | "ready" | "error";
+
+declare global {
+  interface Window {
+    __SIMVIEW_INITIAL_STATE__?: unknown;
+  }
+}
 
 const bridge = new App(
   { name: "SimView", version: SIMVIEW_VERSION },
@@ -72,14 +80,17 @@ const bridge = new App(
   { autoResize: true },
 );
 const HOVER_SLOP_PX = 10;
+const initialState = parseSessionState(window.__SIMVIEW_INITIAL_STATE__);
 
 function SimView() {
-  const [state, setState] = useState<State>({
-    reviewId: "",
-    annotations: [],
-    codec: "h264",
-    connected: false,
-  });
+  const [state, setState] = useState<State>(
+    initialState ?? {
+      reviewId: "",
+      annotations: [],
+      codec: "h264",
+      connected: false,
+    },
+  );
   const [streamCodec, setStreamCodec] = useState<"h264" | "mjpeg">(
     "VideoDecoder" in window ? "h264" : "mjpeg",
   );
@@ -114,6 +125,10 @@ function SimView() {
   const [typeText, setTypeText] = useState("");
   const [typingText, setTypingText] = useState(false);
   const [savingComment, setSavingComment] = useState(false);
+  const [startupPhase, setStartupPhase] = useState<StartupPhase>(
+    initialState?.connected ? "waiting-for-frame" : "connecting",
+  );
+  const [startupError, setStartupError] = useState("");
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const screenRef = useRef<HTMLDivElement>(null);
   const editorInputRef = useRef<HTMLTextAreaElement>(null);
@@ -157,6 +172,11 @@ function SimView() {
     bridge.ontoolresult = (result) => {
       const nextState = parseSessionState(result.structuredContent);
       if (nextState) {
+        if (nextState.connected) {
+          setStartupError("");
+          setStartupPhase((current) => (current === "ready" ? current : "waiting-for-frame"));
+          void enterFullscreen();
+        }
         setState((current) =>
           current.reviewId && current.reviewId !== nextState.reviewId ? current : nextState,
         );
@@ -164,27 +184,31 @@ function SimView() {
     };
     bridge
       .connect()
-      .then(async () => {
-        const stateResult = await bridge.callServerTool({
-          name: "get_simview_state",
-          arguments: {},
-        });
-        const nextState = parseSessionState(stateResult.structuredContent);
-        if (nextState) {
-          setState((current) =>
-            current.reviewId && current.reviewId !== nextState.reviewId ? current : nextState,
-          );
-        }
-        const context = bridge.getHostContext();
-        if (context?.availableDisplayModes?.includes("fullscreen")) {
-          const result = await bridge.requestDisplayMode({ mode: "fullscreen" });
-          if (result.mode !== "fullscreen") {
-            show(`Host kept SimView in ${result.mode} mode`);
-          }
-        }
+      .then(() => {
+        if (initialState?.connected) void enterFullscreen();
       })
-      .catch((error) => show(`Host bridge unavailable: ${String(error)}`));
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setStartupError(message);
+        setStartupPhase("error");
+      });
   }, []);
+
+  async function enterFullscreen() {
+    const context = bridge.getHostContext();
+    if (
+      context?.displayMode === "fullscreen" ||
+      !context?.availableDisplayModes?.includes("fullscreen")
+    ) {
+      return;
+    }
+    try {
+      const result = await bridge.requestDisplayMode({ mode: "fullscreen" });
+      if (result.mode !== "fullscreen") show(`Host kept SimView in ${result.mode} mode`);
+    } catch (error) {
+      show(`Unable to enter fullscreen: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   useEffect(() => {
     if (!editor) return;
@@ -329,15 +353,24 @@ function SimView() {
 
   async function loadBrowserState() {
     const hashToken = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
-    if (!hashToken) return;
-    const response = await fetch("/state", {
-      headers: { authorization: `Bearer ${hashToken}` },
-    });
-    if (response.ok) {
+    if (!hashToken) {
+      setStartupError("The local preview link is incomplete.");
+      setStartupPhase("error");
+      return;
+    }
+    try {
+      const response = await fetch("/state", {
+        headers: { authorization: `Bearer ${hashToken}` },
+      });
+      if (!response.ok) throw new Error(`The local relay returned ${response.status}`);
       setState({
         ...sessionStateSchema.parse(await response.json()),
         relayOrigin: location.origin,
       });
+      setStartupPhase("waiting-for-frame");
+    } catch (error) {
+      setStartupError(error instanceof Error ? error.message : String(error));
+      setStartupPhase("error");
     }
   }
 
@@ -398,6 +431,8 @@ function SimView() {
       setDeviceMenuOpen(false);
       return;
     }
+    setStartupError("");
+    setStartupPhase("connecting");
     setSwitchingDevice(device.udid);
     try {
       const nextState = embedded
@@ -431,11 +466,15 @@ function SimView() {
       setUiContext(undefined);
       sentAnnotationIds.current.clear();
       setState(nextState);
+      setStartupPhase("waiting-for-frame");
       setDeviceMenuOpen(false);
       scheduleAccessibilityRefresh();
       show(`Switched to ${nextState.device?.name ?? device.name}`);
     } catch (error) {
-      show(`Unable to switch simulator: ${error instanceof Error ? error.message : String(error)}`);
+      const message = error instanceof Error ? error.message : String(error);
+      setStartupError(message);
+      setStartupPhase("error");
+      show(`Unable to switch simulator: ${message}`);
     } finally {
       setSwitchingDevice(undefined);
     }
@@ -524,6 +563,8 @@ function SimView() {
 
   function commitFrameId(frameId: string) {
     latestFrameIdRef.current = frameId;
+    setStartupError("");
+    setStartupPhase("ready");
     const now = performance.now();
     if (now - lastFrameStateUpdateRef.current < 100) return;
     lastFrameStateUpdateRef.current = now;
@@ -891,23 +932,19 @@ function SimView() {
       `SimView — ${state.device?.name ?? "iOS Simulator"} — frame ${activeFrameId ?? "current"}`,
       ...lines,
     ].join("\n");
-    const content: Array<
-      { type: "image"; data: string; mimeType: "image/png" } | { type: "text"; text: string }
-    > = [{ type: "image", data: imageData, mimeType: "image/png" }];
+    const crops: Array<{ label: string; data: string }> = [];
     visibleAnnotations.forEach((annotation, index) => {
       const crop = croppedAnnotationScreenshot(canvas, annotation);
       if (!crop) return;
       const ax = annotation.context?.accessibility;
-      content.push({
-        type: "text",
-        text: `Annotation ${index + 1} element crop — ${ax?.label ?? ax?.title ?? ax?.roleDescription ?? ax?.role ?? "element"}`,
+      crops.push({
+        label: `Annotation ${index + 1} element crop — ${ax?.label ?? ax?.title ?? ax?.roleDescription ?? ax?.role ?? "element"}`,
+        data: crop,
       });
-      content.push({ type: "image", data: crop, mimeType: "image/png" });
     });
-    content.push({ type: "text", text });
     await bridge.sendMessage({
       role: "user",
-      content,
+      content: annotationMessageContent(imageData, text, crops),
     });
     visibleAnnotations.forEach((annotation) => {
       sentAnnotationIds.current.add(annotation.id);
@@ -1454,10 +1491,23 @@ function SimView() {
                 }}
               />
             )}
-            {!state.connected && (
-              <div class="empty">
-                <strong>No live frame</strong>
-                <span>Call open_simview or use the browser fallback URL.</span>
+            {startupPhase !== "ready" && (
+              <div class={`empty startup ${startupPhase === "error" ? "startup-error" : ""}`}>
+                {startupPhase !== "error" && <span class="startup-spinner" aria-hidden="true" />}
+                <strong>
+                  {startupPhase === "error"
+                    ? "Simulator unavailable"
+                    : startupPhase === "waiting-for-frame"
+                      ? "Starting live preview"
+                      : "Connecting to Simulator"}
+                </strong>
+                <span>
+                  {startupPhase === "error"
+                    ? `${startupError} Choose a booted Simulator from the device menu.`
+                    : startupPhase === "waiting-for-frame"
+                      ? `Waiting for the first frame${state.device?.name ? ` from ${state.device.name}` : ""}…`
+                      : "Finding a booted device and starting capture…"}
+                </span>
               </div>
             )}
             {visibleAnnotations.map((annotation, index) => (

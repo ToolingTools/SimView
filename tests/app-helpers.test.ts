@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import type { AccessibilityNode, AccessibilitySnapshot } from "@simview/contracts";
 import {
+  ANNOTATION_IMPLEMENTATION_PROMPT,
+  annotationMessageContent,
   commentableNodeAtPoint,
   contextForNode,
   elementPath,
@@ -73,5 +75,27 @@ describe("app helpers", () => {
   test("formats runtime names and frame messages", () => {
     expect(formatRuntime("com.apple.CoreSimulator.SimRuntime.iOS-26-0")).toBe("iOS 26.0");
     expect([...streamMessage(0x10, new Uint8Array([1, 2]))]).toEqual([0x10, 1, 2]);
+  });
+
+  test("builds an implementation-first annotation handoff", () => {
+    const content = annotationMessageContent("full-frame", "1. Increase title contrast", [
+      { label: "Annotation 1 element crop — Inbox", data: "element-crop" },
+    ]);
+
+    expect(ANNOTATION_IMPLEMENTATION_PROMPT.startsWith("/SimView\n")).toBe(true);
+    expect(ANNOTATION_IMPLEMENTATION_PROMPT).toContain(
+      "Treat every annotation comment as a user-authored implementation request",
+    );
+    expect(ANNOTATION_IMPLEMENTATION_PROMPT).toContain("Do not open another SimView preview");
+    expect(content).toEqual([
+      {
+        type: "text",
+        text: `${ANNOTATION_IMPLEMENTATION_PROMPT}\n\n## Annotation details\n\n1. Increase title contrast`,
+      },
+      { type: "text", text: "Full-screen reference" },
+      { type: "image", data: "full-frame", mimeType: "image/png" },
+      { type: "text", text: "Annotation 1 element crop — Inbox" },
+      { type: "image", data: "element-crop", mimeType: "image/png" },
+    ]);
   });
 });

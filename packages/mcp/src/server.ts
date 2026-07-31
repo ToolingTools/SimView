@@ -20,6 +20,7 @@ import {
   normalizedPointSchema,
   previewPacketBatchSchema,
   relayInputSchema,
+  type SessionState,
   SIMVIEW_VERSION,
   sessionStateSchema,
   simulatorListSchema,
@@ -101,7 +102,9 @@ export function createServer(session = new SimViewSession()): McpServer {
     "open_simview",
     {
       title: "Open SimView",
-      description: "Start or select a simulator session and open its interactive preview.",
+      description:
+        "Open the interactive preview for an already-connected simulator session. " +
+        "Call connect_simulator first and continue only when it succeeds.",
       inputSchema: { udid: z.string().uuid().optional() },
       outputSchema: sessionStateSchema,
       _meta: metadata.openPreview,
@@ -216,7 +219,7 @@ export function createServer(session = new SimViewSession()): McpServer {
   );
 
   const readPreviewResource = async (uri = new URL(metadata.resourceUri)) => {
-    const html = await appHtml();
+    const html = await appHtml(session.state());
     return {
       contents: [
         {
@@ -694,7 +697,7 @@ function registerAnnotationTools(
   );
 }
 
-async function appHtml(): Promise<string> {
+async function appHtml(initialState: SessionState): Promise<string> {
   const root = resolveAppRoot();
   const templatePath = join(root, "dist", "preview.html");
   const scriptPath = join(root, "dist", "preview.js");
@@ -702,7 +705,7 @@ async function appHtml(): Promise<string> {
     readFile(templatePath, "utf8"),
     readFile(scriptPath, "utf8"),
   ]);
-  return inlineAppModule(template, script);
+  return inlineAppModule(template, script, initialState);
 }
 
 function toolResult(text: string, structuredContent: unknown) {

@@ -90,17 +90,9 @@ export class SimViewSession {
     if (!this.client) {
       const devices = await SimViewClient.listDevices();
       const booted = devices.filter((device) => device.state === "Booted");
-      this.device = udid
-        ? booted.find((device) => device.udid === udid)
-        : booted.length === 1
-          ? booted[0]
-          : undefined;
+      this.device = udid ? booted.find((device) => device.udid === udid) : booted[0];
       if (!this.device) {
-        throw new Error(
-          booted.length === 0
-            ? "No booted simulator is available"
-            : "More than one simulator is booted; pass a UDID",
-        );
+        throw new Error("No booted simulator is available");
       }
       try {
         this.client = await SimViewClient.acquire({ udid: this.device.udid, codec: "h264" });

@@ -18,4 +18,17 @@ describe("MCP App HTML", () => {
     expect(html.match(/<script type="module">/g)).toHaveLength(1);
     expect(html.match(/<\/script>/g)).toHaveLength(1);
   });
+
+  test("embeds initial state without allowing script injection", () => {
+    const template = '<script type="module" src="./preview.js"></script>';
+    const html = inlineAppModule(template, "const ready = true;", {
+      device: { name: "</script><script>bad()</script>" },
+      connected: true,
+    });
+
+    expect(html).toContain("window.__SIMVIEW_INITIAL_STATE__=");
+    expect(html).toContain("\\u003c/script>");
+    expect(html).not.toContain("<script>bad()</script>");
+    expect(html.match(/<script/g)).toHaveLength(2);
+  });
 });

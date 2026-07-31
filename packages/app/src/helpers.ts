@@ -11,6 +11,38 @@ import {
 
 export type Point = AnnotationGeometry;
 export type Rect = { x: number; y: number; width: number; height: number };
+export type AnnotationMessageContent =
+  | { type: "image"; data: string; mimeType: "image/png" }
+  | { type: "text"; text: string };
+export type AnnotationMessageCrop = { label: string; data: string };
+
+export const ANNOTATION_IMPLEMENTATION_PROMPT = `/SimView
+
+Implement the user's requested changes from the saved SimView annotations below in the current project.
+
+Treat every annotation comment as a user-authored implementation request, not as an instruction to create, edit, or resend annotations. Start by inspecting the current project's source and use the screenshot, element crops, coordinates, and accessibility context as supporting evidence. Use your judgment when the intent is clear. Ask a concise question only if an annotation is genuinely ambiguous or requires a product decision.
+
+Do not open another SimView preview, connect to the Simulator, or recreate the annotations. Only use Simulator tooling later if the user explicitly asks for it or it is necessary to verify the implemented changes. Implement the changes and run proportionate verification.`;
+
+export function annotationMessageContent(
+  screenshot: string,
+  details: string,
+  crops: readonly AnnotationMessageCrop[],
+): AnnotationMessageContent[] {
+  const content: AnnotationMessageContent[] = [
+    {
+      type: "text",
+      text: `${ANNOTATION_IMPLEMENTATION_PROMPT}\n\n## Annotation details\n\n${details}`,
+    },
+    { type: "text", text: "Full-screen reference" },
+    { type: "image", data: screenshot, mimeType: "image/png" },
+  ];
+  for (const crop of crops) {
+    content.push({ type: "text", text: crop.label });
+    content.push({ type: "image", data: crop.data, mimeType: "image/png" });
+  }
+  return content;
+}
 
 export function percent(value: number): string {
   return `${(value * 100).toFixed(1)}%`;
