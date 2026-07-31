@@ -19,7 +19,9 @@ import {
 import { type ComponentChildren, render } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
+  annotationCropRect,
   annotationMessageContent,
+  annotationMessageContext,
   claimFullscreenRequest,
   commentableNodeAtPoint,
   compactIdentifier,
@@ -30,7 +32,6 @@ import {
   formatFrame,
   formatProbeValue,
   formatRuntime,
-  normalized,
   parseSessionState,
   percent,
   requireAnnotation,
@@ -889,62 +890,31 @@ function SimView() {
     if (!canvas?.width || !canvas.height) return show("No simulator frame to send");
     const imageData = canvas.toDataURL("image/png").split(",", 2)[1];
     if (!imageData) return show("Screenshot capture failed");
-    const lines = visibleAnnotations.length
-      ? visibleAnnotations.map((annotation, index) => {
-          const ax = annotation.context?.accessibility;
-          const native = annotation.context?.native;
-          const internals = native
-            ? `\n   ${[
-                native.viewClass && `view=${native.viewClass}`,
-                native.controllerClass && `controller=${native.controllerClass}`,
-                native.sceneIdentifier && `scene=${native.sceneIdentifier}`,
-              ]
-                .filter(Boolean)
-                .join(" ")}`
-            : "";
-          const coordinate = `\n   Coordinate: x=${normalized(annotation.geometry.x)} (${percent(annotation.geometry.x)}), y=${normalized(annotation.geometry.y)} (${percent(annotation.geometry.y)})`;
-          const element = ax
-            ? `\n   Element: ${[
-                ax.roleDescription ?? ax.role,
-                ax.title && `title="${ax.title}"`,
-                ax.label && `label="${ax.label}"`,
-                ax.identifier && `id=${ax.identifier}`,
-                ax.value && `value="${ax.value}"`,
-                ax.actions?.length && `actions=${ax.actions.join(",")}`,
-              ]
-                .filter(Boolean)
-                .join(" · ")}`
-            : "";
-          const elementFrame = ax?.frame
-            ? `\n   Element bounds: x=${normalized(ax.frame.x)} (${percent(ax.frame.x)}), y=${normalized(ax.frame.y)} (${percent(ax.frame.y)}), width=${normalized(ax.frame.width)} (${percent(ax.frame.width)}), height=${normalized(ax.frame.height)} (${percent(ax.frame.height)})`
-            : "";
-          const path = ax?.path?.length ? `\n   Hierarchy: ${ax.path.join(" › ")}` : "";
-          return `${index + 1}. ${annotation.note}${coordinate}${element}${elementFrame}${path}${internals}`;
-        })
-      : ["No coordinate comments."];
-    const text = [
-      `SimView — ${state.device?.name ?? "iOS Simulator"} — frame ${activeFrameId ?? "current"}`,
-      ...lines,
-    ].join("\n");
-    const crops: Array<{ label: string; data: string }> = [];
-    visibleAnnotations.forEach((annotation, index) => {
-      const crop = croppedAnnotationScreenshot(canvas, annotation);
-      if (!crop) return;
-      const ax = annotation.context?.accessibility;
-      crops.push({
-        label: `Annotation ${index + 1} element crop — ${ax?.label ?? ax?.title ?? ax?.roleDescription ?? ax?.role ?? "element"}`,
-        data: crop,
+    const includeImages = Boolean(bridge.getHostCapabilities()?.message?.image);
+    const annotations = visibleAnnotations.map((annotation) => ({
+      text: annotation.note,
+      context: annotationMessageContext(annotation),
+      crop: includeImages ? croppedAnnotationScreenshot(canvas, annotation) : undefined,
+    }));
+    try {
+      const result = await bridge.sendMessage({
+        role: "user",
+        content: annotationMessageContent(imageData, annotations, includeImages),
       });
-    });
-    await bridge.sendMessage({
-      role: "user",
-      content: annotationMessageContent(imageData, text, crops),
-    });
+      if (result.isError) throw new Error("The MCP host rejected the message");
+    } catch (error) {
+      show(`Unable to send annotations: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
     visibleAnnotations.forEach((annotation) => {
       sentAnnotationIds.current.add(annotation.id);
     });
     completeEnterInteractMode();
-    show("Sent screenshot, element crops, and comments to chat");
+    show(
+      includeImages
+        ? "Sent frozen frame, annotations, and crops to chat"
+        : "Sent annotations to chat; this host does not support image attachments",
+    );
   }
 
   async function captureOnly() {
@@ -2037,8 +2007,7 @@ function croppedAnnotationScreenshot(
   canvas: HTMLCanvasElement,
   annotation: Annotation,
 ): string | undefined {
-  const frame = annotation.context?.accessibility?.frame;
-  if (!frame) return undefined;
+  const frame = annotationCropRect(annotation);
   const left = Math.max(0, Math.min(canvas.width, Math.floor(frame.x * canvas.width)));
   const top = Math.max(0, Math.min(canvas.height, Math.floor(frame.y * canvas.height)));
   const right = Math.max(

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "simview": {
+      "command": "/Users/stephenradford/Documents/SimView/artifacts/plugin/simview/bin/simview",
+      "args": ["mcp"]
+    }
+  }
+}

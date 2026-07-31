@@ -143,10 +143,12 @@ durations/timeouts use millisecond-bearing options. See
 [docs/protocol.md](docs/protocol.md) for the wire contract.
 
 Point annotations remain in memory for the current session. **Send to Chat**
-sends a structured `/SimView` implementation handoff before the exact displayed
-canvas, element crops, and compact normalized coordinate comments. The handoff
-tells the agent to implement the saved feedback in the current project without
-opening another SimView review. No review files are written. Annotations are
+sends an implementation prompt, the exact frozen canvas, and then each concise
+annotation/context block followed by its element crop. Images are standard MCP
+image content blocks when the host advertises image-message support; otherwise
+SimView sends the prompt and annotations as text. The handoff tells the agent to
+implement the saved feedback in the current project without opening another
+SimView review. No review files are written. Annotations are
 isolated by review and Simulator UDID, survive switching away and back during
 that live review, and are deleted when its MCP bridge closes. Entering
 **Annotate** freezes the visible frame and returning to **Interact** resumes the

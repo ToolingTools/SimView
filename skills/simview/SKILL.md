@@ -34,9 +34,9 @@ Simulator.
 
 ## Implementing annotations sent to chat
 
-A **Send to Chat** message that begins with `/SimView` and asks to implement
-saved annotations is an implementation handoff, not a request to start another
-SimView review.
+A **Send to Chat** message that asks to implement saved annotations and includes
+the frozen frame and annotation crops is an implementation handoff, not a
+request to start another SimView review.
 
 - Treat each annotation comment as a user-authored change request for the
   current project. Start by inspecting and editing that project's source.

@@ -14,42 +14,90 @@ export type Rect = { x: number; y: number; width: number; height: number };
 export type AnnotationMessageContent =
   | { type: "image"; data: string; mimeType: "image/png" }
   | { type: "text"; text: string };
-export type AnnotationMessageCrop = { label: string; data: string };
+export type AnnotationMessageItem = {
+  text: string;
+  context: readonly string[];
+  crop?: string | undefined;
+};
 
-export const ANNOTATION_IMPLEMENTATION_PROMPT = `/SimView
+export const ANNOTATION_IMPLEMENTATION_PROMPT = `Implement all clear UI changes requested in the SimView annotations below in the current project.
 
-Implement the user's requested changes from the saved SimView annotations below in the current project.
+Treat each annotation as the user's implementation request. Use any supplied screenshots and UI identifiers as supporting evidence to locate the relevant code.
 
-Treat every annotation comment as a user-authored implementation request, not as an instruction to create, edit, or resend annotations. Start by inspecting the current project's source and use the screenshot, element crops, coordinates, and accessibility context as supporting evidence. Use your judgment when the intent is clear. Ask a concise question only if an annotation is genuinely ambiguous or requires a product decision.
+Inspect the source, make the changes, and run proportionate verification. Do not open another SimView review or recreate the annotations. Ask a concise question only when a request is genuinely ambiguous or needs a product decision.`;
 
-Do not open another SimView preview, connect to the Simulator, or recreate the annotations. Only use Simulator tooling later if the user explicitly asks for it or it is necessary to verify the implemented changes. Implement the changes and run proportionate verification.`;
+export function annotationMessageContext(annotation: Annotation): string[] {
+  const accessibility = annotation.context?.accessibility;
+  const native = annotation.context?.native;
+  const metro = annotation.context?.metro;
+  const object = accessibility?.roleDescription ?? accessibility?.role ?? native?.viewClass;
+  const route = metro?.route ?? annotation.route;
+  const component = metro?.component ?? annotation.component?.label;
+  const testID = metro?.testID ?? annotation.component?.testID;
+  const source = metro?.source ?? annotation.component?.source;
+  const controller = native?.controllerPath?.length
+    ? native.controllerPath.join(" › ")
+    : native?.controllerClass;
+
+  return [
+    object && `Object: ${object.replace(/^AX/, "")}`,
+    `Coordinate: x=${percent(annotation.geometry.x)}, y=${percent(annotation.geometry.y)}`,
+    accessibility?.identifier && `ID: ${accessibility.identifier}`,
+    accessibility?.title && `Title: "${accessibility.title}"`,
+    accessibility?.label && `Label: "${accessibility.label}"`,
+    accessibility?.value && `Value: "${accessibility.value}"`,
+    accessibility?.path?.length && `Hierarchy: ${accessibility.path.join(" › ")}`,
+    route && `Route: ${route}`,
+    component && `Component: ${component}`,
+    testID && testID !== accessibility?.identifier && `Test ID: ${testID}`,
+    source && `Source: ${source}`,
+    native?.viewClass && native.viewClass !== object && `View: ${native.viewClass}`,
+    controller && `Controller: ${controller}`,
+  ].filter((value): value is string => Boolean(value));
+}
 
 export function annotationMessageContent(
   screenshot: string,
-  details: string,
-  crops: readonly AnnotationMessageCrop[],
+  annotations: readonly AnnotationMessageItem[],
+  includeImages = true,
 ): AnnotationMessageContent[] {
   const content: AnnotationMessageContent[] = [
-    {
-      type: "text",
-      text: `${ANNOTATION_IMPLEMENTATION_PROMPT}\n\n## Annotation details\n\n${details}`,
-    },
-    { type: "text", text: "Full-screen reference" },
-    { type: "image", data: screenshot, mimeType: "image/png" },
+    { type: "text", text: ANNOTATION_IMPLEMENTATION_PROMPT },
   ];
-  for (const crop of crops) {
-    content.push({ type: "text", text: crop.label });
-    content.push({ type: "image", data: crop.data, mimeType: "image/png" });
+  if (includeImages) {
+    content.push({ type: "image", data: screenshot, mimeType: "image/png" });
+  }
+  for (const [index, annotation] of annotations.entries()) {
+    const context = annotation.context.length
+      ? annotation.context.map((value) => `- ${value}`).join("\n")
+      : "- No UI identifiers were available.";
+    content.push({
+      type: "text",
+      text: `${index === 0 ? "## Annotations\n\n" : ""}${index + 1}. Annotation: ${annotation.text}\nContext:\n${context}`,
+    });
+    if (includeImages && annotation.crop) {
+      content.push({ type: "image", data: annotation.crop, mimeType: "image/png" });
+    }
   }
   return content;
 }
 
-export function percent(value: number): string {
-  return `${(value * 100).toFixed(1)}%`;
+export function annotationCropRect(annotation: Annotation): Rect {
+  const frame = annotation.context?.accessibility?.frame;
+  const centerX = frame ? frame.x + frame.width / 2 : annotation.geometry.x;
+  const centerY = frame ? frame.y + frame.height / 2 : annotation.geometry.y;
+  const width = Math.min(1, Math.max(0.36, frame ? frame.width * 1.5 : 0));
+  const height = Math.min(1, Math.max(0.24, frame ? frame.height * 1.5 : 0));
+  return {
+    x: Math.max(0, Math.min(1 - width, centerX - width / 2)),
+    y: Math.max(0, Math.min(1 - height, centerY - height / 2)),
+    width,
+    height,
+  };
 }
 
-export function normalized(value: number): string {
-  return value.toFixed(4);
+export function percent(value: number): string {
+  return `${(value * 100).toFixed(1)}%`;
 }
 
 export function parseSessionState(value: unknown): SessionState | undefined {

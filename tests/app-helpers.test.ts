@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import type { AccessibilityNode, AccessibilitySnapshot } from "@simview/contracts";
 import {
   ANNOTATION_IMPLEMENTATION_PROMPT,
+  annotationCropRect,
   annotationMessageContent,
+  annotationMessageContext,
   claimFullscreenRequest,
   commentableNodeAtPoint,
   contextForNode,
@@ -97,24 +99,97 @@ describe("app helpers", () => {
   });
 
   test("builds an implementation-first annotation handoff", () => {
-    const content = annotationMessageContent("full-frame", "1. Increase title contrast", [
-      { label: "Annotation 1 element crop — Inbox", data: "element-crop" },
+    const context = annotationMessageContext({
+      id: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
+      frameId: "frame-1",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      geometry: { kind: "point", x: 0.25, y: 0.25 },
+      note: "Increase title contrast",
+      context: {
+        capturedAt: "2026-07-31T10:00:00.000Z",
+        accessibility: {
+          snapshotId: "snapshot-1",
+          role: "AXButton",
+          label: "Inbox",
+          identifier: "inbox-button",
+          actions: ["AXPress"],
+          frame: { x: 0.2, y: 0.2, width: 0.2, height: 0.1 },
+          path: ["Screen", "Inbox"],
+        },
+        metro: {
+          route: "/inbox",
+          component: "InboxButton",
+          testID: "inbox-cta",
+          source: "src/InboxButton.tsx",
+        },
+        native: {
+          viewClass: "UIButton",
+          controllerClass: "InboxViewController",
+          sceneIdentifier: "scene-1",
+        },
+      },
+    });
+    const content = annotationMessageContent("full-frame", [
+      { text: "Increase title contrast", context, crop: "element-crop" },
     ]);
 
-    expect(ANNOTATION_IMPLEMENTATION_PROMPT.startsWith("/SimView\n")).toBe(true);
-    expect(ANNOTATION_IMPLEMENTATION_PROMPT).toContain(
-      "Treat every annotation comment as a user-authored implementation request",
-    );
-    expect(ANNOTATION_IMPLEMENTATION_PROMPT).toContain("Do not open another SimView preview");
+    expect(ANNOTATION_IMPLEMENTATION_PROMPT.startsWith("/SimView\n")).toBe(false);
+    expect(ANNOTATION_IMPLEMENTATION_PROMPT).toContain("Do not open another SimView review");
+    expect(context).toEqual([
+      "Object: Button",
+      "Coordinate: x=25.0%, y=25.0%",
+      "ID: inbox-button",
+      'Label: "Inbox"',
+      "Hierarchy: Screen › Inbox",
+      "Route: /inbox",
+      "Component: InboxButton",
+      "Test ID: inbox-cta",
+      "Source: src/InboxButton.tsx",
+      "View: UIButton",
+      "Controller: InboxViewController",
+    ]);
+    expect(context.join("\n")).not.toContain("AXPress");
+    expect(context.join("\n")).not.toContain("0.2");
+    expect(context.join("\n")).not.toContain("scene-1");
     expect(content).toEqual([
+      { type: "text", text: ANNOTATION_IMPLEMENTATION_PROMPT },
+      { type: "image", data: "full-frame", mimeType: "image/png" },
       {
         type: "text",
-        text: `${ANNOTATION_IMPLEMENTATION_PROMPT}\n\n## Annotation details\n\n1. Increase title contrast`,
+        text: `## Annotations\n\n1. Annotation: Increase title contrast\nContext:\n${context.map((value) => `- ${value}`).join("\n")}`,
       },
-      { type: "text", text: "Full-screen reference" },
-      { type: "image", data: "full-frame", mimeType: "image/png" },
-      { type: "text", text: "Annotation 1 element crop — Inbox" },
       { type: "image", data: "element-crop", mimeType: "image/png" },
     ]);
+  });
+
+  test("falls back to text blocks when the host does not support images", () => {
+    expect(
+      annotationMessageContent(
+        "full-frame",
+        [{ text: "Increase title contrast", context: ["Object: Button"], crop: "crop" }],
+        false,
+      ),
+    ).toEqual([
+      { type: "text", text: ANNOTATION_IMPLEMENTATION_PROMPT },
+      {
+        type: "text",
+        text: "## Annotations\n\n1. Annotation: Increase title contrast\nContext:\n- Object: Button",
+      },
+    ]);
+  });
+
+  test("crops around an annotation when no accessibility bounds are available", () => {
+    const crop = annotationCropRect({
+      id: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
+      frameId: "frame-1",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      geometry: { kind: "point", x: 0.9, y: 0.9 },
+      note: "Move this control",
+    });
+
+    expect(crop.x).toBeCloseTo(0.64);
+    expect(crop.y).toBeCloseTo(0.76);
+    expect(crop.width).toBeCloseTo(0.36);
+    expect(crop.height).toBeCloseTo(0.24);
   });
 });
