@@ -90,7 +90,7 @@ jobs:
         run: |
           for BINARY in packages/cli/dist/simview packages/core/bin/simview-core packages/core/bin/libSimViewProbe.dylib
           do
-            lipo -verify_arch arm64 x86_64 "${BINARY}"
+            lipo "${BINARY}" -verify_arch arm64 x86_64
             codesign --verify --strict --verbose=2 "${BINARY}"
             codesign -dv --verbose=4 "${BINARY}" 2>&1 | grep -F "Authority=${SIMVIEW_SIGNING_IDENTITY}"
           done
