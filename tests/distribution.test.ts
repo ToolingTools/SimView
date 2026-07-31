@@ -22,6 +22,7 @@ describe("release distribution", () => {
     expect(manifest.cpu).toEqual(["arm64", "x64"]);
     expect(manifest.bin).toEqual({ simview: "./bin/simview" });
     expect(manifest.dependencies).toBeUndefined();
+    expect(repositoryUrl).toBe("https://github.com/ToolingTools/SimView");
     expect(manifest.repository.url).toBe(`${repositoryUrl}.git`);
   });
 

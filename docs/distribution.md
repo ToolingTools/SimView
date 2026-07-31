@@ -84,6 +84,13 @@ After the first publish, configure npm trusted publishing for:
 - GitHub owner: `ToolingTools`
 - repository: `SimView`
 - workflow: `release.yml`
+- environment: `release`
+- allowed action: `npm publish`
+
+These values are case-sensitive and must match the GitHub Actions OIDC identity
+exactly. The workflow's publish job uses the protected `release` environment,
+so the trusted publisher must use that environment too. `npm stage publish` is
+not required by the current release workflow.
 
 The generated package has no lifecycle scripts and does not download a binary
 at install time. Codex can therefore install it from an npm marketplace source
