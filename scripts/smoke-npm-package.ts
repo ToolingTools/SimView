@@ -6,7 +6,8 @@ const rootManifest = (await Bun.file(join(root, "package.json")).json()) as {
   version: string;
 };
 const tarball = resolve(
-  process.argv[2] ?? join(root, "artifacts", "release", `simview-${rootManifest.version}.tgz`),
+  process.argv[2] ??
+    join(root, "artifacts", "release", `toolingtools-simview-${rootManifest.version}.tgz`),
 );
 const npmCache = join(root, ".simview", "npm-smoke-cache");
 const bunCache = join(root, ".simview", "bun-smoke-cache");

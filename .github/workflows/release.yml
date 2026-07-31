@@ -115,7 +115,7 @@ jobs:
             artifacts/release/release-manifest.json
             artifacts/release/sbom.cdx.json
       - name: Publish npm package with provenance
-        run: npm publish artifacts/release/simview-*.tgz --access public --provenance
+        run: npm publish artifacts/release/toolingtools-simview-*.tgz --access public --provenance
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}

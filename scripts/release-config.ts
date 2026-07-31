@@ -2,7 +2,7 @@ export const repositoryUrl = "https://github.com/toolingtools/SimView";
 
 export function createNpmPackageManifest(
   version: string,
-  name = "simview",
+  name = "@toolingtools/simview",
 ): Record<string, unknown> {
   return {
     name,

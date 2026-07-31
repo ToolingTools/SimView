@@ -6,9 +6,10 @@ const root = resolve(import.meta.dir, "..");
 const artifacts = join(root, "artifacts", "release");
 const archiveRoot = join(root, "artifacts", "archive");
 const rootManifest = (await Bun.file(join(root, "package.json")).json()) as {
+  name: string;
   version: string;
 };
-const { version } = rootManifest;
+const { name, version } = rootManifest;
 
 await rm(artifacts, { recursive: true, force: true });
 await rm(archiveRoot, { recursive: true, force: true });
@@ -77,7 +78,7 @@ await writeFile(
   `${JSON.stringify(
     {
       schemaVersion: 1,
-      name: "simview",
+      name,
       version,
       sourceRevision: process.env.GITHUB_SHA ?? null,
       architectures: ["arm64", "x86_64"],

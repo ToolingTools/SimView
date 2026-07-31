@@ -37,13 +37,13 @@ dependency and compiled-artifact CycloneDX inventory). The manifest is the
 artifact index; the SBOM is not a file-list substitute.
 
 The internal Bun workspaces are private and are not published separately.
-`scripts/package-npm.ts` generates the public `simview` package under
+`scripts/package-npm.ts` generates the public `@toolingtools/simview` package under
 `artifacts/` only after the release binaries exist.
 
 ## GitHub release setup
 
-Tags must match the root package version exactly: version `0.1.6` is released
-from tag `v0.1.6`.
+Tags must match the root package version exactly: version `0.1.7` is released
+from tag `v0.1.7`.
 
 Configure these GitHub Actions secrets:
 
@@ -76,13 +76,12 @@ release gate.
 
 ## npm bootstrap
 
-The first public publish establishes ownership of the `simview` package name.
-If that name cannot be claimed, set `SIMVIEW_NPM_PACKAGE_NAME` while packaging
-and update the release workflow tarball name before publishing.
+The first public publish establishes ownership of the `@toolingtools/simview`
+package name.
 
 After the first publish, configure npm trusted publishing for:
 
-- GitHub owner: `steve228uk`
+- GitHub owner: `ToolingTools`
 - repository: `SimView`
 - workflow: `release.yml`
 
@@ -109,8 +108,8 @@ The Codex catalog entry can reference the npm package:
   "name": "simview",
   "source": {
     "source": "npm",
-    "package": "simview",
-    "version": "^0.1.6",
+    "package": "@toolingtools/simview",
+    "version": "^0.1.7",
     "registry": "https://registry.npmjs.org"
   },
   "policy": {
@@ -128,8 +127,8 @@ The Claude Code catalog can reference the same package:
   "name": "simview",
   "source": {
     "source": "npm",
-    "package": "simview",
-    "version": "^0.1.6",
+    "package": "@toolingtools/simview",
+    "version": "^0.1.7",
     "registry": "https://registry.npmjs.org"
   },
   "category": "Developer Tools"

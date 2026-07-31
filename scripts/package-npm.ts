@@ -4,12 +4,12 @@ import { createNpmPackageManifest } from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
 const release = join(root, "artifacts", "release");
-const stage = join(root, "artifacts", "npm", "simview");
+const stage = join(root, "artifacts", "npm", "toolingtools-simview");
 const npmCache = join(root, ".simview", "npm-cache");
 const rootManifest = (await Bun.file(join(root, "package.json")).json()) as {
   version: string;
 };
-const packageName = process.env.SIMVIEW_NPM_PACKAGE_NAME ?? "simview";
+const packageName = process.env.SIMVIEW_NPM_PACKAGE_NAME ?? "@toolingtools/simview";
 
 await rm(stage, { recursive: true, force: true });
 await mkdir(join(stage, "bin"), { recursive: true });
