@@ -255,14 +255,6 @@ function SimView() {
     void loadUiContext();
   }, [state.connected, embedded, token]);
 
-  useEffect(() => {
-    if (!elementsOpen || editor || !state.connected) return;
-    const interval = window.setInterval(() => {
-      void loadAccessibility(true);
-    }, 4_000);
-    return () => window.clearInterval(interval);
-  }, [elementsOpen, Boolean(editor), state.connected, state.device?.udid, embedded, token]);
-
   useEffect(
     () => () => {
       if (accessibilityRefreshTimer.current) {
@@ -1449,7 +1441,7 @@ function SimView() {
             onClick={() => {
               setElementsOpen((value) => {
                 if (!value) {
-                  if (!accessibility) void loadAccessibility();
+                  void loadAccessibility();
                   void loadUiContext();
                 }
                 return !value;

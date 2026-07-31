@@ -25,7 +25,7 @@ describe("release distribution", () => {
     expect(manifest.repository.url).toBe(`${repositoryUrl}.git`);
   });
 
-  test("routes Codex and MCPB through the consolidated executable", async () => {
+  test("routes the Claude plugin and MCPB through the consolidated executable", async () => {
     const mcp = (await Bun.file(join(root, ".mcp.json")).json()) as {
       mcpServers: { simview: { command: string; args: string[] } };
     };
@@ -37,7 +37,7 @@ describe("release distribution", () => {
     };
 
     expect(mcp.mcpServers.simview).toMatchObject({
-      command: "./bin/simview",
+      command: "$" + "{CLAUDE_PLUGIN_ROOT}/bin/simview",
       args: ["mcp"],
     });
     expect(mcpb.server.entry_point).toBe("bin/simview");
