@@ -46,6 +46,19 @@ swift build --package-path native/SimViewCore -c release
 bun run check
 ```
 
+The repository requires Bun 1.3.14. `bun run check` also verifies the shared
+version source, Biome/Swift/Objective-C formatting, TypeScript, Bun coverage,
+and Swift tests. For a release-shaped build and package smoke test:
+
+```sh
+bun run release:build
+bun run smoke:npm
+```
+
+`release:build` refreshes the universal CLI, native core, and probe before
+writing checksums, `release-manifest.json`, and a CycloneDX SBOM. Do not test a
+packaged plugin or npm tarball against stale `dist` or native output.
+
 If SwiftPM's nested sandbox conflicts with a managed environment:
 
 ```sh
@@ -60,14 +73,26 @@ bun packages/cli/src/index.ts doctor --json
 bun packages/cli/src/index.ts preview
 bun packages/cli/src/index.ts screenshot --output ./simulator.png
 bun packages/cli/src/index.ts tap --x 0.5 --y 0.75
-bun packages/cli/src/index.ts swipe --from 0.5,0.8 --to 0.5,0.2 --duration 350
+bun packages/cli/src/index.ts swipe --from 0.5,0.8 --to 0.5,0.2 --duration-ms 350
 bun packages/cli/src/index.ts type "Hello 👋"
 bun packages/cli/src/index.ts button home
+bun packages/cli/src/index.ts daemon status --json
+bun packages/cli/src/index.ts daemon stop --udid <uuid>
+bun packages/cli/src/index.ts daemon prune
 ```
 
 `preview` binds an authenticated relay to a random port on `127.0.0.1`. The
 session token is random, endpoints reject unauthenticated requests, and the
 native core uses a mode-0700 temporary directory with a mode-0600 Unix socket.
+MCP sessions acquire one detached native backend per Simulator UDID, so several
+Codex/MCP tasks share the same capture and encoder process. Each task still has
+its own stdio bridge, relay, review ID, and annotations. The backend stops
+capture when its last authenticated client leaves and exits after five idle
+minutes. `SimViewClient.start()` remains the explicit ephemeral/test path; set
+`SIMVIEW_BACKEND_MODE=ephemeral` to diagnose the registry in isolation.
+Use `simview daemon status`, `stop --udid <uuid>` (or `stop --all`), and
+`prune` to inspect or explicitly manage sanitized backend records. `prune`
+only removes records whose recorded process is confirmed dead.
 
 ## MCP
 
@@ -105,16 +130,25 @@ CoreSimulator, with no simulator service or separate install. An optional
 bundled UIKit probe can explicitly relaunch one third-party app to add concrete
 view class, hit-test, controller, window, and scene context.
 
+Protocol requests and results are keyed by method and validated at runtime with
+the browser-safe Zod contracts in `packages/contracts`. Accessibility selectors
+must contain a matching field, wait states are `visible` or `hidden`, and CLI
+durations/timeouts use millisecond-bearing options. See
+[docs/protocol.md](docs/protocol.md) for the wire contract.
+
 Point annotations remain in memory for the current session. **Send to Chat**
 sends the exact displayed canvas as a PNG with compact normalized coordinate
-comments; no review files are written. Entering **Annotate** freezes the visible
-frame and returning to **Interact** resumes the live stream.
+comments; no review files are written. Annotations are isolated by review and
+Simulator UDID, survive switching away and back during that live review, and
+are deleted when its MCP bridge closes. Entering **Annotate** freezes the
+visible frame and returning to **Interact** resumes the live stream.
 
 ## Repository map
 
 ```text
 packages/core     npm binary resolver
-packages/client   protocol types, framing, process lifecycle
+packages/contracts shared Zod schemas, wire types, and method map
+packages/client   framing, validated requests, process lifecycle, daemon registry
 packages/cli      human and automation CLI
 packages/mcp      MCP tools, review state, authenticated relay
 packages/app      Preact MCP App and browser fallback
@@ -126,6 +160,9 @@ skills/simview    portable Codex/Claude operational skill
 The protocol is documented in [docs/protocol.md](docs/protocol.md). Private API
 compatibility and the release matrix live in
 [docs/compatibility.md](docs/compatibility.md).
+The ownership and trust boundaries are described in
+[docs/architecture.md](docs/architecture.md), and contributor workflows are in
+[CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Release safety
 

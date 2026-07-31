@@ -1,5 +1,5 @@
-import Foundation
 import Darwin
+import Foundation
 
 final class ProbeCoordinator: @unchecked Sendable {
     private let condition = NSCondition()
@@ -19,13 +19,14 @@ final class ProbeCoordinator: @unchecked Sendable {
     }
 
     func status() -> [String: Any] {
-        [
+        var result: [String: Any] = [
             "schemaVersion": 1,
             "bundled": bundled,
             "connected": connected,
-            "bundleId": bundleID as Any? ?? NSNull(),
-            "pid": processID as Any? ?? NSNull(),
         ]
+        if let bundleID { result["bundleId"] = bundleID }
+        if let processID { result["pid"] = processID }
+        return result
     }
 
     func target(udid: String) -> [String: Any] {
@@ -40,7 +41,6 @@ final class ProbeCoordinator: @unchecked Sendable {
         guard listing.status == 0 else {
             return [
                 "schemaVersion": 1,
-                "bundleId": NSNull(),
                 "source": "simctl",
                 "error": listing.error.nonEmpty ?? "Unable to inspect Simulator applications",
             ]
@@ -59,7 +59,7 @@ final class ProbeCoordinator: @unchecked Sendable {
             }
             return ["schemaVersion": 1, "bundleId": bundleID, "source": "simctl"]
         }
-        return ["schemaVersion": 1, "bundleId": NSNull(), "source": "simctl"]
+        return ["schemaVersion": 1, "source": "simctl"]
     }
 
     static func applicationServiceLabels(_ output: String) -> [String] {
@@ -174,7 +174,9 @@ final class ProbeCoordinator: @unchecked Sendable {
                 )
             }
         }
-        return ["schemaVersion": 1, "disabled": true, "bundleId": target as Any? ?? NSNull()]
+        var result: [String: Any] = ["schemaVersion": 1, "disabled": true]
+        if let target { result["bundleId"] = target }
+        return result
     }
 
     func close() {
@@ -249,14 +251,19 @@ final class ProbeCoordinator: @unchecked Sendable {
 
     private func readLine(_ fd: Int32, maximum: Int) throws -> Data {
         var result = Data()
-        var byte: UInt8 = 0
+        var buffer = [UInt8](repeating: 0, count: min(16 * 1024, maximum))
         while result.count < maximum {
-            let count = Darwin.recv(fd, &byte, 1, 0)
+            let capacity = min(buffer.count, maximum - result.count)
+            let count = Darwin.recv(fd, &buffer, capacity, 0)
             if count <= 0 {
                 throw SimViewError("PROBE_CONNECTION_TIMEOUT", "The UIKit probe did not respond")
             }
-            if byte == 0x0a { return result }
-            result.append(byte)
+            let received = buffer.prefix(count)
+            if let newline = received.firstIndex(of: 0x0a) {
+                result.append(contentsOf: received[..<newline])
+                return result
+            }
+            result.append(contentsOf: received)
         }
         throw SimViewError("PROBE_RESPONSE_TOO_LARGE", "The UIKit probe response exceeded the size limit")
     }

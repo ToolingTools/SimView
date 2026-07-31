@@ -1,32 +1,44 @@
-import { render, type ComponentChildren } from "preact";
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import { App } from "@modelcontextprotocol/ext-apps";
+import {
+  type AnnotationContext,
+  type AnnotationGeometry,
+  accessibilitySnapshotSchema,
+  type AccessibilityNode as ContractAccessibilityNode,
+  type AccessibilitySnapshot as ContractAccessibilitySnapshot,
+  type Annotation as ContractAnnotation,
+  type DeviceDescription,
+  inspectPointOutputSchema,
+  previewPacketBatchSchema,
+  type SessionState,
+  SIMVIEW_VERSION,
+  sessionStateSchema,
+  simulatorListSchema,
+  type UiContext,
+  uiContextSchema,
+} from "@simview/contracts";
+import { type ComponentChildren, render } from "preact";
+import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import {
+  commentableNodeAtPoint,
+  compactIdentifier,
+  contextForInspectedNode,
+  contextForNode,
+  elementName,
+  flattenTree,
+  formatFrame,
+  formatProbeValue,
+  formatRuntime,
+  normalized,
+  parseSessionState,
+  percent,
+  requireAnnotation,
+  streamMessage,
+  visibleTree,
+} from "./helpers";
 
-type Point = { kind: "point"; x: number; y: number };
-type Rect = { x: number; y: number; width: number; height: number };
-type AccessibilityNode = {
-  ref: string;
-  role?: string;
-  roleDescription?: string;
-  subrole?: string;
-  label?: string;
-  title?: string;
-  identifier?: string;
-  value?: string;
-  help?: string;
-  placeholder?: string;
-  enabled?: boolean;
-  focused?: boolean;
-  hidden?: boolean;
-  actions?: string[];
-  frame?: { normalized: Rect };
-  children?: AccessibilityNode[];
-};
-type AccessibilitySnapshot = {
-  snapshotId: string;
-  capturedAt: string;
-  root: AccessibilityNode;
-  stats: { nodeCount: number; truncated: boolean };
+type Point = AnnotationGeometry;
+type AccessibilityNode = ContractAccessibilityNode;
+type AccessibilitySnapshot = ContractAccessibilitySnapshot & {
   native?: {
     viewClass?: string;
     controllerClass?: string;
@@ -35,109 +47,17 @@ type AccessibilitySnapshot = {
     sceneIdentifier?: string;
   };
 };
-type ProbeStatus = {
-  bundled: boolean;
-  connected: boolean;
-  bundleId?: string;
-  pid?: number;
-};
-type ControllerNode = {
-  className: string;
-  title?: string;
-  relationship: string;
-  visible: boolean;
-  children?: ControllerNode[];
-};
-type ProbeWindow = {
-  className: string;
-  key: boolean;
-  hidden: boolean;
-  visibleControllerPath?: string[];
-  controllerTree?: ControllerNode;
-};
-type ProbeScene = {
-  persistentIdentifier: string;
-  role: string;
-  activationState: string;
-  configurationName?: string;
-  delegateClass?: string;
-  windows?: ProbeWindow[];
-};
-type UiContext = {
-  status: ProbeStatus;
-  target?: {
-    bundleId?: string;
-    source: "probe" | "simctl";
-    error?: string;
-  };
-  context?: {
-    schemaVersion: number;
-    scenes?: ProbeScene[];
-  };
-};
-type AnnotationContext = {
-  capturedAt: string;
-  accessibility?: {
-    snapshotId: string;
-    ref?: string;
-    role?: string;
-    roleDescription?: string;
-    title?: string;
-    label?: string;
-    identifier?: string;
-    value?: string;
-    actions?: string[];
-    frame?: Rect;
-    path?: string[];
-  };
-  native?: {
-    viewClass?: string;
-    controllerClass?: string;
-    controllerPath?: string[];
-    windowClass?: string;
-    sceneIdentifier?: string;
-    matchConfidence?: "exact" | "strong" | "weak" | "none";
-  };
-};
-type Annotation = {
-  id: string;
-  frameId: string;
-  createdAt: string;
-  geometry: Point;
-  note: string;
-  context?: AnnotationContext;
-};
-type Device = {
-  udid: string;
-  name: string;
-  state: string;
-  runtime?: string;
-};
-type State = {
-  device?: Device;
-  frameId?: string;
-  annotations: Annotation[];
-  relayOrigin?: string;
-  browserUrl?: string;
-  codec: "h264" | "mjpeg";
-  connected: boolean;
+type Annotation = ContractAnnotation;
+type Device = DeviceDescription;
+type State = SessionState & {
+  relayOrigin?: string | undefined;
 };
 type Editor = {
   point: Point;
   note: string;
   frameId: string;
-  annotationId?: string;
-  context?: AnnotationContext;
-};
-type PreviewPacketBatch = {
-  reset: boolean;
-  configuration?: string;
-  packets: Array<{
-    sequence: number;
-    kind: number;
-    data: string;
-  }>;
-  nextSequence: number;
+  annotationId?: string | undefined;
+  context?: AnnotationContext | undefined;
 };
 type PointerInput = {
   contactId: number;
@@ -147,14 +67,19 @@ type PointerInput = {
 };
 
 const bridge = new App(
-  { name: "SimView", version: "0.1.0" },
+  { name: "SimView", version: SIMVIEW_VERSION },
   { availableDisplayModes: ["inline", "fullscreen", "pip"] },
   { autoResize: true },
 );
 const HOVER_SLOP_PX = 10;
 
 function SimView() {
-  const [state, setState] = useState<State>({ annotations: [], codec: "h264", connected: false });
+  const [state, setState] = useState<State>({
+    reviewId: "",
+    annotations: [],
+    codec: "h264",
+    connected: false,
+  });
   const [streamCodec, setStreamCodec] = useState<"h264" | "mjpeg">(
     "VideoDecoder" in window ? "h264" : "mjpeg",
   );
@@ -219,10 +144,9 @@ function SimView() {
   editorOpenRef.current = Boolean(editor);
 
   const token = useMemo(() => {
-    const source = state.browserUrl ?? location.href;
-    const match = source.match(/[#&]token=([^&]+)/);
-    return match ? decodeURIComponent(match[1]!) : "";
-  }, [state.browserUrl]);
+    const match = location.href.match(/[#&]token=([^&]+)/);
+    return match?.[1] ? decodeURIComponent(match[1]) : "";
+  }, []);
 
   useEffect(() => {
     if (window.parent === window) {
@@ -230,17 +154,26 @@ function SimView() {
       return;
     }
     setEmbedded(true);
-    bridge.ontoolresult = result => {
-      if (isSessionState(result.structuredContent)) setState(result.structuredContent);
+    bridge.ontoolresult = (result) => {
+      const nextState = parseSessionState(result.structuredContent);
+      if (nextState) {
+        setState((current) =>
+          current.reviewId && current.reviewId !== nextState.reviewId ? current : nextState,
+        );
+      }
     };
-    bridge.connect()
+    bridge
+      .connect()
       .then(async () => {
         const stateResult = await bridge.callServerTool({
           name: "get_simview_state",
           arguments: {},
         });
-        if (isSessionState(stateResult.structuredContent)) {
-          setState(stateResult.structuredContent);
+        const nextState = parseSessionState(stateResult.structuredContent);
+        if (nextState) {
+          setState((current) =>
+            current.reviewId && current.reviewId !== nextState.reviewId ? current : nextState,
+          );
         }
         const context = bridge.getHostContext();
         if (context?.availableDisplayModes?.includes("fullscreen")) {
@@ -250,7 +183,7 @@ function SimView() {
           }
         }
       })
-      .catch(error => show(`Host bridge unavailable: ${String(error)}`));
+      .catch((error) => show(`Host bridge unavailable: ${String(error)}`));
   }, []);
 
   useEffect(() => {
@@ -262,9 +195,11 @@ function SimView() {
     if (!toolsOpen && !deviceMenuOpen) return;
     const closeOutside = (event: PointerEvent) => {
       const target = event.target;
-      if (target instanceof Node
-        && !toolsMenuRef.current?.contains(target)
-        && !deviceMenuRef.current?.contains(target)) {
+      if (
+        target instanceof Node &&
+        !toolsMenuRef.current?.contains(target) &&
+        !deviceMenuRef.current?.contains(target)
+      ) {
         setToolsOpen(false);
         setDeviceMenuOpen(false);
       }
@@ -302,19 +237,22 @@ function SimView() {
     return () => window.clearInterval(interval);
   }, [elementsOpen, Boolean(editor), state.connected, state.device?.udid, embedded, token]);
 
-  useEffect(() => () => {
-    if (accessibilityRefreshTimer.current) {
-      window.clearTimeout(accessibilityRefreshTimer.current);
-    }
-  }, []);
+  useEffect(
+    () => () => {
+      if (accessibilityRefreshTimer.current) {
+        window.clearTimeout(accessibilityRefreshTimer.current);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
     if (embedded || !state.relayOrigin || !token) return;
-    const url = state.relayOrigin.replace(/^http/, "ws")
-      + `/stream?token=${encodeURIComponent(token)}&codec=${streamCodec}`;
+    const url = `${state.relayOrigin.replace(/^http/, "ws")}/stream?codec=${streamCodec}`;
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
-    socket.onmessage = event => consumeFrame(new Uint8Array(event.data as ArrayBuffer));
+    socket.onopen = () => socket.send(JSON.stringify({ type: "authenticate", token }));
+    socket.onmessage = (event) => consumeFrame(new Uint8Array(event.data as ArrayBuffer));
     socket.onerror = () => show("Preview stream disconnected");
     return () => {
       socket.close();
@@ -351,21 +289,22 @@ function SimView() {
             { signal: controller.signal },
           );
           if (stopped) return;
-          const batch = result.structuredContent as unknown as PreviewPacketBatch;
+          const batch = previewPacketBatchSchema.parse(result.structuredContent);
           if (batch.reset && batch.configuration) {
             consumeFrame(streamMessage(0x10, decodeBase64(batch.configuration)));
           }
           for (const packet of batch.packets) {
             consumeFrame(streamMessage(packet.kind, decodeBase64(packet.data)));
           }
-          afterSequence = batch.reset && batch.packets.length === 0
-            ? undefined
-            : batch.nextSequence;
+          afterSequence =
+            batch.reset && batch.packets.length === 0 ? undefined : batch.nextSequence;
           reportedError = false;
         } catch (error) {
           if (stopped) return;
           if (!reportedError) {
-            show(`Preview bridge interrupted: ${error instanceof Error ? error.message : String(error)}`);
+            show(
+              `Preview bridge interrupted: ${error instanceof Error ? error.message : String(error)}`,
+            );
             reportedError = true;
           }
           await pause(250);
@@ -391,36 +330,51 @@ function SimView() {
   async function loadBrowserState() {
     const hashToken = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
     if (!hashToken) return;
-    const response = await fetch(`/state?token=${encodeURIComponent(hashToken)}`);
-    if (response.ok) setState(await response.json() as State);
+    const response = await fetch("/state", {
+      headers: { authorization: `Bearer ${hashToken}` },
+    });
+    if (response.ok) {
+      setState({
+        ...sessionStateSchema.parse(await response.json()),
+        relayOrigin: location.origin,
+      });
+    }
+  }
+
+  async function relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
+    if (!token) throw new Error("The local relay token is unavailable");
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${token}`);
+    return fetch(path, { ...init, headers });
   }
 
   async function loadBootedDevices() {
     setDevicesLoading(true);
     try {
       const devices = embedded
-        ? await bridge.callServerTool({
-            name: "list_simulators",
-            arguments: {},
-          }).then(result => {
-            const content = result.structuredContent as unknown as { devices?: Device[] };
-            return content.devices ?? [];
-          })
-        : await fetch(`/devices?token=${encodeURIComponent(token)}`)
-            .then(async response => {
-              if (!response.ok) throw new Error(`Simulator list failed (${response.status})`);
-              return response.json() as Promise<{ devices: Device[] }>;
+        ? await bridge
+            .callServerTool({
+              name: "list_simulators",
+              arguments: {},
             })
-            .then(result => result.devices);
-      const booted = devices.filter(device => device.state === "Booted");
-      setBootedDevices(current => {
+            .then((result) => {
+              return simulatorListSchema.parse(result.structuredContent).devices;
+            })
+        : await relayFetch("/devices")
+            .then(async (response) => {
+              if (!response.ok) throw new Error(`Simulator list failed (${response.status})`);
+              return simulatorListSchema.parse(await response.json());
+            })
+            .then((result) => result.devices);
+      const booted = devices.filter((device) => device.state === "Booted");
+      setBootedDevices((current) => {
         if (!current.length) return booted;
-        const byUdid = new Map(booted.map(device => [device.udid, device]));
+        const byUdid = new Map(booted.map((device) => [device.udid, device]));
         const retained = current
-          .map(device => byUdid.get(device.udid))
+          .map((device) => byUdid.get(device.udid))
           .filter((device): device is Device => Boolean(device));
-        const retainedIds = new Set(retained.map(device => device.udid));
-        return [...retained, ...booted.filter(device => !retainedIds.has(device.udid))];
+        const retainedIds = new Set(retained.map((device) => device.udid));
+        return [...retained, ...booted.filter((device) => !retainedIds.has(device.udid))];
       });
     } catch (error) {
       show(`Unable to list simulators: ${error instanceof Error ? error.message : String(error)}`);
@@ -447,17 +401,22 @@ function SimView() {
     setSwitchingDevice(device.udid);
     try {
       const nextState = embedded
-        ? await bridge.callServerTool({
-            name: "connect_simulator",
-            arguments: { udid: device.udid },
-          }).then(result => result.structuredContent as unknown as State)
-        : await fetch(`/device?token=${encodeURIComponent(token)}`, {
+        ? await bridge
+            .callServerTool({
+              name: "connect_simulator",
+              arguments: { udid: device.udid },
+            })
+            .then((result) => sessionStateSchema.parse(result.structuredContent))
+        : await relayFetch("/device", {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ udid: device.udid }),
-          }).then(async response => {
-            if (!response.ok) throw new Error(await response.text() || `Simulator switch failed (${response.status})`);
-            return response.json() as Promise<State>;
+          }).then(async (response) => {
+            if (!response.ok)
+              throw new Error(
+                (await response.text()) || `Simulator switch failed (${response.status})`,
+              );
+            return sessionStateSchema.parse(await response.json());
           });
       frozenRef.current = false;
       latestFrameIdRef.current = nextState.frameId;
@@ -491,7 +450,8 @@ function SimView() {
         return;
       }
       const codec = `avc1.${[payload[1], payload[2], payload[3]]
-        .map(value => (value ?? 0).toString(16).padStart(2, "0")).join("")}`;
+        .map((value) => (value ?? 0).toString(16).padStart(2, "0"))
+        .join("")}`;
       decoderRef.current?.close();
       decoderRef.current = new VideoDecoder({
         output(frame) {
@@ -502,7 +462,7 @@ function SimView() {
             videoPaintRequestRef.current = window.requestAnimationFrame(paintLatestVideoFrame);
           }
         },
-        error: error => fallbackToMjpeg(`H.264 decoder failed: ${error.message}`),
+        error: (error) => fallbackToMjpeg(`H.264 decoder failed: ${error.message}`),
       });
       try {
         decoderRef.current.configure({ codec, description: payload });
@@ -513,17 +473,19 @@ function SimView() {
       const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
       const timestamp = Number(view.getBigUint64(0, false));
       try {
-        decoderRef.current.decode(new EncodedVideoChunk({
-          type: payload[8] === 1 ? "key" : "delta",
-          timestamp,
-          data: payload.subarray(9),
-        }));
+        decoderRef.current.decode(
+          new EncodedVideoChunk({
+            type: payload[8] === 1 ? "key" : "delta",
+            timestamp,
+            data: payload.subarray(9),
+          }),
+        );
       } catch (error) {
         fallbackToMjpeg(`H.264 frame decode failed: ${String(error)}`);
       }
     } else if (kind === 0x12) {
       const blob = new Blob([payload.slice().buffer as ArrayBuffer], { type: "image/jpeg" });
-      createImageBitmap(blob).then(image => {
+      createImageBitmap(blob).then((image) => {
         const canvas = canvasRef.current;
         const context = canvas?.getContext("2d", { alpha: false, desynchronized: true });
         if (!frozenRef.current && canvas && context) {
@@ -565,7 +527,7 @@ function SimView() {
     const now = performance.now();
     if (now - lastFrameStateUpdateRef.current < 100) return;
     lastFrameStateUpdateRef.current = now;
-    setState(current => current.frameId === frameId ? current : { ...current, frameId });
+    setState((current) => (current.frameId === frameId ? current : { ...current, frameId }));
   }
 
   function fallbackToMjpeg(reason: string) {
@@ -592,7 +554,7 @@ function SimView() {
       return;
     }
     if (!state.relayOrigin || !token) return;
-    const response = await fetch(`${state.relayOrigin}/input?token=${encodeURIComponent(token)}`, {
+    const response = await relayFetch(`${state.relayOrigin}/input`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ method, params }),
@@ -629,7 +591,9 @@ function SimView() {
   }
 
   function coordinate(event: PointerEvent): Point {
-    const rect = screenRef.current!.getBoundingClientRect();
+    const screen = screenRef.current;
+    if (!screen) throw new Error("Simulator stage is unavailable");
+    const rect = screen.getBoundingClientRect();
     return {
       kind: "point",
       x: Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width)),
@@ -648,8 +612,7 @@ function SimView() {
   function enqueuePointerInput(input: PointerInput) {
     const queue = pointerInputQueueRef.current;
     const last = queue.at(-1);
-    if (input.phase === "move" && last?.phase === "move"
-      && last.contactId === input.contactId) {
+    if (input.phase === "move" && last?.phase === "move" && last.contactId === input.contactId) {
       queue[queue.length - 1] = input;
     } else {
       queue.push(input);
@@ -681,9 +644,7 @@ function SimView() {
       const node = accessibility
         ? commentableNodeAtPoint(accessibility.root, point, hoverSlop())
         : undefined;
-      const context = node && accessibility
-        ? contextForNode(accessibility, node)
-        : hoveredContext;
+      const context = node && accessibility ? contextForNode(accessibility, node) : hoveredContext;
       setSelectedElement(node);
       setEditor({
         point,
@@ -718,14 +679,19 @@ function SimView() {
       }
       const frame = hoveredElement?.frame?.normalized;
       const slop = hoverSlop();
-      const remainsInElement = frame
-        && !hoveredElement?.role?.toLowerCase().includes("application")
-        && point.x >= frame.x - slop.x
-        && point.x <= frame.x + frame.width + slop.x
-        && point.y >= frame.y - slop.y
-        && point.y <= frame.y + frame.height + slop.y;
-      if (!editor && !remainsInElement && !hoverPending.current
-        && Date.now() - hoverRequestedAt.current >= 120) {
+      const remainsInElement =
+        frame &&
+        !hoveredElement?.role?.toLowerCase().includes("application") &&
+        point.x >= frame.x - slop.x &&
+        point.x <= frame.x + frame.width + slop.x &&
+        point.y >= frame.y - slop.y &&
+        point.y <= frame.y + frame.height + slop.y;
+      if (
+        !editor &&
+        !remainsInElement &&
+        !hoverPending.current &&
+        Date.now() - hoverRequestedAt.current >= 120
+      ) {
         hoverRequestedAt.current = Date.now();
         void inspectHoverPoint(point);
       }
@@ -745,26 +711,26 @@ function SimView() {
     hoverPending.current = true;
     try {
       const snapshot = embedded
-        ? await bridge.callServerTool({
-            name: "inspect_point",
-            arguments: { x: point.x, y: point.y },
-          }).then(result => result.structuredContent as unknown as AccessibilitySnapshot)
-        : await fetch(
-            `/inspect-point?x=${point.x}&y=${point.y}&token=${encodeURIComponent(token)}`,
-          ).then(response => {
+        ? await bridge
+            .callServerTool({
+              name: "inspect_point",
+              arguments: { x: point.x, y: point.y },
+            })
+            .then((result) => inspectPointOutputSchema.parse(result.structuredContent))
+        : await relayFetch(`/inspect-point?x=${point.x}&y=${point.y}`).then(async (response) => {
             if (!response.ok) throw new Error(`Point inspection failed (${response.status})`);
-            return response.json() as Promise<AccessibilitySnapshot>;
+            return inspectPointOutputSchema.parse(await response.json());
           });
       if (request !== hoverRequest.current || editor) return;
-      const frame = snapshot.root.frame?.normalized;
-      if (!frame || frame.width <= 0 || frame.height <= 0 || snapshot.root.hidden) {
+      const frame = snapshot.element.frame?.normalized;
+      if (!frame || frame.width <= 0 || frame.height <= 0 || snapshot.element.hidden) {
         setHoveredElement(undefined);
         setHoveredContext(undefined);
         return;
       }
-      setHoveredElement(snapshot.root);
+      setHoveredElement(snapshot.element);
       setHoveredContext({
-        ...contextForNode(snapshot, snapshot.root),
+        ...contextForInspectedNode(accessibility, snapshot.element),
         native: snapshot.native ? { ...snapshot.native, matchConfidence: "strong" } : undefined,
       });
     } catch {
@@ -780,7 +746,9 @@ function SimView() {
   function resizeSidebar(event: PointerEvent) {
     const resize = sidebarResize.current;
     if (!resize || resize.pointerId !== event.pointerId) return;
-    setSidebarWidth(Math.min(430, Math.max(240, resize.startWidth + resize.startX - event.clientX)));
+    setSidebarWidth(
+      Math.min(430, Math.max(240, resize.startWidth + resize.startX - event.clientX)),
+    );
   }
 
   function stopSidebarResize(event: PointerEvent) {
@@ -822,7 +790,7 @@ function SimView() {
       if (currentEditor.annotationId) {
         const updated = embedded
           ? updateDraftAnnotation(state.annotations, currentEditor.annotationId, note)
-          : await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
+          : await relayFetch("/annotation", {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({
@@ -831,15 +799,15 @@ function SimView() {
                 note,
               }),
             }).then(annotationResponse);
-        setState(current => ({
+        setState((current) => ({
           ...current,
-          annotations: current.annotations.map(item => item.id === updated.id ? updated : item),
+          annotations: current.annotations.map((item) => (item.id === updated.id ? updated : item)),
         }));
         sentAnnotationIds.current.delete(updated.id);
       } else {
         const annotation = embedded
           ? createDraftAnnotation(currentEditor, note)
-          : await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
+          : await relayFetch("/annotation", {
               method: "POST",
               headers: { "content-type": "application/json" },
               body: JSON.stringify({
@@ -850,7 +818,7 @@ function SimView() {
                 context: currentEditor.context,
               }),
             }).then(annotationResponse);
-        setState(current => ({ ...current, annotations: [...current.annotations, annotation] }));
+        setState((current) => ({ ...current, annotations: [...current.annotations, annotation] }));
       }
       setEditor(undefined);
       show("Comment saved");
@@ -865,16 +833,16 @@ function SimView() {
     if (!editor?.annotationId) return;
     const annotationId = editor.annotationId;
     if (!embedded) {
-      await fetch(`/annotation?token=${encodeURIComponent(token)}`, {
+      await relayFetch("/annotation", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ action: "delete", id: annotationId }),
       });
     }
     sentAnnotationIds.current.delete(annotationId);
-    setState(current => ({
+    setState((current) => ({
       ...current,
-      annotations: current.annotations.filter(item => item.id !== annotationId),
+      annotations: current.annotations.filter((item) => item.id !== annotationId),
     }));
     setEditor(undefined);
     show("Comment deleted");
@@ -895,7 +863,9 @@ function SimView() {
                 native.viewClass && `view=${native.viewClass}`,
                 native.controllerClass && `controller=${native.controllerClass}`,
                 native.sceneIdentifier && `scene=${native.sceneIdentifier}`,
-              ].filter(Boolean).join(" ")}`
+              ]
+                .filter(Boolean)
+                .join(" ")}`
             : "";
           const coordinate = `\n   Coordinate: x=${normalized(annotation.geometry.x)} (${percent(annotation.geometry.x)}), y=${normalized(annotation.geometry.y)} (${percent(annotation.geometry.y)})`;
           const element = ax
@@ -906,14 +876,14 @@ function SimView() {
                 ax.identifier && `id=${ax.identifier}`,
                 ax.value && `value="${ax.value}"`,
                 ax.actions?.length && `actions=${ax.actions.join(",")}`,
-              ].filter(Boolean).join(" · ")}`
+              ]
+                .filter(Boolean)
+                .join(" · ")}`
             : "";
           const elementFrame = ax?.frame
             ? `\n   Element bounds: x=${normalized(ax.frame.x)} (${percent(ax.frame.x)}), y=${normalized(ax.frame.y)} (${percent(ax.frame.y)}), width=${normalized(ax.frame.width)} (${percent(ax.frame.width)}), height=${normalized(ax.frame.height)} (${percent(ax.frame.height)})`
             : "";
-          const path = ax?.path?.length
-            ? `\n   Hierarchy: ${ax.path.join(" › ")}`
-            : "";
+          const path = ax?.path?.length ? `\n   Hierarchy: ${ax.path.join(" › ")}` : "";
           return `${index + 1}. ${annotation.note}${coordinate}${element}${elementFrame}${path}${internals}`;
         })
       : ["No coordinate comments."];
@@ -922,8 +892,7 @@ function SimView() {
       ...lines,
     ].join("\n");
     const content: Array<
-      | { type: "image"; data: string; mimeType: "image/png" }
-      | { type: "text"; text: string }
+      { type: "image"; data: string; mimeType: "image/png" } | { type: "text"; text: string }
     > = [{ type: "image", data: imageData, mimeType: "image/png" }];
     visibleAnnotations.forEach((annotation, index) => {
       const crop = croppedAnnotationScreenshot(canvas, annotation);
@@ -940,7 +909,9 @@ function SimView() {
       role: "user",
       content,
     });
-    visibleAnnotations.forEach(annotation => sentAnnotationIds.current.add(annotation.id));
+    visibleAnnotations.forEach((annotation) => {
+      sentAnnotationIds.current.add(annotation.id);
+    });
     completeEnterInteractMode();
     show("Sent screenshot, element crops, and comments to chat");
   }
@@ -960,7 +931,7 @@ function SimView() {
     if (!canvas) return;
     const chunks: Blob[] = [];
     const recorder = new MediaRecorder(canvas.captureStream(60), { mimeType: "video/webm" });
-    recorder.ondataavailable = event => chunks.push(event.data);
+    recorder.ondataavailable = (event) => chunks.push(event.data);
     recorder.onstop = () => {
       const link = document.createElement("a");
       link.href = URL.createObjectURL(new Blob(chunks, { type: "video/webm" }));
@@ -980,10 +951,12 @@ function SimView() {
   }
 
   const activeFrameId = frozenFrameId ?? state.frameId;
-  const visibleAnnotations = state.annotations.filter(annotation =>
-    annotation.frameId === activeFrameId || annotation.frameId === "current");
-  const unsentAnnotations = visibleAnnotations.filter(annotation =>
-    !sentAnnotationIds.current.has(annotation.id));
+  const visibleAnnotations = state.annotations.filter(
+    (annotation) => annotation.frameId === activeFrameId || annotation.frameId === "current",
+  );
+  const unsentAnnotations = visibleAnnotations.filter(
+    (annotation) => !sentAnnotationIds.current.has(annotation.id),
+  );
   pendingAnnotationsRef.current = unsentAnnotations;
 
   function enterAnnotateMode() {
@@ -1012,7 +985,7 @@ function SimView() {
   }
 
   async function clearUnsentAndEnterInteract() {
-    const annotationIds = pendingAnnotationsRef.current.map(annotation => annotation.id);
+    const annotationIds = pendingAnnotationsRef.current.map((annotation) => annotation.id);
     if (!annotationIds.length) {
       setDiscardConfirmOpen(false);
       completeEnterInteractMode();
@@ -1022,26 +995,33 @@ function SimView() {
     setDiscardingAnnotations(true);
     try {
       if (!embedded) {
-        await Promise.all(annotationIds.map(id =>
-          fetch(`/annotation?token=${encodeURIComponent(token)}`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ action: "delete", id }),
-          }).then(response => {
-            if (!response.ok) throw new Error(`Annotation delete failed (${response.status})`);
-          })));
+        await Promise.all(
+          annotationIds.map((id) =>
+            relayFetch("/annotation", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ action: "delete", id }),
+            }).then((response) => {
+              if (!response.ok) throw new Error(`Annotation delete failed (${response.status})`);
+            }),
+          ),
+        );
       }
 
       const discardedIds = new Set(annotationIds);
-      annotationIds.forEach(id => sentAnnotationIds.current.delete(id));
-      setState(current => ({
+      annotationIds.forEach((id) => {
+        sentAnnotationIds.current.delete(id);
+      });
+      setState((current) => ({
         ...current,
-        annotations: current.annotations.filter(annotation => !discardedIds.has(annotation.id)),
+        annotations: current.annotations.filter((annotation) => !discardedIds.has(annotation.id)),
       }));
       setDiscardConfirmOpen(false);
       completeEnterInteractMode();
     } catch (error) {
-      show(`Unable to clear annotations: ${error instanceof Error ? error.message : String(error)}`);
+      show(
+        `Unable to clear annotations: ${error instanceof Error ? error.message : String(error)}`,
+      );
     } finally {
       setDiscardingAnnotations(false);
     }
@@ -1052,33 +1032,37 @@ function SimView() {
     accessibilityRequestPending.current = true;
     try {
       const snapshot = embedded
-          ? await bridge.callServerTool({
-            name: "get_accessibility_tree",
-            arguments: { scope: "full", maxNodes: 1_200 },
-          }).then(result => result.structuredContent as unknown as AccessibilitySnapshot)
-        : await fetch(`/accessibility?scope=full&maxNodes=1200&token=${encodeURIComponent(token)}`)
-            .then(response => {
-              if (!response.ok) throw new Error(`Accessibility request failed (${response.status})`);
-              return response.json() as Promise<AccessibilitySnapshot>;
-            });
+        ? await bridge
+            .callServerTool({
+              name: "get_accessibility_tree",
+              arguments: { scope: "full", maxNodes: 1_200 },
+            })
+            .then((result) => accessibilitySnapshotSchema.parse(result.structuredContent))
+        : await relayFetch("/accessibility?scope=full&maxNodes=1200").then(async (response) => {
+            if (!response.ok) throw new Error(`Accessibility request failed (${response.status})`);
+            return accessibilitySnapshotSchema.parse(await response.json());
+          });
       const nodes = flattenTree(snapshot.root);
-      const branchRefs = new Set(nodes
-        .filter(node => node.children?.length)
-        .map(node => node.ref));
+      const branchRefs = new Set(
+        nodes.filter((node) => node.children?.length).map((node) => node.ref),
+      );
       setAccessibility(snapshot);
-      setExpandedElements(current => {
+      setExpandedElements((current) => {
         if (!accessibilityInitialized.current) {
           accessibilityInitialized.current = true;
           return branchRefs;
         }
-        return new Set([...current].filter(ref => branchRefs.has(ref)));
+        return new Set([...current].filter((ref) => branchRefs.has(ref)));
       });
-      setSelectedElement(current =>
-        current ? nodes.find(node => node.ref === current.ref) : current);
+      setSelectedElement((current) =>
+        current ? nodes.find((node) => node.ref === current.ref) : current,
+      );
       return snapshot;
     } catch (error) {
       if (!quiet) {
-        show(`Accessibility unavailable: ${error instanceof Error ? error.message : String(error)}`);
+        show(
+          `Accessibility unavailable: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
       return undefined;
     } finally {
@@ -1089,31 +1073,30 @@ function SimView() {
   async function loadUiContext() {
     try {
       if (embedded) {
-        const result = await bridge.callServerTool({
-          name: "get_ui_context",
-          arguments: {},
-        }).then(response => response.structuredContent as unknown as UiContext);
+        const result = await bridge
+          .callServerTool({
+            name: "get_ui_context",
+            arguments: {},
+          })
+          .then((response) => uiContextSchema.parse(response.structuredContent));
         setUiContext(result);
         return;
       }
-      const status = await fetch(`/probe/status?token=${encodeURIComponent(token)}`)
-        .then(response => {
-          if (!response.ok) throw new Error(`Probe status failed (${response.status})`);
-          return response.json() as Promise<ProbeStatus>;
-        });
+      const status = await relayFetch("/probe/status").then(async (response) => {
+        if (!response.ok) throw new Error(`Probe status failed (${response.status})`);
+        return uiContextSchema.shape.status.parse(await response.json());
+      });
       const context = status.connected
-        ? await fetch(`/probe/context?token=${encodeURIComponent(token)}`)
-            .then(response => {
-              if (!response.ok) throw new Error(`Probe context failed (${response.status})`);
-              return response.json() as Promise<UiContext["context"]>;
-            })
+        ? await relayFetch("/probe/context").then(async (response) => {
+            if (!response.ok) throw new Error(`Probe context failed (${response.status})`);
+            return uiContextSchema.shape.context.unwrap().parse(await response.json());
+          })
         : undefined;
       const target = !status.connected
-        ? await fetch(`/probe/target?token=${encodeURIComponent(token)}`)
-            .then(response => {
-              if (!response.ok) throw new Error(`Probe target detection failed (${response.status})`);
-              return response.json() as Promise<UiContext["target"]>;
-            })
+        ? await relayFetch("/probe/target").then(async (response) => {
+            if (!response.ok) throw new Error(`Probe target detection failed (${response.status})`);
+            return uiContextSchema.shape.target.unwrap().parse(await response.json());
+          })
         : undefined;
       setUiContext({ status, context, target });
     } catch {
@@ -1141,13 +1124,13 @@ function SimView() {
           arguments: { bundleId },
         });
       } else {
-        const response = await fetch(`/probe/enable?token=${encodeURIComponent(token)}`, {
+        const response = await relayFetch("/probe/enable", {
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({ bundleId }),
         });
         if (!response.ok) {
-          throw new Error(await response.text() || `Probe enable failed (${response.status})`);
+          throw new Error((await response.text()) || `Probe enable failed (${response.status})`);
         }
       }
       await loadUiContext();
@@ -1163,35 +1146,41 @@ function SimView() {
   async function inspectAnnotationPoint(point: Point) {
     try {
       const snapshot = embedded
-        ? await bridge.callServerTool({
-            name: "inspect_point",
-            arguments: { x: point.x, y: point.y },
-          }).then(result => result.structuredContent as unknown as AccessibilitySnapshot)
-        : await fetch(
-            `/inspect-point?x=${point.x}&y=${point.y}&token=${encodeURIComponent(token)}`,
-          ).then(response => response.json() as Promise<AccessibilitySnapshot>);
-      const node = snapshot.root;
-      setEditor(current => current && current.point.x === point.x && current.point.y === point.y
-        ? (() => {
-            const inspected = contextForNode(snapshot, node);
-            const currentAccessibility = current.context?.accessibility;
-            return {
-            ...current,
-            context: {
-              capturedAt: current.context?.capturedAt ?? inspected.capturedAt,
-              accessibility: currentAccessibility
-                ? {
-                    ...inspected.accessibility,
-                    ...currentAccessibility,
-                    frame: currentAccessibility.frame ?? inspected.accessibility?.frame,
-                    path: currentAccessibility.path ?? inspected.accessibility?.path,
-                  }
-                : inspected.accessibility,
-              native: snapshot.native ? { ...snapshot.native, matchConfidence: "strong" } : undefined,
-            },
-          };
-          })()
-        : current);
+        ? await bridge
+            .callServerTool({
+              name: "inspect_point",
+              arguments: { x: point.x, y: point.y },
+            })
+            .then((result) => inspectPointOutputSchema.parse(result.structuredContent))
+        : await relayFetch(`/inspect-point?x=${point.x}&y=${point.y}`).then(async (response) =>
+            inspectPointOutputSchema.parse(await response.json()),
+          );
+      const node = snapshot.element;
+      setEditor((current) =>
+        current && current.point.x === point.x && current.point.y === point.y
+          ? (() => {
+              const inspected = contextForInspectedNode(accessibility, node);
+              const currentAccessibility = current.context?.accessibility;
+              return {
+                ...current,
+                context: {
+                  capturedAt: current.context?.capturedAt ?? inspected.capturedAt,
+                  accessibility: currentAccessibility
+                    ? {
+                        ...inspected.accessibility,
+                        ...currentAccessibility,
+                        frame: currentAccessibility.frame ?? inspected.accessibility?.frame,
+                        path: currentAccessibility.path ?? inspected.accessibility?.path,
+                      }
+                    : inspected.accessibility,
+                  native: snapshot.native
+                    ? { ...snapshot.native, matchConfidence: "strong" }
+                    : undefined,
+                },
+              };
+            })()
+          : current,
+      );
     } catch {
       // A point comment remains usable when accessibility is incomplete.
     }
@@ -1231,7 +1220,7 @@ function SimView() {
   }
 
   function toggleElement(ref: string) {
-    setExpandedElements(current => {
+    setExpandedElements((current) => {
       const next = new Set(current);
       if (next.has(ref)) next.delete(ref);
       else next.add(ref);
@@ -1241,9 +1230,9 @@ function SimView() {
 
   function toggleAllElements() {
     if (!accessibility) return;
-    const branches = flattenTree(accessibility.root).filter(node => node.children?.length);
-    const allExpanded = branches.every(node => expandedElements.has(node.ref));
-    setExpandedElements(new Set(allExpanded ? [] : branches.map(node => node.ref)));
+    const branches = flattenTree(accessibility.root).filter((node) => node.children?.length);
+    const allExpanded = branches.every((node) => expandedElements.has(node.ref));
+    setExpandedElements(new Set(allExpanded ? [] : branches.map((node) => node.ref)));
   }
 
   async function tapSelectedElement() {
@@ -1271,11 +1260,12 @@ function SimView() {
     : [];
   const inspectedElement = hoveredElement ?? selectedElement;
   const highlightedElement = inspectedElement ?? selectedElement;
-  const activeScene = uiContext?.context?.scenes?.find(scene =>
-    scene.activationState === "foregroundActive")
-    ?? uiContext?.context?.scenes?.[0];
-  const keyWindow = activeScene?.windows?.find(window => window.key && !window.hidden)
-    ?? activeScene?.windows?.find(window => !window.hidden);
+  const activeScene =
+    uiContext?.context?.scenes?.find((scene) => scene.activationState === "foregroundActive") ??
+    uiContext?.context?.scenes?.[0];
+  const keyWindow =
+    activeScene?.windows?.find((window) => window.key && !window.hidden) ??
+    activeScene?.windows?.find((window) => !window.hidden);
   const visibleController = keyWindow?.visibleControllerPath?.at(-1);
 
   return (
@@ -1287,43 +1277,75 @@ function SimView() {
         <div class="left-actions">
           <div ref={toolsMenuRef} class="tools-menu-wrap">
             <button
+              type="button"
               class="tool-button tools-trigger"
               aria-label="Simulator tools"
               aria-expanded={toolsOpen}
               onClick={() => {
                 setDeviceMenuOpen(false);
-                setToolsOpen(value => !value);
+                setToolsOpen((value) => !value);
               }}
-            ><Icon name="menu" /></button>
+            >
+              <Icon name="menu" />
+            </button>
             {toolsOpen && (
               <nav class="tools-menu" aria-label="Simulator tools">
-                <button onClick={() => {
-                  setToolsOpen(false);
-                  void relayInput("input.button", { button: "home" });
-                }}><Icon name="home" /><span>Home</span></button>
-                <button onClick={() => {
-                  setToolsOpen(false);
-                  setTypeText("");
-                  setTypeTextOpen(true);
-                }}><Icon name="type" /><span>Type text…</span></button>
-                <button onClick={() => {
-                  setToolsOpen(false);
-                  void captureOnly();
-                }}><Icon name="capture" /><span>Capture</span></button>
-                <button onClick={() => {
-                  setToolsOpen(false);
-                  void toggleRecording();
-                }}><Icon name="record" /><span>{recordingRef.current?.state === "recording" ? "Stop recording" : "Record"}</span></button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void relayInput("input.button", { button: "home" });
+                  }}
+                >
+                  <Icon name="home" />
+                  <span>Home</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    setTypeText("");
+                    setTypeTextOpen(true);
+                  }}
+                >
+                  <Icon name="type" />
+                  <span>Type text…</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void captureOnly();
+                  }}
+                >
+                  <Icon name="capture" />
+                  <span>Capture</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void toggleRecording();
+                  }}
+                >
+                  <Icon name="record" />
+                  <span>
+                    {recordingRef.current?.state === "recording" ? "Stop recording" : "Record"}
+                  </span>
+                </button>
               </nav>
             )}
           </div>
           <div ref={deviceMenuRef} class="device-menu-wrap">
             <button
+              type="button"
               class="tool-button device-trigger"
               aria-label="Choose simulator"
               aria-expanded={deviceMenuOpen}
               onClick={() => void toggleDeviceMenu()}
-            ><Icon name="phone" /></button>
+            >
+              <Icon name="phone" />
+            </button>
             {deviceMenuOpen && (
               <div class="device-menu" role="menu" aria-label="Booted simulators">
                 <div class="device-menu-heading">
@@ -1334,52 +1356,59 @@ function SimView() {
                     aria-label="Refresh simulators"
                     disabled={devicesLoading}
                     onClick={() => void loadBootedDevices()}
-                  ><Icon name="refresh" /></button>
+                  >
+                    <Icon name="refresh" />
+                  </button>
                 </div>
                 {devicesLoading && !bootedDevices.length ? (
                   <p>Looking for booted devices…</p>
-                ) : bootedDevices.length ? bootedDevices.map(device => {
-                  const selected = device.udid === state.device?.udid;
-                  return (
-                    <button
-                      key={device.udid}
-                      type="button"
-                      role="menuitem"
-                      class="device-option"
-                      disabled={Boolean(switchingDevice)}
-                      onClick={() => void selectSimulator(device)}
-                    >
-                      <span class="device-check">{selected && <Icon name="check" />}</span>
-                      <span>
-                        <strong>{device.name}</strong>
-                        <small>{formatRuntime(device.runtime)}</small>
-                      </span>
-                      {switchingDevice === device.udid && <span class="device-switching">Switching…</span>}
-                    </button>
-                  );
-                }) : (
+                ) : bootedDevices.length ? (
+                  bootedDevices.map((device) => {
+                    const selected = device.udid === state.device?.udid;
+                    return (
+                      <button
+                        key={device.udid}
+                        type="button"
+                        role="menuitem"
+                        class="device-option"
+                        disabled={Boolean(switchingDevice)}
+                        onClick={() => void selectSimulator(device)}
+                      >
+                        <span class="device-check">{selected && <Icon name="check" />}</span>
+                        <span>
+                          <strong>{device.name}</strong>
+                          <small>{formatRuntime(device.runtime)}</small>
+                        </span>
+                        {switchingDevice === device.udid && (
+                          <span class="device-switching">Switching…</span>
+                        )}
+                      </button>
+                    );
+                  })
+                ) : (
                   <p>No booted simulators found.</p>
                 )}
               </div>
             )}
           </div>
         </div>
-        <div class="mode-switch" role="group" aria-label="Preview mode">
-          <button aria-pressed={mode === "interact"} onClick={enterInteractMode}>
+        <fieldset class="mode-switch" aria-label="Preview mode">
+          <button type="button" aria-pressed={mode === "interact"} onClick={enterInteractMode}>
             <Icon name="finger" /> Interact
           </button>
-          <button aria-pressed={mode === "annotate"} onClick={enterAnnotateMode}>
+          <button type="button" aria-pressed={mode === "annotate"} onClick={enterAnnotateMode}>
             <Icon name="annotate" /> Annotate
             {!!visibleAnnotations.length && <span class="count">{visibleAnnotations.length}</span>}
           </button>
-        </div>
+        </fieldset>
         <div class="top-actions">
           <button
+            type="button"
             class="tool-button sidebar-toggle"
             aria-label={elementsOpen ? "Hide inspector" : "Show inspector"}
             aria-pressed={elementsOpen}
             onClick={() => {
-              setElementsOpen(value => {
+              setElementsOpen((value) => {
                 if (!value) {
                   if (!accessibility) void loadAccessibility();
                   void loadUiContext();
@@ -1387,8 +1416,10 @@ function SimView() {
                 return !value;
               });
             }}
-          ><Icon name="sidebar" /> <span>Inspector</span></button>
-          <button class="primary send-chat" onClick={() => void sendToChat()}>
+          >
+            <Icon name="sidebar" /> <span>Inspector</span>
+          </button>
+          <button type="button" class="primary send-chat" onClick={() => void sendToChat()}>
             <Icon name="send" /> <span>Send to Chat</span>
           </button>
         </div>
@@ -1411,91 +1442,123 @@ function SimView() {
               }
             }}
           >
-          <canvas ref={canvasRef} />
-          {highlightedElement?.frame?.normalized && (
-            <div
-              class="element-highlight"
-              style={{
-                left: `${highlightedElement.frame.normalized.x * 100}%`,
-                top: `${highlightedElement.frame.normalized.y * 100}%`,
-                width: `${highlightedElement.frame.normalized.width * 100}%`,
-                height: `${highlightedElement.frame.normalized.height * 100}%`,
-              }}
-            />
-          )}
-          {!state.connected && (
-            <div class="empty">
-              <strong>No live frame</strong>
-              <span>Call open_simview or use the browser fallback URL.</span>
-            </div>
-          )}
-          {visibleAnnotations.map((annotation, index) => (
-            <button
-              key={annotation.id}
-              class="annotation-dot"
-              style={{ left: `${annotation.geometry.x * 100}%`, top: `${annotation.geometry.y * 100}%` }}
-              title={annotation.note}
-              onPointerDown={event => {
-                event.stopPropagation();
-                setEditor({
-                  point: annotation.geometry,
-                  note: annotation.note,
-                  frameId: annotation.frameId,
-                  annotationId: annotation.id,
-                  context: annotation.context,
-                });
-              }}
-            >{index + 1}</button>
-          ))}
-          {editor && (
-            <form
-              class={`comment-popover ${editor.point.x > .62 ? "align-right" : ""} ${editor.point.y > .65 ? "align-bottom" : ""}`}
-              style={{ left: `${editor.point.x * 100}%`, top: `${editor.point.y * 100}%` }}
-              onSubmit={event => {
-                event.preventDefault();
-                void saveComment();
-              }}
-              onPointerDown={event => event.stopPropagation()}
-            >
-              <div class="comment-head">
-                <span class="comment-pin"><Icon name="comment-bubble" /></span>
-                <div>
-                  <strong>{editor.context?.accessibility?.label ?? "Screen comment"}</strong>
-                  <small>{editor.context?.accessibility?.role?.replace(/^AX/, "") ?? `${percent(editor.point.x)} · ${percent(editor.point.y)}`}</small>
-                </div>
-              </div>
-              <textarea
-                ref={editorInputRef}
-                rows={3}
-                placeholder="Leave a comment…"
-                value={editor.note}
-                onInput={event => setEditor(current => current
-                  ? { ...current, note: event.currentTarget.value }
-                  : current)}
-                onKeyDown={event => {
-                  if (event.key === "Escape") setEditor(undefined);
-                  if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                    event.preventDefault();
-                    void saveComment();
-                  }
+            <canvas ref={canvasRef} />
+            {highlightedElement?.frame?.normalized && (
+              <div
+                class="element-highlight"
+                style={{
+                  left: `${highlightedElement.frame.normalized.x * 100}%`,
+                  top: `${highlightedElement.frame.normalized.y * 100}%`,
+                  width: `${highlightedElement.frame.normalized.width * 100}%`,
+                  height: `${highlightedElement.frame.normalized.height * 100}%`,
                 }}
               />
-              <div class="comment-actions">
-                {editor.annotationId && <button type="button" class="danger icon-action" aria-label="Delete comment" onClick={() => void deleteComment()}><Icon name="trash" /></button>}
-                <span />
-                <button type="button" disabled={savingComment} onClick={() => setEditor(undefined)}>Cancel</button>
-                <button class="primary" type="submit" disabled={!editor.note.trim() || savingComment}>
-                  {savingComment ? "Saving…" : "Save"}
-                </button>
+            )}
+            {!state.connected && (
+              <div class="empty">
+                <strong>No live frame</strong>
+                <span>Call open_simview or use the browser fallback URL.</span>
               </div>
-            </form>
-          )}
+            )}
+            {visibleAnnotations.map((annotation, index) => (
+              <button
+                type="button"
+                key={annotation.id}
+                class="annotation-dot"
+                style={{
+                  left: `${annotation.geometry.x * 100}%`,
+                  top: `${annotation.geometry.y * 100}%`,
+                }}
+                title={annotation.note}
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  setEditor({
+                    point: annotation.geometry,
+                    note: annotation.note,
+                    frameId: annotation.frameId,
+                    annotationId: annotation.id,
+                    context: annotation.context,
+                  });
+                }}
+              >
+                {index + 1}
+              </button>
+            ))}
+            {editor && (
+              <form
+                class={`comment-popover ${editor.point.x > 0.62 ? "align-right" : ""} ${editor.point.y > 0.65 ? "align-bottom" : ""}`}
+                style={{ left: `${editor.point.x * 100}%`, top: `${editor.point.y * 100}%` }}
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void saveComment();
+                }}
+                onPointerDown={(event) => event.stopPropagation()}
+              >
+                <div class="comment-head">
+                  <span class="comment-pin">
+                    <Icon name="comment-bubble" />
+                  </span>
+                  <div>
+                    <strong>{editor.context?.accessibility?.label ?? "Screen comment"}</strong>
+                    <small>
+                      {editor.context?.accessibility?.role?.replace(/^AX/, "") ??
+                        `${percent(editor.point.x)} · ${percent(editor.point.y)}`}
+                    </small>
+                  </div>
+                </div>
+                <textarea
+                  ref={editorInputRef}
+                  rows={3}
+                  placeholder="Leave a comment…"
+                  value={editor.note}
+                  onInput={(event) =>
+                    setEditor((current) =>
+                      current ? { ...current, note: event.currentTarget.value } : current,
+                    )
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") setEditor(undefined);
+                    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                      event.preventDefault();
+                      void saveComment();
+                    }
+                  }}
+                />
+                <div class="comment-actions">
+                  {editor.annotationId && (
+                    <button
+                      type="button"
+                      class="danger icon-action"
+                      aria-label="Delete comment"
+                      onClick={() => void deleteComment()}
+                    >
+                      <Icon name="trash" />
+                    </button>
+                  )}
+                  <span />
+                  <button
+                    type="button"
+                    disabled={savingComment}
+                    onClick={() => setEditor(undefined)}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    class="primary"
+                    type="submit"
+                    disabled={!editor.note.trim() || savingComment}
+                  >
+                    {savingComment ? "Saving…" : "Save"}
+                  </button>
+                </div>
+              </form>
+            )}
           </div>
         </section>
         <aside class="inspector" aria-label="Simulator inspector">
           <div
             class="sidebar-resizer"
-            onPointerDown={event => {
+            onPointerDown={(event) => {
               sidebarResize.current = {
                 pointerId: event.pointerId,
                 startX: event.clientX,
@@ -1511,24 +1574,34 @@ function SimView() {
             <div class="section-heading">
               <div>
                 <strong>Elements</strong>
-                <small>{accessibility
-                  ? `${accessibility.stats.nodeCount}${accessibility.stats.truncated ? "+" : ""}`
-                  : "—"}</small>
+                <small>
+                  {accessibility
+                    ? `${accessibility.stats.nodeCount}${accessibility.stats.truncated ? "+" : ""}`
+                    : "—"}
+                </small>
               </div>
               <div class="section-actions">
                 {accessibility && (
                   <button
+                    type="button"
                     class="icon-action"
-                    aria-label={expandedElements.size ? "Collapse element tree" : "Expand element tree"}
+                    aria-label={
+                      expandedElements.size ? "Collapse element tree" : "Expand element tree"
+                    }
                     onClick={toggleAllElements}
                   >
                     <Icon name={expandedElements.size ? "collapse-tree" : "expand-tree"} />
                   </button>
                 )}
-                <button class="icon-action" aria-label="Refresh elements" onClick={() => {
-                  void loadAccessibility();
-                  void loadUiContext();
-                }}>
+                <button
+                  type="button"
+                  class="icon-action"
+                  aria-label="Refresh elements"
+                  onClick={() => {
+                    void loadAccessibility();
+                    void loadUiContext();
+                  }}
+                >
                   <Icon name="refresh" />
                 </button>
               </div>
@@ -1537,28 +1610,29 @@ function SimView() {
               type="search"
               placeholder="Filter elements"
               value={elementSearch}
-              onInput={event => setElementSearch(event.currentTarget.value)}
+              onInput={(event) => setElementSearch(event.currentTarget.value)}
             />
-            <div class="element-tree" onMouseLeave={() => setHoveredElement(undefined)}>
+            <div class="element-tree" role="tree" onMouseLeave={() => setHoveredElement(undefined)}>
               {elementRows.map(({ node, depth, isRoot }) => (
                 <button
+                  type="button"
                   key={node.ref}
                   class={selectedElement?.ref === node.ref ? "selected" : ""}
-                  onClick={() => chooseElement(node)}
+                  role="treeitem"
+                  onClick={() => {
+                    chooseElement(node);
+                    if (node.children?.length) toggleElement(node.ref);
+                  }}
                   onMouseEnter={() => setHoveredElement(node)}
                   style={{ "--tree-depth": depth }}
-                  aria-expanded={node.children?.length
-                    ? expandedElements.has(node.ref)
-                    : undefined}
+                  aria-expanded={node.children?.length ? expandedElements.has(node.ref) : undefined}
                 >
                   {!!node.children?.length && (
-                    <span
-                      class="disclosure"
-                      onClick={event => {
-                        event.stopPropagation();
-                        toggleElement(node.ref);
-                      }}
-                    ><Icon name={expandedElements.has(node.ref) ? "chevron-down" : "chevron-right"} /></span>
+                    <span class="disclosure">
+                      <Icon
+                        name={expandedElements.has(node.ref) ? "chevron-down" : "chevron-right"}
+                      />
+                    </span>
                   )}
                   <span class="element-name" title={isRoot ? "Screen" : elementName(node)}>
                     {isRoot ? "Screen" : elementName(node)}
@@ -1575,7 +1649,7 @@ function SimView() {
             {infoOpen && (
               <div
                 class="info-resizer"
-                onPointerDown={event => {
+                onPointerDown={(event) => {
                   infoResize.current = {
                     pointerId: event.pointerId,
                     startY: event.clientY,
@@ -1593,7 +1667,7 @@ function SimView() {
                 type="button"
                 class="section-toggle"
                 aria-expanded={infoOpen}
-                onClick={() => setInfoOpen(value => !value)}
+                onClick={() => setInfoOpen((value) => !value)}
               >
                 <Icon name={infoOpen ? "chevron-down" : "chevron-right"} />
                 <strong>Info</strong>
@@ -1602,36 +1676,83 @@ function SimView() {
             {infoOpen && selectedElement?.frame && (
               <div class="element-actions">
                 {mode === "interact" && (
-                  <button onClick={() => void tapSelectedElement()}>
+                  <button type="button" onClick={() => void tapSelectedElement()}>
                     <Icon name="finger" /> Tap
                   </button>
                 )}
-                <button class="primary" onClick={() => annotateElement(selectedElement)}>
+                <button
+                  type="button"
+                  class="primary"
+                  onClick={() => annotateElement(selectedElement)}
+                >
                   <Icon name="annotate" /> Annotate
                 </button>
               </div>
             )}
             {infoOpen && mode === "annotate" && selectedElement?.frame && (
-              <p class="anchor-note"><Icon name="annotate" /> Comment anchored to this element.</p>
+              <p class="anchor-note">
+                <Icon name="annotate" /> Comment anchored to this element.
+              </p>
             )}
-            {infoOpen && (inspectedElement ? (
-              <dl>
-                <div><dt>Name</dt><dd>{elementName(inspectedElement)}</dd></div>
-                <div><dt>Role</dt><dd>{inspectedElement.roleDescription ?? inspectedElement.role?.replace(/^AX/, "") ?? "Element"}</dd></div>
-                <div><dt>Title</dt><dd>{inspectedElement.title ?? "—"}</dd></div>
-                <div><dt>Label</dt><dd>{inspectedElement.label ?? inspectedElement.placeholder ?? "—"}</dd></div>
-                <div><dt>Identifier</dt><dd>{inspectedElement.identifier ?? "—"}</dd></div>
-                <div><dt>Value</dt><dd>{inspectedElement.value ?? "—"}</dd></div>
-                <div><dt>Frame</dt><dd>{formatFrame(inspectedElement.frame?.normalized)}</dd></div>
-                <div><dt>State</dt><dd>{[inspectedElement.enabled === false && "Disabled", inspectedElement.focused && "Focused"].filter(Boolean).join(", ") || "Enabled"}</dd></div>
-                {!!inspectedElement.actions?.length && <div><dt>Actions</dt><dd>{inspectedElement.actions.join(", ")}</dd></div>}
-              </dl>
-            ) : (
-              <div class="info-empty">
-                <Icon name="cursor" />
-                <span>Hover or select an element to inspect it.</span>
-              </div>
-            ))}
+            {infoOpen &&
+              (inspectedElement ? (
+                <dl>
+                  <div>
+                    <dt>Name</dt>
+                    <dd>{elementName(inspectedElement)}</dd>
+                  </div>
+                  <div>
+                    <dt>Role</dt>
+                    <dd>
+                      {inspectedElement.roleDescription ??
+                        inspectedElement.role?.replace(/^AX/, "") ??
+                        "Element"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Title</dt>
+                    <dd>{inspectedElement.title ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Label</dt>
+                    <dd>{inspectedElement.label ?? inspectedElement.placeholder ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Identifier</dt>
+                    <dd>{inspectedElement.identifier ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Value</dt>
+                    <dd>{inspectedElement.value ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Frame</dt>
+                    <dd>{formatFrame(inspectedElement.frame?.normalized)}</dd>
+                  </div>
+                  <div>
+                    <dt>State</dt>
+                    <dd>
+                      {[
+                        inspectedElement.enabled === false && "Disabled",
+                        inspectedElement.focused && "Focused",
+                      ]
+                        .filter(Boolean)
+                        .join(", ") || "Enabled"}
+                    </dd>
+                  </div>
+                  {!!inspectedElement.actions?.length && (
+                    <div>
+                      <dt>Actions</dt>
+                      <dd>{inspectedElement.actions.join(", ")}</dd>
+                    </div>
+                  )}
+                </dl>
+              ) : (
+                <div class="info-empty">
+                  <Icon name="cursor" />
+                  <span>Hover or select an element to inspect it.</span>
+                </div>
+              ))}
           </section>
           <section class={`inspector-section scene-info ${sceneOpen ? "" : "collapsed"}`}>
             <div class="section-heading">
@@ -1639,28 +1760,43 @@ function SimView() {
                 type="button"
                 class="section-toggle"
                 aria-expanded={sceneOpen}
-                onClick={() => setSceneOpen(value => !value)}
+                onClick={() => setSceneOpen((value) => !value)}
               >
                 <Icon name={sceneOpen ? "chevron-down" : "chevron-right"} />
                 <strong>Scene</strong>
               </button>
               {uiContext?.status.connected && <span class="probe-live">UIKit</span>}
             </div>
-            {sceneOpen && (activeScene ? (
-              <dl>
-                <div><dt>State</dt><dd>{formatProbeValue(activeScene.activationState)}</dd></div>
-                <div><dt>Scene</dt><dd>{activeScene.configurationName ?? compactIdentifier(activeScene.persistentIdentifier)}</dd></div>
-                <div><dt>Window</dt><dd>{keyWindow?.className ?? "—"}</dd></div>
-                <div><dt>Controller</dt><dd>{visibleController ?? "—"}</dd></div>
-                {!!keyWindow?.visibleControllerPath?.length && (
-                  <div class="controller-path">
-                    <dt>Path</dt>
-                    <dd>{keyWindow.visibleControllerPath.join(" › ")}</dd>
+            {sceneOpen &&
+              (activeScene ? (
+                <dl>
+                  <div>
+                    <dt>State</dt>
+                    <dd>{formatProbeValue(activeScene.activationState)}</dd>
                   </div>
-                )}
-              </dl>
-            ) : (
-              !uiContext ? (
+                  <div>
+                    <dt>Scene</dt>
+                    <dd>
+                      {activeScene.configurationName ??
+                        compactIdentifier(activeScene.persistentIdentifier)}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Window</dt>
+                    <dd>{keyWindow?.className ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Controller</dt>
+                    <dd>{visibleController ?? "—"}</dd>
+                  </div>
+                  {!!keyWindow?.visibleControllerPath?.length && (
+                    <div class="controller-path">
+                      <dt>Path</dt>
+                      <dd>{keyWindow.visibleControllerPath.join(" › ")}</dd>
+                    </div>
+                  )}
+                </dl>
+              ) : !uiContext ? (
                 <div class="probe-empty">
                   <Icon name="layers" />
                   <span>Detecting the foreground Simulator app…</span>
@@ -1681,25 +1817,30 @@ function SimView() {
                       autocomplete="off"
                       autocapitalize="none"
                       spellcheck={false}
-                      onInput={event => setProbeBundleId(event.currentTarget.value)}
+                      onInput={(event) => setProbeBundleId(event.currentTarget.value)}
                     />
                     <button class="primary" type="submit" disabled={probeEnabling}>
                       {probeEnabling ? "Enabling…" : "Enable"}
                     </button>
                   </div>
                   {uiContext.target?.bundleId && (
-                    <small class="probe-detected">Detected from the foreground Simulator app.</small>
+                    <small class="probe-detected">
+                      Detected from the foreground Simulator app.
+                    </small>
                   )}
                   <small>This terminates and relaunches the selected Simulator app.</small>
-                  {probeError && <p class="probe-error" role="alert">{probeError}</p>}
+                  {probeError && (
+                    <p class="probe-error" role="alert">
+                      {probeError}
+                    </p>
+                  )}
                 </form>
               ) : (
                 <div class="probe-empty">
                   <Icon name="layers" />
                   <span>UIKit scene inspection is unavailable in this build.</span>
                 </div>
-              )
-            ))}
+              ))}
           </section>
         </aside>
       </div>
@@ -1712,14 +1853,16 @@ function SimView() {
             aria-modal="true"
             aria-labelledby="discard-alert-title"
             aria-describedby="discard-alert-description"
-            onKeyDown={event => {
+            onKeyDown={(event) => {
               if (event.key === "Escape" && !discardingAnnotations) {
                 setDiscardConfirmOpen(false);
               }
             }}
           >
             <div class="discard-alert-copy">
-              <span class="discard-alert-icon"><Icon name="annotate" /></span>
+              <span class="discard-alert-icon">
+                <Icon name="annotate" />
+              </span>
               <div>
                 <strong id="discard-alert-title">Clear unsent annotations?</strong>
                 <p id="discard-alert-description">
@@ -1735,13 +1878,17 @@ function SimView() {
                 autofocus
                 disabled={discardingAnnotations}
                 onClick={() => setDiscardConfirmOpen(false)}
-              >Cancel</button>
+              >
+                Cancel
+              </button>
               <button
                 type="button"
                 class="danger-action"
                 disabled={discardingAnnotations}
                 onClick={() => void clearUnsentAndEnterInteract()}
-              >{discardingAnnotations ? "Clearing…" : "Clear & Switch"}</button>
+              >
+                {discardingAnnotations ? "Clearing…" : "Clear & Switch"}
+              </button>
             </div>
           </section>
         </div>
@@ -1754,7 +1901,7 @@ function SimView() {
             aria-modal="true"
             aria-labelledby="type-text-title"
             onSubmit={submitTypedText}
-            onKeyDown={event => {
+            onKeyDown={(event) => {
               if (event.key === "Escape" && !typingText) {
                 setTypeTextOpen(false);
                 setTypeText("");
@@ -1762,7 +1909,9 @@ function SimView() {
             }}
           >
             <div class="discard-alert-copy">
-              <span class="discard-alert-icon"><Icon name="type" /></span>
+              <span class="discard-alert-icon">
+                <Icon name="type" />
+              </span>
               <div>
                 <strong id="type-text-title">Type text in Simulator</strong>
                 <p>Enter the text to send to the currently focused control.</p>
@@ -1774,7 +1923,7 @@ function SimView() {
               value={typeText}
               aria-label="Text to type"
               disabled={typingText}
-              onInput={event => setTypeText(event.currentTarget.value)}
+              onInput={(event) => setTypeText(event.currentTarget.value)}
             />
             <div class="discard-alert-actions">
               <button
@@ -1784,53 +1933,23 @@ function SimView() {
                   setTypeTextOpen(false);
                   setTypeText("");
                 }}
-              >Cancel</button>
-              <button
-                type="submit"
-                class="primary"
-                disabled={!typeText || typingText}
-              >{typingText ? "Typing…" : "Type Text"}</button>
+              >
+                Cancel
+              </button>
+              <button type="submit" class="primary" disabled={!typeText || typingText}>
+                {typingText ? "Typing…" : "Type Text"}
+              </button>
             </div>
           </form>
         </div>
       )}
-      {toast && <div class="toast" role="status">{toast}</div>}
+      {toast && (
+        <div class="toast" role="status">
+          {toast}
+        </div>
+      )}
     </main>
   );
-}
-
-function percent(value: number): string {
-  return `${(value * 100).toFixed(1)}%`;
-}
-
-function normalized(value: number): string {
-  return value.toFixed(4);
-}
-
-function isSessionState(value: unknown): value is State {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value as Partial<State>;
-  return Array.isArray(candidate.annotations)
-    && (candidate.codec === "h264" || candidate.codec === "mjpeg")
-    && typeof candidate.connected === "boolean";
-}
-
-function requireAnnotation(value: unknown): Annotation {
-  if (!value || typeof value !== "object") {
-    throw new Error("The annotation tool returned no annotation");
-  }
-  const candidate = value as Partial<Annotation>;
-  const point = candidate.geometry as Partial<Point> | undefined;
-  if (typeof candidate.id !== "string"
-    || typeof candidate.frameId !== "string"
-    || typeof candidate.createdAt !== "string"
-    || typeof candidate.note !== "string"
-    || point?.kind !== "point"
-    || typeof point.x !== "number"
-    || typeof point.y !== "number") {
-    throw new Error("The annotation tool returned an invalid annotation");
-  }
-  return candidate as Annotation;
 }
 
 function createDraftAnnotation(editor: Editor, note: string): Annotation {
@@ -1844,19 +1963,15 @@ function createDraftAnnotation(editor: Editor, note: string): Annotation {
   };
 }
 
-function updateDraftAnnotation(
-  annotations: Annotation[],
-  id: string,
-  note: string,
-): Annotation {
-  const annotation = annotations.find(item => item.id === id);
+function updateDraftAnnotation(annotations: Annotation[], id: string, note: string): Annotation {
+  const annotation = annotations.find((item) => item.id === id);
   if (!annotation) throw new Error("The annotation no longer exists");
   return { ...annotation, note };
 }
 
 async function annotationResponse(response: Response): Promise<Annotation> {
   if (!response.ok) {
-    throw new Error(await response.text() || `Annotation request failed (${response.status})`);
+    throw new Error((await response.text()) || `Annotation request failed (${response.status})`);
   }
   return requireAnnotation(await response.json());
 }
@@ -1870,15 +1985,8 @@ function decodeBase64(value: string): Uint8Array {
   return bytes;
 }
 
-function streamMessage(kind: number, payload: Uint8Array): Uint8Array {
-  const message = new Uint8Array(payload.byteLength + 1);
-  message[0] = kind;
-  message.set(payload, 1);
-  return message;
-}
-
 function pause(durationMs: number): Promise<void> {
-  return new Promise(resolve => window.setTimeout(resolve, durationMs));
+  return new Promise((resolve) => window.setTimeout(resolve, durationMs));
 }
 
 function croppedAnnotationScreenshot(
@@ -1889,14 +1997,14 @@ function croppedAnnotationScreenshot(
   if (!frame) return undefined;
   const left = Math.max(0, Math.min(canvas.width, Math.floor(frame.x * canvas.width)));
   const top = Math.max(0, Math.min(canvas.height, Math.floor(frame.y * canvas.height)));
-  const right = Math.max(left, Math.min(
-    canvas.width,
-    Math.ceil((frame.x + frame.width) * canvas.width),
-  ));
-  const bottom = Math.max(top, Math.min(
-    canvas.height,
-    Math.ceil((frame.y + frame.height) * canvas.height),
-  ));
+  const right = Math.max(
+    left,
+    Math.min(canvas.width, Math.ceil((frame.x + frame.width) * canvas.width)),
+  );
+  const bottom = Math.max(
+    top,
+    Math.min(canvas.height, Math.ceil((frame.y + frame.height) * canvas.height)),
+  );
   const width = right - left;
   const height = bottom - top;
   if (width < 1 || height < 1) return undefined;
@@ -1909,175 +2017,128 @@ function croppedAnnotationScreenshot(
   return output.toDataURL("image/png").split(",", 2)[1];
 }
 
-function flattenTree(root: AccessibilityNode): AccessibilityNode[] {
-  const result: AccessibilityNode[] = [];
-  const visit = (node: AccessibilityNode) => {
-    result.push(node);
-    node.children?.forEach(visit);
-  };
-  visit(root);
-  return result;
-}
-
-function visibleTree(
-  root: AccessibilityNode,
-  expanded: Set<string>,
-  search: string,
-): { node: AccessibilityNode; depth: number; isRoot: boolean }[] {
-  const query = search.trim().toLowerCase();
-  if (query) {
-    return flattenTree(root)
-      .filter(node => node !== root && !node.hidden)
-      .filter(node => [node.role, node.roleDescription, node.label, node.title, node.identifier, node.placeholder, node.value]
-        .some(value => value?.toLowerCase().includes(query)))
-      .map(node => ({ node, depth: 0, isRoot: false }));
-  }
-  const rows: { node: AccessibilityNode; depth: number; isRoot: boolean }[] = [];
-  const visit = (node: AccessibilityNode, depth: number) => {
-    if (!node.hidden) {
-      rows.push({ node, depth, isRoot: node === root });
-    }
-    if (expanded.has(node.ref)) node.children?.forEach(child => visit(child, depth + 1));
-  };
-  visit(root, 0);
-  return rows;
-}
-
-function elementName(node: AccessibilityNode): string {
-  return node.title
-    ?? node.label
-    ?? node.placeholder
-    ?? node.value
-    ?? node.help
-    ?? node.identifier
-    ?? elementRole(node);
-}
-
-function elementRole(node: AccessibilityNode): string {
-  const role = (node.roleDescription ?? node.role ?? "Element")
-    .replace(/^AX/, "")
-    .toLowerCase();
-  if (role === "genericelement" || role === "element") {
-    return node.children?.length ? "Group" : "Element";
-  }
-  if (role === "statictext") return "Text";
-  return role.replace(/^./, character => character.toUpperCase());
-}
-
-function commentableNodeAtPoint(
-  root: AccessibilityNode,
-  point: Point,
-  slop: { x: number; y: number } = { x: 0, y: 0 },
-): AccessibilityNode | undefined {
-  const matches: { node: AccessibilityNode; depth: number; area: number }[] = [];
-  const visit = (node: AccessibilityNode, depth: number) => {
-      const frame = node.frame?.normalized;
-      if (frame
-        && !node.hidden
-        && frame.width > 0
-        && frame.height > 0
-        && point.x >= frame.x - slop.x
-        && point.x <= frame.x + frame.width + slop.x
-        && point.y >= frame.y - slop.y
-        && point.y <= frame.y + frame.height + slop.y) {
-        matches.push({ node, depth, area: frame.width * frame.height });
-      }
-      node.children?.forEach(child => visit(child, depth + 1));
-  };
-  visit(root, 0);
-  const descendants = matches.filter(match => match.node !== root);
-  return descendants
-    .sort((left, right) => {
-      const areaDifference = left.area - right.area;
-      return Math.abs(areaDifference) > Number.EPSILON
-        ? areaDifference
-        : right.depth - left.depth;
-    })[0]?.node;
-}
-
-function compactIdentifier(value: string): string {
-  if (value.length <= 20) return value;
-  return `${value.slice(0, 8)}…${value.slice(-8)}`;
-}
-
-function formatProbeValue(value: string): string {
-  return value.replace(/([a-z])([A-Z])/g, "$1 $2")
-    .replace(/^./, character => character.toUpperCase());
-}
-
-function formatRuntime(runtime?: string): string {
-  if (!runtime) return "iOS Simulator";
-  const version = runtime.match(/iOS-([0-9-]+)$/)?.[1]?.replaceAll("-", ".");
-  return version ? `iOS ${version}` : runtime;
-}
-
-function formatFrame(frame?: Rect): string {
-  if (!frame) return "—";
-  return `${percent(frame.x)}, ${percent(frame.y)} · ${percent(frame.width)} × ${percent(frame.height)}`;
-}
-
 function Icon({ name }: { name: string }) {
   const paths: Record<string, ComponentChildren> = {
-    cursor: <><path d="m5 3 11 9-6 .8L7 18z" /><path d="m11 13 4 6" /></>,
-    finger: <><path d="M9.5 11V5.5a2 2 0 0 1 4 0V11" /><path d="M13.5 10V7.5a2 2 0 0 1 4 0V12" /><path d="M17.5 11v-1a2 2 0 0 1 4 0v4.5c0 4-2.6 6.5-6.5 6.5h-1.6a6 6 0 0 1-4.7-2.3L4.2 13a1.9 1.9 0 0 1 2.8-2.6l2.5 2.2" /></>,
-    annotate: <path d="M12 4c5 0 8.5 3 8.5 7.1 0 4-3.5 6.9-8.5 6.9-1.1 0-2.2-.2-3.2-.5L5 19.5l.9-4C4.4 14.4 3.5 12.8 3.5 11.1 3.5 7 7 4 12 4Z" />,
-    home: <><path d="m3 11 9-8 9 8" /><path d="M5.5 9.5V21h13V9.5M9 21v-7h6v7" /></>,
-    type: <><path d="M5 5h14M12 5v14M8 19h8" /></>,
-    capture: <><path d="M4 8h3l1.5-2h7L17 8h3v11H4z" /><circle cx="12" cy="13" r="3.5" /></>,
+    cursor: (
+      <>
+        <path d="m5 3 11 9-6 .8L7 18z" />
+        <path d="m11 13 4 6" />
+      </>
+    ),
+    finger: (
+      <>
+        <path d="M9.5 11V5.5a2 2 0 0 1 4 0V11" />
+        <path d="M13.5 10V7.5a2 2 0 0 1 4 0V12" />
+        <path d="M17.5 11v-1a2 2 0 0 1 4 0v4.5c0 4-2.6 6.5-6.5 6.5h-1.6a6 6 0 0 1-4.7-2.3L4.2 13a1.9 1.9 0 0 1 2.8-2.6l2.5 2.2" />
+      </>
+    ),
+    annotate: (
+      <path d="M12 4c5 0 8.5 3 8.5 7.1 0 4-3.5 6.9-8.5 6.9-1.1 0-2.2-.2-3.2-.5L5 19.5l.9-4C4.4 14.4 3.5 12.8 3.5 11.1 3.5 7 7 4 12 4Z" />
+    ),
+    home: (
+      <>
+        <path d="m3 11 9-8 9 8" />
+        <path d="M5.5 9.5V21h13V9.5M9 21v-7h6v7" />
+      </>
+    ),
+    type: (
+      <>
+        <path d="M5 5h14M12 5v14M8 19h8" />
+      </>
+    ),
+    capture: (
+      <>
+        <path d="M4 8h3l1.5-2h7L17 8h3v11H4z" />
+        <circle cx="12" cy="13" r="3.5" />
+      </>
+    ),
     record: <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />,
-    expand: <><path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" /></>,
-    menu: <><path d="M4 7h16" /><path d="M4 12h16" /><path d="M4 17h16" /></>,
-    phone: <><rect x="7" y="2.5" width="10" height="19" rx="2.3" /><path d="M10.5 5h3M11 18.5h2" /></>,
+    expand: (
+      <>
+        <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
+      </>
+    ),
+    menu: (
+      <>
+        <path d="M4 7h16" />
+        <path d="M4 12h16" />
+        <path d="M4 17h16" />
+      </>
+    ),
+    phone: (
+      <>
+        <rect x="7" y="2.5" width="10" height="19" rx="2.3" />
+        <path d="M10.5 5h3M11 18.5h2" />
+      </>
+    ),
     check: <path d="m5 12 4 4L19 6" />,
-    "comment-bubble": <path d="M12 3.5c5 0 8.5 3.1 8.5 7.4 0 4.2-3.5 7.2-8.5 7.2-1.1 0-2.2-.2-3.1-.5L5 19.5l.9-4C4.4 14.3 3.5 12.7 3.5 10.9c0-4.3 3.5-7.4 8.5-7.4Z" fill="currentColor" stroke="white" stroke-width="1.5" />,
-    sidebar: <><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M15 4v16" /></>,
-    send: <><path d="m3 11 18-8-7 18-3-7z" /><path d="m11 14 4-4" /></>,
-    sliders: <><path d="M4 7h16M4 17h16" /><circle cx="9" cy="7" r="2" fill="var(--popover)" /><circle cx="15" cy="17" r="2" fill="var(--popover)" /></>,
-    trash: <><path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" /></>,
-    refresh: <><path d="M19 8a8 8 0 1 0 1 7" /><path d="M19 3v5h-5" /></>,
+    "comment-bubble": (
+      <path
+        d="M12 3.5c5 0 8.5 3.1 8.5 7.4 0 4.2-3.5 7.2-8.5 7.2-1.1 0-2.2-.2-3.1-.5L5 19.5l.9-4C4.4 14.3 3.5 12.7 3.5 10.9c0-4.3 3.5-7.4 8.5-7.4Z"
+        fill="currentColor"
+        stroke="white"
+        stroke-width="1.5"
+      />
+    ),
+    sidebar: (
+      <>
+        <rect x="3" y="4" width="18" height="16" rx="2" />
+        <path d="M15 4v16" />
+      </>
+    ),
+    send: (
+      <>
+        <path d="m3 11 18-8-7 18-3-7z" />
+        <path d="m11 14 4-4" />
+      </>
+    ),
+    sliders: (
+      <>
+        <path d="M4 7h16M4 17h16" />
+        <circle cx="9" cy="7" r="2" fill="var(--popover)" />
+        <circle cx="15" cy="17" r="2" fill="var(--popover)" />
+      </>
+    ),
+    trash: (
+      <>
+        <path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" />
+      </>
+    ),
+    refresh: (
+      <>
+        <path d="M19 8a8 8 0 1 0 1 7" />
+        <path d="M19 3v5h-5" />
+      </>
+    ),
     "chevron-down": <path d="m7 9 5 5 5-5" />,
     "chevron-right": <path d="m9 7 5 5-5 5" />,
-    "collapse-tree": <><path d="m7 10 5-5 5 5" /><path d="m7 19 5-5 5 5" /></>,
-    "expand-tree": <><path d="m7 5 5 5 5-5" /><path d="m7 14 5 5 5-5" /></>,
-    layers: <><path d="m12 3 9 5-9 5-9-5z" /><path d="m3 12 9 5 9-5M3 16l9 5 9-5" /></>,
+    "collapse-tree": (
+      <>
+        <path d="m7 10 5-5 5 5" />
+        <path d="m7 19 5-5 5 5" />
+      </>
+    ),
+    "expand-tree": (
+      <>
+        <path d="m7 5 5 5 5-5" />
+        <path d="m7 14 5 5 5-5" />
+      </>
+    ),
+    layers: (
+      <>
+        <path d="m12 3 9 5-9 5-9-5z" />
+        <path d="m3 12 9 5 9-5M3 16l9 5 9-5" />
+      </>
+    ),
     element: <rect x="5" y="5" width="14" height="14" rx="3" />,
   };
-  return <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">{paths[name]}</svg>;
+  return (
+    <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+      {paths[name]}
+    </svg>
+  );
 }
 
-function contextForNode(
-  snapshot: AccessibilitySnapshot,
-  node: AccessibilityNode,
-): AnnotationContext {
-  return {
-    capturedAt: snapshot.capturedAt,
-    accessibility: {
-      snapshotId: snapshot.snapshotId,
-      ref: node.ref,
-      role: node.role,
-      roleDescription: node.roleDescription,
-      title: node.title,
-      label: node.label ?? node.title,
-      identifier: node.identifier,
-      value: node.value,
-      actions: node.actions,
-      frame: node.frame?.normalized,
-      path: elementPath(snapshot.root, node),
-    },
-  };
-}
-
-function elementPath(root: AccessibilityNode, target: AccessibilityNode): string[] | undefined {
-  const visit = (node: AccessibilityNode, path: string[]): string[] | undefined => {
-    const next = [...path, node === root ? "Screen" : elementName(node)];
-    if (node.ref === target.ref) return next;
-    for (const child of node.children ?? []) {
-      const match = visit(child, next);
-      if (match) return match;
-    }
-    return undefined;
-  };
-  return visit(root, []);
-}
-
-render(<SimView />, document.getElementById("app")!);
+const appRoot = document.getElementById("app");
+if (!appRoot) throw new Error("SimView app root is missing");
+render(<SimView />, appRoot);

@@ -2,7 +2,7 @@ import { access, mkdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
-const rootManifest = await Bun.file(join(root, "package.json")).json() as {
+const rootManifest = (await Bun.file(join(root, "package.json")).json()) as {
   version: string;
 };
 const tarball = resolve(
@@ -12,10 +12,7 @@ const npmCache = join(root, ".simview", "npm-smoke-cache");
 const bunCache = join(root, ".simview", "bun-smoke-cache");
 
 await access(tarball);
-await Promise.all([
-  mkdir(npmCache, { recursive: true }),
-  mkdir(bunCache, { recursive: true }),
-]);
+await Promise.all([mkdir(npmCache, { recursive: true }), mkdir(bunCache, { recursive: true })]);
 
 const commands = [
   [
@@ -29,14 +26,7 @@ const commands = [
     "doctor",
     "--json",
   ],
-  [
-    "bunx",
-    "--package",
-    tarball,
-    "simview",
-    "doctor",
-    "--json",
-  ],
+  ["bunx", "--package", tarball, "simview", "doctor", "--json"],
 ];
 
 for (const command of commands) {

@@ -1,5 +1,5 @@
-import Foundation
 import Darwin
+import Foundation
 
 struct Arguments {
     let command: String
@@ -46,6 +46,7 @@ do {
             socketPath: socket,
             token: token,
             preferredUDID: arguments.values["--udid"],
+            instanceID: arguments.values["--instance-id"],
             parentPID: arguments.values["--parent-pid"].flatMap(pid_t.init),
             idleTimeout: arguments.values["--idle-timeout"].flatMap(TimeInterval.init) ?? 60
         )
@@ -77,15 +78,16 @@ do {
         if let error = failure.get() { throw error }
         print(String(data: try jsonData(["output": output, "udid": device.udid]), encoding: .utf8)!)
     default:
-        print("""
-        simview-core 0.1.0
+        print(
+            """
+            simview-core \(SimViewVersion.current)
 
-        Commands:
-          serve --socket <path> --token-fd <fd> [--udid <udid>]
-          doctor
-          devices
-          screenshot --output <path> [--udid <udid>]
-        """)
+            Commands:
+              serve --socket <path> --token-fd <fd> [--udid <udid>]
+              doctor
+              devices
+              screenshot --output <path> [--udid <udid>]
+            """)
     }
 } catch {
     let value = (error as? SimViewError) ?? SimViewError("INTERNAL_ERROR", error.localizedDescription)

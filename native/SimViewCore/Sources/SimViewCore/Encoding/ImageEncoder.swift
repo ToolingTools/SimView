@@ -1,6 +1,6 @@
-import Foundation
-import CoreVideo
 import CoreGraphics
+import CoreVideo
+import Foundation
 import ImageIO
 
 enum ImageEncoder {
@@ -27,7 +27,8 @@ enum ImageEncoder {
         guard let destination = CGImageDestinationCreateWithData(data, type as CFString, 1, nil) else {
             throw SimViewError("IMAGE_ENCODE_FAILED", "Could not create an image destination")
         }
-        let options: CFDictionary = type == "public.jpeg"
+        let options: CFDictionary =
+            type == "public.jpeg"
             ? [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
             : [:] as CFDictionary
         CGImageDestinationAddImage(destination, image, options)
@@ -37,4 +38,3 @@ enum ImageEncoder {
         return data as Data
     }
 }
-

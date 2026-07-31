@@ -26,10 +26,10 @@ describe("release distribution", () => {
   });
 
   test("routes Codex and MCPB through the consolidated executable", async () => {
-    const mcp = await Bun.file(join(root, ".mcp.json")).json() as {
+    const mcp = (await Bun.file(join(root, ".mcp.json")).json()) as {
       mcpServers: { simview: { command: string; args: string[] } };
     };
-    const mcpb = await Bun.file(join(root, "manifest.json")).json() as {
+    const mcpb = (await Bun.file(join(root, "manifest.json")).json()) as {
       server: {
         entry_point: string;
         mcp_config: { command: string; args: string[] };
@@ -42,7 +42,7 @@ describe("release distribution", () => {
     });
     expect(mcpb.server.entry_point).toBe("bin/simview");
     expect(mcpb.server.mcp_config).toEqual({
-      command: "${__dirname}/bin/simview",
+      command: "$" + "{__dirname}/bin/simview",
       args: ["mcp"],
     });
   });

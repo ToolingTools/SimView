@@ -1,7 +1,49 @@
+import CoreVideo
 import XCTest
+
 @testable import SimViewCore
 
 final class ProtocolTests: XCTestCase {
+    func testCanonicalHelloFixtureDecodes() throws {
+        let fixture = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("../../../../tests/fixtures/protocol/hello.json")
+            .standardized
+        let object = try JSONSerialization.jsonObject(with: Data(contentsOf: fixture)) as! [String: Any]
+        let requestData = try JSONSerialization.data(withJSONObject: object["request"] as Any)
+        let request = try Request(data: requestData)
+
+        XCTAssertEqual(request.protocolVersion, SimViewVersion.protocolVersion)
+        XCTAssertEqual(request.method, "hello")
+        XCTAssertEqual(request.params["codecs"]?.arrayValue?.compactMap(\.stringValue), ["h264", "mjpeg"])
+    }
+
+    func testJSONValueRoundTrip() throws {
+        let value = JSONValue.object([
+            "boolean": .bool(true),
+            "number": .number(42),
+            "array": .array([.string("value"), .null]),
+        ])
+        let data = try JSONEncoder().encode(value)
+        XCTAssertEqual(try JSONDecoder().decode(JSONValue.self, from: data), value)
+    }
+
+    func testMetricsKeepABoundedLatencyWindow() {
+        let metrics = Metrics()
+        for value in 0..<2_100 {
+            metrics.didEncode(latencyMS: Double(value))
+        }
+        let latency = metrics.dictionary["latencyMs"] as! [String: Double]
+        XCTAssertGreaterThan(latency["p50"]!, 1_000)
+        XCTAssertGreaterThan(latency["p95"]!, 1_900)
+    }
+
+    func testAccessibilitySelectorRequiresAMatchingField() throws {
+        XCTAssertThrowsError(try validateAccessibilitySelector([:]))
+        XCTAssertNoThrow(try validateAccessibilitySelector(["identifier": "submit"]))
+        XCTAssertThrowsError(try validateAccessibilitySelector(["exact": true]))
+    }
+
     func testFindsFocalUIKitApplicationBundleID() {
         let domain = """
             50359 - UIKitApplication:com.example.app[06ff][rb-legacy]
@@ -15,7 +57,8 @@ final class ProtocolTests: XCTestCase {
             ]
         )
         XCTAssertEqual(
-            ProbeCoordinator.focalBundleID("""
+            ProbeCoordinator.focalBundleID(
+                """
                 state = running
                 bundle id = com.example.app
                 spawn role = ui focal (1)
@@ -23,7 +66,8 @@ final class ProtocolTests: XCTestCase {
             "com.example.app"
         )
         XCTAssertNil(
-            ProbeCoordinator.focalBundleID("""
+            ProbeCoordinator.focalBundleID(
+                """
                 bundle id = com.example.background
                 spawn role = background (2)
                 """)
@@ -53,5 +97,24 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(preferredCodec(["mjpeg", "h264"]), "mjpeg")
         XCTAssertEqual(preferredCodec(["av1", "mjpeg"]), "mjpeg")
         XCTAssertEqual(preferredCodec([]), "mjpeg")
+    }
+
+    func testH264EncoderAcceptsABGRAPixelBuffer() async throws {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            320,
+            180,
+            kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+            &pixelBuffer
+        )
+        XCTAssertEqual(status, kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixelBuffer)
+        let encoder = H264Encoder()
+        let encoded = try await encoder.encode(buffer)
+        XCTAssertFalse(encoded.bytes.isEmpty)
+        XCTAssertTrue(encoded.keyframe)
+        await encoder.stop()
     }
 }

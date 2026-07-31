@@ -8,7 +8,7 @@ describe("MCP App HTML", () => {
       '<script type="module" src="./preview.js"></script>',
       "</body></html>",
     ].join("");
-    const script = "const patterns = \"$& $` $'\"; const close = \"</script>\";";
+    const script = 'const patterns = "$& $` $\'"; const close = "</script>";';
 
     const html = inlineAppModule(template, script);
 

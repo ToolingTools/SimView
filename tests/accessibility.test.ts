@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type AccessibilitySnapshot,
   compactAccessibilityTree,
   flattenAccessibilityTree,
-  type AccessibilitySnapshot,
 } from "@simview/client";
 
 const snapshot: AccessibilitySnapshot = {
@@ -16,23 +16,25 @@ const snapshot: AccessibilitySnapshot = {
   root: {
     ref: "ax:snapshot-1:0",
     role: "AXApplication",
-    children: [{
-      ref: "ax:snapshot-1:1",
-      role: "AXButton",
-      label: "Continue",
-      identifier: "continue",
-      enabled: true,
-      frame: {
-        points: { x: 20, y: 800, width: 390, height: 60 },
-        normalized: { x: 0.047, y: 0.858, width: 0.907, height: 0.064 },
+    children: [
+      {
+        ref: "ax:snapshot-1:1",
+        role: "AXButton",
+        label: "Continue",
+        identifier: "continue",
+        enabled: true,
+        frame: {
+          points: { x: 20, y: 800, width: 390, height: 60 },
+          normalized: { x: 0.047, y: 0.858, width: 0.907, height: 0.064 },
+        },
       },
-    }],
+    ],
   },
 };
 
 describe("accessibility helpers", () => {
   test("flattens nested snapshots", () => {
-    expect(flattenAccessibilityTree(snapshot.root).map(node => node.ref)).toEqual([
+    expect(flattenAccessibilityTree(snapshot.root).map((node) => node.ref)).toEqual([
       "ax:snapshot-1:0",
       "ax:snapshot-1:1",
     ]);

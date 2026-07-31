@@ -1,21 +1,25 @@
-import Foundation
 import CoreGraphics
-import ObjectiveC
 import Darwin
+import Foundation
+import ObjectiveC
 
 final class HIDInjector: @unchecked Sendable {
-    private typealias MouseFunction = @convention(c) (
-        UnsafePointer<CGPoint>, UnsafePointer<CGPoint>?, UInt32, Int32, CGFloat, CGFloat, UInt32
-    ) -> UnsafeMutableRawPointer?
-    private typealias ButtonFunction = @convention(c) (
-        Int32, Int32, Int32
-    ) -> UnsafeMutableRawPointer?
-    private typealias ArbitraryFunction = @convention(c) (
-        UInt32, UInt32, UInt32, UInt32
-    ) -> UnsafeMutableRawPointer?
-    private typealias KeyboardFunction = @convention(c) (
-        UInt32, UInt32
-    ) -> UnsafeMutableRawPointer?
+    private typealias MouseFunction =
+        @convention(c) (
+            UnsafePointer<CGPoint>, UnsafePointer<CGPoint>?, UInt32, Int32, CGFloat, CGFloat, UInt32
+        ) -> UnsafeMutableRawPointer?
+    private typealias ButtonFunction =
+        @convention(c) (
+            Int32, Int32, Int32
+        ) -> UnsafeMutableRawPointer?
+    private typealias ArbitraryFunction =
+        @convention(c) (
+            UInt32, UInt32, UInt32, UInt32
+        ) -> UnsafeMutableRawPointer?
+    private typealias KeyboardFunction =
+        @convention(c) (
+            UInt32, UInt32
+        ) -> UnsafeMutableRawPointer?
 
     private let queue = DispatchQueue(label: "dev.simview.hid", qos: .userInteractive)
     private var client: NSObject?
@@ -44,9 +48,10 @@ final class HIDInjector: @unchecked Sendable {
             throw SimViewError("HID_CLIENT_UNAVAILABLE", "SimDeviceLegacyHIDClient is unavailable")
         }
         let selector = NSSelectorFromString("initWithDevice:error:")
-        typealias Initializer = @convention(c) (
-            AnyObject, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>
-        ) -> AnyObject?
+        typealias Initializer =
+            @convention(c) (
+                AnyObject, Selector, AnyObject, AutoreleasingUnsafeMutablePointer<NSError?>
+            ) -> AnyObject?
         guard let implementation = class_getMethodImplementation(type, selector) else {
             throw SimViewError("HID_CLIENT_UNAVAILABLE", "HID client initializer is unavailable")
         }
@@ -178,9 +183,10 @@ final class HIDInjector: @unchecked Sendable {
             throw SimViewError("DEVICE_NOT_SELECTED", "No simulator is selected")
         }
         let selector = NSSelectorFromString("lookup:error:")
-        typealias Lookup = @convention(c) (
-            AnyObject, Selector, NSString, AutoreleasingUnsafeMutablePointer<NSError?>
-        ) -> mach_port_t
+        typealias Lookup =
+            @convention(c) (
+                AnyObject, Selector, NSString, AutoreleasingUnsafeMutablePointer<NSError?>
+            ) -> mach_port_t
         guard let implementation = class_getMethodImplementation(object_getClass(device), selector) else {
             throw SimViewError("ORIENTATION_BACKEND_UNAVAILABLE", "PurpleWorkspacePort lookup is unavailable")
         }
@@ -192,10 +198,11 @@ final class HIDInjector: @unchecked Sendable {
             &error
         )
         guard port != 0 else {
-            throw error ?? SimViewError(
-                "ORIENTATION_BACKEND_UNAVAILABLE",
-                "PurpleWorkspacePort was not found; Simulator.app may need to be running"
-            )
+            throw error
+                ?? SimViewError(
+                    "ORIENTATION_BACKEND_UNAVAILABLE",
+                    "PurpleWorkspacePort was not found; Simulator.app may need to be running"
+                )
         }
         var buffer = [UInt8](repeating: 0, count: 112)
         let sent = buffer.withUnsafeMutableBufferPointer { pointer -> kern_return_t in
@@ -238,9 +245,10 @@ final class HIDInjector: @unchecked Sendable {
             free(message)
             return
         }
-        typealias Sender = @convention(c) (
-            AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?
-        ) -> Void
+        typealias Sender =
+            @convention(c) (
+                AnyObject, Selector, UnsafeMutableRawPointer, ObjCBool, AnyObject?, AnyObject?
+            ) -> Void
         guard let implementation = class_getMethodImplementation(object_getClass(client), sendSelector) else {
             free(message)
             return

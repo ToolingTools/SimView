@@ -28,3 +28,9 @@ Simulator.
    and specific.
 8. Annotations remain session-local. Use **Send to Chat** to capture the current
    PNG and send it with the compact coordinate comments.
+
+Multiple live tasks may view the same Simulator stream. SimView shares the
+native capture backend per Simulator UDID, while each task keeps an isolated
+review resource, relay, and annotation set. Closing one task does not stop the
+stream for other authenticated tasks; the backend stops capture after the last
+client leaves and exits after its idle window.

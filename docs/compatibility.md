@@ -41,9 +41,16 @@ For every supported row:
 5. Type ASCII, spaces, punctuation, emoji, and a composed accented character.
 6. Rotate portrait to both landscape directions without restarting.
 7. Connect two clients and verify a new keyframe is delivered.
-8. Leave the simulator static and verify only the 5 fps idle heartbeat encodes.
-9. Retrieve the frontmost host-side accessibility tree and inspect one point.
-10. Relaunch one third-party fixture with the bundled probe and verify scene,
+8. Open three MCP sessions against one UDID and verify they report the same
+   native backend PID/instance ID while each review resource and annotation set
+   remains isolated.
+9. Close one session and verify the other stream continues. After the final
+   authenticated client closes, verify capture and encoders stop immediately;
+   the compatible backend may remain alive only for its five-minute reconnect
+   window.
+10. Leave the simulator static and verify only the 5 fps idle heartbeat encodes.
+11. Retrieve the frontmost host-side accessibility tree and inspect one point.
+12. Relaunch one third-party fixture with the bundled probe and verify scene,
     window, visible controller path, view class, owning controller, bounded
     view search, and bounded hierarchy.
 

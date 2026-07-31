@@ -15,7 +15,7 @@ export async function previewScriptResponse(
   pluginRoot = process.env.SIMVIEW_PLUGIN_ROOT,
 ): Promise<Response> {
   const script = Bun.file(join(resolveAppRoot(pluginRoot), "dist", "preview.js"));
-  if (!await script.exists()) {
+  if (!(await script.exists())) {
     return new Response("Build the preview app first", { status: 503 });
   }
   return new Response(script, {

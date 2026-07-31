@@ -50,7 +50,8 @@ enum SimulatorRuntime {
             return selected
         }
         guard booted.count == 1, let selected = booted.first else {
-            let message = booted.isEmpty
+            let message =
+                booted.isEmpty
                 ? "No booted iOS Simulator was found"
                 : "More than one simulator is booted; specify a UDID"
             throw SimViewError("DEVICE_SELECTION_REQUIRED", message, details: booted.map(\.dictionary))
@@ -74,4 +75,3 @@ enum SimulatorRuntime {
         }
     }
 }
-

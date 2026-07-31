@@ -6,23 +6,42 @@ const root = resolve(import.meta.dir, "..");
 const stage = join(root, "artifacts", "plugin", "simview");
 const output = join(root, "artifacts", "simview-plugin.zip");
 const compiledBinaries = ["packages/cli/dist/simview"];
-const compiledSourcePackages = ["client", "core", "mcp", "cli"];
+const compiledSourcePackages = ["app", "client", "contracts", "core", "mcp", "cli"];
 
-const sourceFiles = compiledSourcePackages.flatMap(packageName =>
-  [...new Bun.Glob("src/**/*.ts").scanSync({
+const sourceFiles = compiledSourcePackages.flatMap((packageName) => [
+  ...new Bun.Glob("src/**/*.ts").scanSync({
     cwd: join(root, "packages", packageName),
     absolute: true,
-  })]
+  }),
+  ...new Bun.Glob("src/**/*.tsx").scanSync({
+    cwd: join(root, "packages", packageName),
+    absolute: true,
+  }),
+]);
+sourceFiles.push(
+  ...new Bun.Glob("Sources/**/*.{swift,m,h}").scanSync({
+    cwd: join(root, "native", "SimViewCore"),
+    absolute: true,
+  }),
+  ...new Bun.Glob("**/*.{m,h}").scanSync({
+    cwd: join(root, "native", "SimViewProbe"),
+    absolute: true,
+  }),
+  join(root, "native", "SimViewCore", "Package.swift"),
+  join(root, "packages", "app", "src", "preview.html"),
+  join(root, "package.json"),
+  join(root, "manifest.json"),
+  join(root, ".codex-plugin", "plugin.json"),
 );
 const newestSource = Math.max(
-  ...await Promise.all(sourceFiles.map(async path => (await stat(path)).mtimeMs)),
+  ...(await Promise.all(sourceFiles.map(async (path) => (await stat(path)).mtimeMs))),
 );
 for (const relativePath of compiledBinaries) {
   const binary = join(root, relativePath);
   if ((await stat(binary)).mtimeMs < newestSource) {
     throw new Error(
-      `${relativePath} is older than the TypeScript it embeds. `
-      + "Run `bun scripts/build-release.ts` before packaging the plugin.",
+      `${relativePath} is older than the TypeScript it embeds. ` +
+        "Run `bun scripts/build-release.ts` before packaging the plugin.",
     );
   }
 }

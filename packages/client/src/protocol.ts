@@ -1,4 +1,10 @@
-export const PROTOCOL_VERSION = 1 as const;
+import {
+  type AccessibilityNode,
+  type AccessibilitySnapshot,
+  MAXIMUM_FRAME_BYTES,
+} from "@simview/contracts";
+
+export * from "@simview/contracts";
 
 export enum FrameKind {
   Request = 0x01,
@@ -7,189 +13,6 @@ export enum FrameKind {
   H264Frame = 0x11,
   JpegFrame = 0x12,
   PngScreenshot = 0x20,
-}
-
-export type Codec = "h264" | "mjpeg";
-export type Orientation =
-  | "portrait"
-  | "portrait-upside-down"
-  | "landscape-left"
-  | "landscape-right";
-
-export interface DeviceDescription {
-  udid: string;
-  name: string;
-  state: string;
-  runtime: string;
-  pointWidth?: number;
-  pointHeight?: number;
-  pixelWidth?: number;
-  pixelHeight?: number;
-}
-
-export interface HelloParams {
-  token: string;
-  codecs: Codec[];
-  maxWidth?: number;
-  maxHeight?: number;
-  maxFrameRate?: number;
-}
-
-export type Method =
-  | "hello"
-  | "devices.list"
-  | "device.describe"
-  | "capture.start"
-  | "capture.stop"
-  | "capture.keyframe"
-  | "capture.screenshot"
-  | "input.touch"
-  | "input.tap"
-  | "input.longPress"
-  | "input.swipe"
-  | "input.typeText"
-  | "input.key"
-  | "input.button"
-  | "device.orientation.set"
-  | "accessibility.snapshot"
-  | "accessibility.elementAtPoint"
-  | "accessibility.find"
-  | "accessibility.wait"
-  | "probe.status"
-  | "probe.target"
-  | "probe.enable"
-  | "probe.disable"
-  | "probe.context"
-  | "probe.inspectPoint"
-  | "probe.findViews"
-  | "probe.fullHierarchy"
-  | "health.get"
-  | "server.shutdown";
-
-export interface ProtocolRequest<T = unknown> {
-  id: string;
-  protocolVersion: typeof PROTOCOL_VERSION;
-  method: Method;
-  params: T;
-}
-
-export interface ProtocolError {
-  code: string;
-  message: string;
-  details?: unknown;
-  recoverable: boolean;
-}
-
-export interface ProtocolResponse<T = unknown> {
-  id: string;
-  result?: T;
-  error?: ProtocolError;
-}
-
-export interface TouchParams {
-  contactId: number;
-  phase: "down" | "move" | "up";
-  x: number;
-  y: number;
-  pressure?: number;
-  timestamp?: number;
-}
-
-export interface Annotation {
-  id: string;
-  frameId: string;
-  createdAt: string;
-  geometry: { kind: "point"; x: number; y: number };
-  note: string;
-  route?: string;
-  component?: { testID?: string; label?: string; source?: string };
-  context?: AnnotationContext;
-}
-
-export interface NormalizedRect {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
-
-export interface AccessibilityNode {
-  ref: string;
-  role?: string;
-  roleDescription?: string;
-  subrole?: string;
-  label?: string;
-  value?: string;
-  valueRedacted?: boolean;
-  identifier?: string;
-  title?: string;
-  help?: string;
-  placeholder?: string;
-  enabled?: boolean;
-  hidden?: boolean;
-  focused?: boolean;
-  expanded?: boolean;
-  actions?: string[];
-  frame?: {
-    points: NormalizedRect;
-    normalized: NormalizedRect;
-  };
-  children?: AccessibilityNode[];
-}
-
-export interface AccessibilitySnapshot {
-  schemaVersion: 1;
-  snapshotId: string;
-  capturedAt: string;
-  source: "core-simulator-ax";
-  scope: "interactive" | "visible" | "full";
-  screen: NormalizedRect;
-  root: AccessibilityNode;
-  stats: {
-    nodeCount: number;
-    truncated: boolean;
-  };
-}
-
-export interface AccessibilitySelector {
-  ref?: string;
-  identifier?: string;
-  role?: string;
-  name?: string;
-  value?: string;
-  exact?: boolean;
-  index?: number;
-}
-
-export interface AnnotationContext {
-  capturedAt: string;
-  accessibility?: {
-    snapshotId: string;
-    ref?: string;
-    role?: string;
-    roleDescription?: string;
-    title?: string;
-    label?: string;
-    identifier?: string;
-    value?: string;
-    actions?: string[];
-    frame?: NormalizedRect;
-    path?: string[];
-  };
-  native?: {
-    viewClass?: string;
-    controllerClass?: string;
-    controllerPath?: string[];
-    windowClass?: string;
-    sceneIdentifier?: string;
-    matchConfidence?: "exact" | "strong" | "weak" | "none";
-  };
-  metro?: {
-    route?: string;
-    component?: string;
-    testID?: string;
-    source?: string;
-  };
 }
 
 export function flattenAccessibilityTree(root: AccessibilityNode): AccessibilityNode[] {
@@ -203,8 +26,9 @@ export function flattenAccessibilityTree(root: AccessibilityNode): Accessibility
 }
 
 export function compactAccessibilityTree(snapshot: AccessibilitySnapshot): string {
-  const nodes = flattenAccessibilityTree(snapshot.root).filter(node =>
-    node !== snapshot.root && node.hidden !== true);
+  const nodes = flattenAccessibilityTree(snapshot.root).filter(
+    (node) => node !== snapshot.root && node.hidden !== true,
+  );
   const lines = nodes.map((node, index) => {
     const label = node.label ?? node.title;
     const name = label ? ` "${label.replace(/\s+/g, " ").slice(0, 120)}"` : "";
@@ -217,7 +41,9 @@ export function compactAccessibilityTree(snapshot: AccessibilitySnapshot): strin
       node.enabled === false ? "disabled" : "",
       node.focused ? "focused" : "",
       node.valueRedacted ? "secure-value" : "",
-    ].filter(Boolean).join(" ");
+    ]
+      .filter(Boolean)
+      .join(" ");
     return `@${index + 1} ${node.role ?? "element"}${name}${identifier}${bounds}${state ? ` ${state}` : ""}`;
   });
   const screen = snapshot.screen;
@@ -225,7 +51,9 @@ export function compactAccessibilityTree(snapshot: AccessibilitySnapshot): strin
     `screen ${Math.round(screen.width)}x${Math.round(screen.height)} snapshot=${snapshot.snapshotId}`,
     ...lines,
     snapshot.stats.truncated ? "… tree truncated; request a narrower query" : "",
-  ].filter(Boolean).join("\n");
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function encodeFrame(kind: FrameKind, payload: Uint8Array): Uint8Array {
@@ -238,29 +66,68 @@ export function encodeFrame(kind: FrameKind, payload: Uint8Array): Uint8Array {
 }
 
 export class FrameDecoder {
-  #buffer = new Uint8Array();
+  #chunks: Uint8Array[] = [];
+  #available = 0;
 
   push(chunk: Uint8Array): Array<{ kind: FrameKind; payload: Uint8Array }> {
-    const next = new Uint8Array(this.#buffer.byteLength + chunk.byteLength);
-    next.set(this.#buffer);
-    next.set(chunk, this.#buffer.byteLength);
-    this.#buffer = next;
-    const frames: Array<{ kind: FrameKind; payload: Uint8Array }> = [];
+    if (chunk.byteLength > 0) {
+      this.#chunks.push(chunk);
+      this.#available += chunk.byteLength;
+    }
 
-    while (this.#buffer.byteLength >= 5) {
-      const view = new DataView(
-        this.#buffer.buffer,
-        this.#buffer.byteOffset,
-        this.#buffer.byteLength,
-      );
-      const kind = view.getUint8(0) as FrameKind;
-      const length = view.getUint32(1, false);
-      if (length > 64 * 1024 * 1024) throw new Error(`Frame exceeds 64 MiB: ${length}`);
-      if (this.#buffer.byteLength < 5 + length) break;
-      frames.push({ kind, payload: this.#buffer.slice(5, 5 + length) });
-      this.#buffer = this.#buffer.slice(5 + length);
+    const frames: Array<{ kind: FrameKind; payload: Uint8Array }> = [];
+    while (this.#available >= 5) {
+      const header = this.#peek(5);
+      const kind = header[0] as FrameKind;
+      const length = new DataView(header.buffer, header.byteOffset, 5).getUint32(1, false);
+      if (length > MAXIMUM_FRAME_BYTES) {
+        throw new Error(`Frame exceeds 64 MiB: ${length}`);
+      }
+      if (this.#available < 5 + length) break;
+      this.#consume(5);
+      frames.push({ kind, payload: this.#consume(length) });
     }
     return frames;
+  }
+
+  #peek(length: number): Uint8Array {
+    const first = this.#chunks[0];
+    if (first && first.byteLength >= length) return first.subarray(0, length);
+    const result = new Uint8Array(length);
+    let offset = 0;
+    for (const chunk of this.#chunks) {
+      const count = Math.min(chunk.byteLength, length - offset);
+      result.set(chunk.subarray(0, count), offset);
+      offset += count;
+      if (offset === length) break;
+    }
+    return result;
+  }
+
+  #consume(length: number): Uint8Array {
+    if (length === 0) return new Uint8Array();
+    const first = this.#chunks[0];
+    if (first && first.byteLength >= length) {
+      const result = first.slice(0, length);
+      if (first.byteLength === length) this.#chunks.shift();
+      else this.#chunks[0] = first.subarray(length);
+      this.#available -= length;
+      return result;
+    }
+
+    const result = new Uint8Array(length);
+    let offset = 0;
+    while (offset < length) {
+      const current = this.#chunks[0];
+      if (!current) throw new Error("Frame decoder buffer underflow");
+      const count = Math.min(current.byteLength, length - offset);
+      result.set(current.subarray(0, count), offset);
+      offset += count;
+      if (count === current.byteLength) this.#chunks.shift();
+      else this.#chunks[0] = current.subarray(count);
+    }
+    this.#available -= length;
+    return result;
   }
 }
 

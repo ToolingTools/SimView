@@ -1,0 +1,36 @@
+name: Compatibility report
+description: Report behavior on a new Xcode or Simulator runtime
+title: "[Compatibility]: "
+labels: [compatibility]
+body:
+  - type: input
+    id: matrix
+    attributes:
+      label: macOS, Xcode build, architecture, iOS runtime and device
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: simview doctor --json
+      render: json
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Real-Simulator checks completed
+      options:
+        - label: Capture and 60-second stream
+        - label: Tap, swipe, buttons and typing
+        - label: Orientation changes
+        - label: Accessibility snapshot and point inspection
+        - label: Multi-client keyframe recovery
+        - label: Optional UIKit probe
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Results, latency metrics and failures
+    validations:
+      required: true
+

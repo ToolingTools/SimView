@@ -6,7 +6,7 @@ const root = resolve(import.meta.dir, "..");
 const release = join(root, "artifacts", "release");
 const stage = join(root, "artifacts", "npm", "simview");
 const npmCache = join(root, ".simview", "npm-cache");
-const rootManifest = await Bun.file(join(root, "package.json")).json() as {
+const rootManifest = (await Bun.file(join(root, "package.json")).json()) as {
   version: string;
 };
 const packageName = process.env.SIMVIEW_NPM_PACKAGE_NAME ?? "simview";
@@ -45,21 +45,15 @@ await writeFile(
   `${JSON.stringify(createNpmPackageManifest(rootManifest.version, packageName), null, 2)}\n`,
 );
 
-const pack = Bun.spawn([
-  "npm",
-  "pack",
-  "--json",
-  "--pack-destination",
-  release,
-  "--cache",
-  npmCache,
-  stage,
-], {
-  cwd: root,
-  env: process.env,
-  stdout: "pipe",
-  stderr: "inherit",
-});
+const pack = Bun.spawn(
+  ["npm", "pack", "--json", "--pack-destination", release, "--cache", npmCache, stage],
+  {
+    cwd: root,
+    env: process.env,
+    stdout: "pipe",
+    stderr: "inherit",
+  },
+);
 const stdout = await new Response(pack.stdout).text();
 const status = await pack.exited;
 if (status !== 0) process.exit(status);

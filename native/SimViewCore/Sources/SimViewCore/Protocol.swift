@@ -1,5 +1,105 @@
 import Foundation
 
+enum JSONValue: Codable, Sendable, Equatable {
+    case null
+    case bool(Bool)
+    case number(Double)
+    case string(String)
+    case array([JSONValue])
+    case object([String: JSONValue])
+
+    init?(_ value: Any) {
+        switch value {
+        case is NSNull:
+            self = .null
+        case let value as Bool:
+            self = .bool(value)
+        case let value as NSNumber:
+            self = .number(value.doubleValue)
+        case let value as String:
+            self = .string(value)
+        case let value as [Any]:
+            let converted = value.compactMap(JSONValue.init)
+            guard converted.count == value.count else { return nil }
+            self = .array(converted)
+        case let value as [String: Any]:
+            var converted: [String: JSONValue] = [:]
+            for (key, item) in value {
+                guard let item = JSONValue(item) else { return nil }
+                converted[key] = item
+            }
+            self = .object(converted)
+        default:
+            return nil
+        }
+    }
+
+    var foundationObject: Any {
+        switch self {
+        case .null: NSNull()
+        case .bool(let value): value
+        case .number(let value): value
+        case .string(let value): value
+        case .array(let value): value.map(\.foundationObject)
+        case .object(let value): value.mapValues(\.foundationObject)
+        }
+    }
+
+    var stringValue: String? {
+        guard case .string(let value) = self else { return nil }
+        return value
+    }
+
+    var doubleValue: Double? {
+        guard case .number(let value) = self else { return nil }
+        return value
+    }
+
+    var intValue: Int? {
+        guard let value = doubleValue, value.rounded() == value else { return nil }
+        return Int(exactly: value)
+    }
+
+    var arrayValue: [JSONValue]? {
+        guard case .array(let value) = self else { return nil }
+        return value
+    }
+
+    var objectValue: [String: JSONValue]? {
+        guard case .object(let value) = self else { return nil }
+        return value
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if container.decodeNil() {
+            self = .null
+        } else if let value = try? container.decode(Bool.self) {
+            self = .bool(value)
+        } else if let value = try? container.decode(Double.self) {
+            self = .number(value)
+        } else if let value = try? container.decode(String.self) {
+            self = .string(value)
+        } else if let value = try? container.decode([JSONValue].self) {
+            self = .array(value)
+        } else {
+            self = .object(try container.decode([String: JSONValue].self))
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        switch self {
+        case .null: try container.encodeNil()
+        case .bool(let value): try container.encode(value)
+        case .number(let value): try container.encode(value)
+        case .string(let value): try container.encode(value)
+        case .array(let value): try container.encode(value)
+        case .object(let value): try container.encode(value)
+        }
+    }
+}
+
 enum FrameKind: UInt8 {
     case request = 0x01
     case response = 0x02
@@ -49,17 +149,17 @@ struct FrameDecoder {
     }
 }
 
-struct SimViewError: Error {
+struct SimViewError: Error, Sendable {
     let code: String
     let message: String
     let recoverable: Bool
-    let details: Any?
+    let details: JSONValue?
 
     init(_ code: String, _ message: String, recoverable: Bool = true, details: Any? = nil) {
         self.code = code
         self.message = message
         self.recoverable = recoverable
-        self.details = details
+        self.details = details.flatMap(JSONValue.init)
     }
 
     var dictionary: [String: Any] {
@@ -68,34 +168,26 @@ struct SimViewError: Error {
             "message": message,
             "recoverable": recoverable,
         ]
-        if let details { value["details"] = details }
+        if let details { value["details"] = details.foundationObject }
         return value
     }
 }
 
-struct Request {
+struct Request: Decodable, Sendable {
     let id: String
     let protocolVersion: Int
     let method: String
-    let params: [String: Any]
+    let params: [String: JSONValue]
 
     init(data: Data) throws {
-        guard
-            let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-            let id = object["id"] as? String,
-            let protocolVersion = object["protocolVersion"] as? Int,
-            let method = object["method"] as? String
-        else {
+        do {
+            self = try JSONDecoder().decode(Request.self, from: data)
+        } catch {
             throw SimViewError("PROTOCOL_INVALID_REQUEST", "Request is missing id, protocolVersion, or method")
         }
-        self.id = id
-        self.protocolVersion = protocolVersion
-        self.method = method
-        self.params = object["params"] as? [String: Any] ?? [:]
     }
 }
 
 func jsonData(_ object: Any) throws -> Data {
     try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
 }
-

@@ -1,11 +1,13 @@
-import Foundation
-import CoreVideo
 import CoreMedia
+import CoreVideo
+import Foundation
 import IOSurface
 import ObjectiveC
 
 @objc protocol FramebufferDescriptor {
-    @objc(registerScreenCallbacksWithUUID:callbackQueue:frameCallback:surfacesChangedCallback:propertiesChangedCallback:)
+    @objc(
+        registerScreenCallbacksWithUUID:callbackQueue:frameCallback:surfacesChangedCallback:propertiesChangedCallback:
+    )
     func registerScreenCallbacks(
         uuid: UUID,
         callbackQueue: DispatchQueue,
@@ -80,6 +82,11 @@ final class FrameCapture: @unchecked Sendable {
         poolWidth = 0
         poolHeight = 0
         poolPixelFormat = 0
+        latestFrame = nil
+        width = 0
+        height = 0
+        frameCount = 0
+        lastCapture = DispatchTime.now()
     }
 
     private func wireFramebuffers() throws {
@@ -88,8 +95,7 @@ final class FrameCapture: @unchecked Sendable {
         }
         let unregisterSelector = NSSelectorFromString("unregisterScreenCallbacksWithUUID:")
         for descriptor in descriptors {
-            if
-                let uuid = callbackUUIDs[ObjectIdentifier(descriptor)],
+            if let uuid = callbackUUIDs[ObjectIdentifier(descriptor)],
                 descriptor.responds(to: unregisterSelector)
             {
                 descriptor.perform(unregisterSelector, with: uuid)
@@ -142,7 +148,7 @@ final class FrameCapture: @unchecked Sendable {
         for descriptor in descriptors {
             guard let raw = descriptor.perform(NSSelectorFromString("framebufferSurface"))?.takeUnretainedValue()
             else { continue }
-            let surface = unsafeBitCast(raw, to: IOSurface.self)
+            let surface = unsafeDowncast(raw, to: IOSurface.self)
             let area = IOSurfaceGetWidth(surface) * IOSurfaceGetHeight(surface)
             if area > bestArea {
                 bestArea = area
@@ -155,8 +161,7 @@ final class FrameCapture: @unchecked Sendable {
     private func capture(force: Bool = false) {
         guard let (descriptor, surface) = bestSurface() else { return }
         let now = DispatchTime.now()
-        if
-            !force,
+        if !force,
             frameCount > 0,
             now.uptimeNanoseconds - lastCapture.uptimeNanoseconds < 16_666_667
         {
@@ -175,7 +180,7 @@ final class FrameCapture: @unchecked Sendable {
             &unmanaged
         )
         guard status == kCVReturnSuccess, let source = unmanaged?.takeRetainedValue(),
-              let frame = copyFrame(source)
+            let frame = copyFrame(source)
         else { return }
         width = CVPixelBufferGetWidth(frame)
         height = CVPixelBufferGetHeight(frame)
@@ -192,9 +197,10 @@ final class FrameCapture: @unchecked Sendable {
         if pixelBufferPool == nil
             || poolWidth != width
             || poolHeight != height
-            || poolPixelFormat != pixelFormat {
+            || poolPixelFormat != pixelFormat
+        {
             let poolAttributes: [CFString: Any] = [
-                kCVPixelBufferPoolMinimumBufferCountKey: 3,
+                kCVPixelBufferPoolMinimumBufferCountKey: 3
             ]
             let pixelBufferAttributes: [CFString: Any] = [
                 kCVPixelBufferWidthKey: width,
@@ -203,12 +209,14 @@ final class FrameCapture: @unchecked Sendable {
                 kCVPixelBufferIOSurfacePropertiesKey: [:],
             ]
             var pool: CVPixelBufferPool?
-            guard CVPixelBufferPoolCreate(
-                kCFAllocatorDefault,
-                poolAttributes as CFDictionary,
-                pixelBufferAttributes as CFDictionary,
-                &pool
-            ) == kCVReturnSuccess, let pool else { return nil }
+            guard
+                CVPixelBufferPoolCreate(
+                    kCFAllocatorDefault,
+                    poolAttributes as CFDictionary,
+                    pixelBufferAttributes as CFDictionary,
+                    &pool
+                ) == kCVReturnSuccess, let pool
+            else { return nil }
             pixelBufferPool = pool
             poolWidth = width
             poolHeight = height
@@ -216,11 +224,13 @@ final class FrameCapture: @unchecked Sendable {
         }
         guard let pixelBufferPool else { return nil }
         var destination: CVPixelBuffer?
-        guard CVPixelBufferPoolCreatePixelBuffer(
-            kCFAllocatorDefault,
-            pixelBufferPool,
-            &destination
-        ) == kCVReturnSuccess, let destination else { return nil }
+        guard
+            CVPixelBufferPoolCreatePixelBuffer(
+                kCFAllocatorDefault,
+                pixelBufferPool,
+                &destination
+            ) == kCVReturnSuccess, let destination
+        else { return nil }
         CVPixelBufferLockBaseAddress(source, .readOnly)
         CVPixelBufferLockBaseAddress(destination, [])
         defer {

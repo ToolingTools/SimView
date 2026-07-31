@@ -1,0 +1,33 @@
+name: Bug report
+description: Report reproducible incorrect SimView behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Include expected and actual behavior plus reproduction steps.
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: simview doctor --json
+      render: json
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: macOS, Xcode, iOS runtime, architecture
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options: [Capture, Input, Accessibility, UIKit probe, Preview app, CLI, MCP, Packaging]
+    validations:
+      required: true
+

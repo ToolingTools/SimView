@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose a focused improvement
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and desired outcome
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Proposed approach or alternatives
+  - type: checkboxes
+    id: boundaries
+    attributes:
+      label: Affected boundaries
+      options:
+        - label: Public protocol or CLI
+        - label: Private Simulator API compatibility
+        - label: Authentication or persisted data
+        - label: Binary distribution or licensing
+

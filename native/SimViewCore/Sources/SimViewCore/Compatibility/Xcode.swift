@@ -1,5 +1,5 @@
-import Foundation
 import Darwin
+import Foundation
 
 enum Xcode {
     static func developerDirectory() -> String {
@@ -23,9 +23,10 @@ enum Xcode {
 
     @discardableResult
     static func loadFrameworks() -> [String: Bool] {
-        Dictionary(uniqueKeysWithValues: frameworkCandidates().map { path in
-            (path, dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil)
-        })
+        Dictionary(
+            uniqueKeysWithValues: frameworkCandidates().map { path in
+                (path, dlopen(path, RTLD_NOW | RTLD_GLOBAL) != nil)
+            })
     }
 
     static func symbolAvailable(_ name: String) -> Bool {

@@ -68,12 +68,14 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
   self = [super init];
   if (self) {
     _devices = [NSMapTable strongToWeakObjectsMapTable];
-    _callbackQueue = dispatch_queue_create("dev.simview.accessibility.callback", DISPATCH_QUEUE_SERIAL);
+    _callbackQueue =
+        dispatch_queue_create("dev.simview.accessibility.callback", DISPATCH_QUEUE_SERIAL);
   }
   return self;
 }
 
-- (SVAXTranslationCallback)accessibilityTranslationDelegateBridgeCallbackWithToken:(NSString *)token {
+- (SVAXTranslationCallback)accessibilityTranslationDelegateBridgeCallbackWithToken:
+    (NSString *)token {
   __weak typeof(self) weakSelf = self;
   return ^id(id request) {
     typeof(self) self = weakSelf;
@@ -81,8 +83,8 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
     if (!device) {
       Class responseClass = NSClassFromString(@"AXPTranslatorResponse");
       return [responseClass respondsToSelector:NSSelectorFromString(@"empty")]
-        ? ((id (*)(id, SEL))objc_msgSend)(responseClass, NSSelectorFromString(@"empty"))
-        : nil;
+                 ? ((id (*)(id, SEL))objc_msgSend)(responseClass, NSSelectorFromString(@"empty"))
+                 : nil;
     }
 
     dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
@@ -90,13 +92,11 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
     [device sendAccessibilityRequestAsync:request
                           completionQueue:self.callbackQueue
                         completionHandler:^(id innerResponse) {
-      response = innerResponse;
-      dispatch_semaphore_signal(semaphore);
-    }];
+                          response = innerResponse;
+                          dispatch_semaphore_signal(semaphore);
+                        }];
     if (dispatch_semaphore_wait(
-          semaphore,
-          dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))
-        ) != 0) {
+            semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))) != 0) {
       return nil;
     }
     return response;
@@ -104,7 +104,7 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
 }
 
 - (CGRect)accessibilityTranslationConvertPlatformFrameToSystem:(CGRect)rect
-                                                      withToken:(NSString *)token {
+                                                     withToken:(NSString *)token {
   (void)token;
   return rect;
 }
@@ -129,10 +129,9 @@ static SVAXTranslator *SVTranslator(void) {
   static SVAXTranslator *translator;
   static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
-    dlopen(
-      "/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/AccessibilityPlatformTranslation",
-      RTLD_NOW | RTLD_GLOBAL
-    );
+    dlopen("/System/Library/PrivateFrameworks/AccessibilityPlatformTranslation.framework/"
+           "AccessibilityPlatformTranslation",
+           RTLD_NOW | RTLD_GLOBAL);
     Class translatorClass = NSClassFromString(@"AXPTranslator");
     if ([translatorClass respondsToSelector:@selector(sharedInstance)]) {
       translator = [translatorClass sharedInstance];
@@ -145,13 +144,13 @@ static SVAXTranslator *SVTranslator(void) {
 static NSError *SVError(NSInteger code, NSString *message) {
   return [NSError errorWithDomain:SVAXErrorDomain
                              code:code
-                         userInfo:@{NSLocalizedDescriptionKey: message}];
+                         userInfo:@{NSLocalizedDescriptionKey : message}];
 }
 
 static id SVJSONValue(id value) {
-  if (!value) return [NSNull null];
-  if ([value isKindOfClass:NSString.class] ||
-      [value isKindOfClass:NSNumber.class] ||
+  if (!value)
+    return [NSNull null];
+  if ([value isKindOfClass:NSString.class] || [value isKindOfClass:NSNumber.class] ||
       [value isKindOfClass:NSNull.class]) {
     return value;
   }
@@ -159,8 +158,10 @@ static id SVJSONValue(id value) {
 }
 
 static void SVSetIfPresent(NSMutableDictionary *dictionary, NSString *key, id value) {
-  if (!value) return;
-  if ([value isKindOfClass:NSString.class] && [(NSString *)value length] == 0) return;
+  if (!value)
+    return;
+  if ([value isKindOfClass:NSString.class] && [(NSString *)value length] == 0)
+    return;
   dictionary[key] = SVJSONValue(value);
 }
 
@@ -172,27 +173,25 @@ static NSDictionary *SVFrameDictionary(NSRect frame, NSRect screenFrame) {
   double nw = width > 0 ? NSWidth(frame) / width : 0;
   double nh = height > 0 ? NSHeight(frame) / height : 0;
   return @{
-    @"points": @{
-      @"x": @(NSMinX(frame)), @"y": @(NSMinY(frame)),
-      @"width": @(NSWidth(frame)), @"height": @(NSHeight(frame))
+    @"points" : @{
+      @"x" : @(NSMinX(frame)),
+      @"y" : @(NSMinY(frame)),
+      @"width" : @(NSWidth(frame)),
+      @"height" : @(NSHeight(frame))
     },
-    @"normalized": @{
-      @"x": @(MAX(0, MIN(1, nx))), @"y": @(MAX(0, MIN(1, ny))),
-      @"width": @(MAX(0, MIN(1, nw))), @"height": @(MAX(0, MIN(1, nh)))
+    @"normalized" : @{
+      @"x" : @(MAX(0, MIN(1, nx))),
+      @"y" : @(MAX(0, MIN(1, ny))),
+      @"width" : @(MAX(0, MIN(1, nw))),
+      @"height" : @(MAX(0, MIN(1, nh)))
     }
   };
 }
 
-static NSDictionary *SVSerializeElement(
-  SVAXPlatformElement *element,
-  NSString *snapshotID,
-  NSString *bridgeToken,
-  NSRect screenFrame,
-  NSUInteger *ordinal,
-  NSUInteger maxNodes,
-  NSUInteger depth,
-  BOOL *truncated
-) {
+static NSDictionary *SVSerializeElement(SVAXPlatformElement *element, NSString *snapshotID,
+                                        NSString *bridgeToken, NSRect screenFrame,
+                                        NSUInteger *ordinal, NSUInteger maxNodes, NSUInteger depth,
+                                        BOOL *truncated) {
   if (*ordinal >= maxNodes || depth > 48) {
     *truncated = YES;
     return @{};
@@ -211,29 +210,35 @@ static NSDictionary *SVSerializeElement(
   SVSetIfPresent(node, @"identifier", [element accessibilityIdentifier]);
   SVSetIfPresent(node, @"placeholder", [element accessibilityPlaceholderValue]);
 
-  BOOL protectedContent = [element respondsToSelector:@selector(isAccessibilityProtectedContent)]
-    && [element isAccessibilityProtectedContent];
-  if (!protectedContent) SVSetIfPresent(node, @"value", [element accessibilityValue]);
-  else node[@"valueRedacted"] = @YES;
+  BOOL protectedContent = [element respondsToSelector:@selector(isAccessibilityProtectedContent)] &&
+                          [element isAccessibilityProtectedContent];
+  if (!protectedContent)
+    SVSetIfPresent(node, @"value", [element accessibilityValue]);
+  else
+    node[@"valueRedacted"] = @YES;
 
-  node[@"enabled"] = @([element respondsToSelector:@selector(isAccessibilityEnabled)]
-    ? [element isAccessibilityEnabled] : YES);
+  BOOL enabled = [element respondsToSelector:@selector(isAccessibilityEnabled)]
+                     ? [element isAccessibilityEnabled]
+                     : YES;
+  node[@"enabled"] = enabled ? @YES : @NO;
   if ([element respondsToSelector:@selector(isAccessibilityHidden)]) {
-    node[@"hidden"] = @([element isAccessibilityHidden]);
+    node[@"hidden"] = [element isAccessibilityHidden] ? @YES : @NO;
   }
   if ([element respondsToSelector:@selector(isAccessibilityFocused)]) {
-    node[@"focused"] = @([element isAccessibilityFocused]);
+    node[@"focused"] = [element isAccessibilityFocused] ? @YES : @NO;
   }
   if ([element respondsToSelector:@selector(isAccessibilityExpanded)]) {
-    node[@"expanded"] = @([element isAccessibilityExpanded]);
+    node[@"expanded"] = [element isAccessibilityExpanded] ? @YES : @NO;
   }
   if ([element respondsToSelector:@selector(accessibilityActionNames)]) {
     NSArray *actions = [element accessibilityActionNames];
-    if (actions.count) node[@"actions"] = actions;
+    if (actions.count)
+      node[@"actions"] = actions;
   }
 
   NSRect frame = [element accessibilityFrame];
-  if (!NSEqualRects(frame, NSZeroRect)) node[@"frame"] = SVFrameDictionary(frame, screenFrame);
+  if (!NSEqualRects(frame, NSZeroRect))
+    node[@"frame"] = SVFrameDictionary(frame, screenFrame);
 
   NSArray *children = [element accessibilityChildren] ?: @[];
   NSMutableArray *serializedChildren = [NSMutableArray arrayWithCapacity:children.count];
@@ -242,45 +247,43 @@ static NSDictionary *SVSerializeElement(
       *truncated = YES;
       break;
     }
-    NSDictionary *serialized = SVSerializeElement(
-      child, snapshotID, bridgeToken, screenFrame, ordinal, maxNodes, depth + 1, truncated
-    );
-    if (serialized.count) [serializedChildren addObject:serialized];
+    NSDictionary *serialized = SVSerializeElement(child, snapshotID, bridgeToken, screenFrame,
+                                                  ordinal, maxNodes, depth + 1, truncated);
+    if (serialized.count)
+      [serializedChildren addObject:serialized];
   }
-  if (serializedChildren.count) node[@"children"] = serializedChildren;
+  if (serializedChildren.count)
+    node[@"children"] = serializedChildren;
   return node;
 }
 
-static NSDictionary *SVResolve(
-  NSObject *device,
-  CGPoint *point,
-  NSRect serializationFrame,
-  NSUInteger maxNodes,
-  NSError **error
-) {
+static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializationFrame,
+                               NSUInteger maxNodes, NSError **error) {
   SVAXTranslator *translator = SVTranslator();
-  SEL deviceSelector = NSSelectorFromString(
-    @"sendAccessibilityRequestAsync:completionQueue:completionHandler:"
-  );
+  SEL deviceSelector =
+      NSSelectorFromString(@"sendAccessibilityRequestAsync:completionQueue:completionHandler:");
   if (!translator || ![device respondsToSelector:deviceSelector]) {
-    if (error) *error = SVError(1, @"CoreSimulator accessibility translation is unavailable");
+    if (error)
+      *error = SVError(1, @"CoreSimulator accessibility translation is unavailable");
     return nil;
   }
 
   NSString *token = NSUUID.UUID.UUIDString;
   [SVDispatcher().devices setObject:device forKey:token];
   @try {
-    SVAXTranslationObject *translation = point
-      ? [translator objectAtPoint:*point displayId:0 bridgeDelegateToken:token]
-      : [translator frontmostApplicationWithDisplayId:0 bridgeDelegateToken:token];
+    SVAXTranslationObject *translation =
+        point ? [translator objectAtPoint:*point displayId:0 bridgeDelegateToken:token]
+              : [translator frontmostApplicationWithDisplayId:0 bridgeDelegateToken:token];
     if (!translation) {
-      if (error) *error = SVError(2, @"The frontmost application returned no accessibility object");
+      if (error)
+        *error = SVError(2, @"The frontmost application returned no accessibility object");
       return nil;
     }
     translation.bridgeDelegateToken = token;
     SVAXPlatformElement *element = [translator macPlatformElementFromTranslation:translation];
     if (!element) {
-      if (error) *error = SVError(3, @"Accessibility translation produced no platform element");
+      if (error)
+        *error = SVError(3, @"Accessibility translation produced no platform element");
       return nil;
     }
     element.translation.bridgeDelegateToken = token;
@@ -296,21 +299,25 @@ static NSDictionary *SVResolve(
     NSString *snapshotID = NSUUID.UUID.UUIDString;
     NSUInteger ordinal = 0;
     BOOL truncated = NO;
-    NSDictionary *root = SVSerializeElement(
-      element, snapshotID, token, screenFrame, &ordinal, MAX(1, maxNodes), 0, &truncated
-    );
+    NSDictionary *root = SVSerializeElement(element, snapshotID, token, screenFrame, &ordinal,
+                                            MAX(1, maxNodes), 0, &truncated);
     return @{
-      @"schemaVersion": @1,
-      @"snapshotId": snapshotID,
-      @"capturedAt": [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
-      @"source": @"core-simulator-ax",
-      @"screen": @{@"x": @(screenFrame.origin.x), @"y": @(screenFrame.origin.y),
-                    @"width": @(screenFrame.size.width), @"height": @(screenFrame.size.height)},
-      @"root": root,
-      @"stats": @{@"nodeCount": @(ordinal), @"truncated": @(truncated)}
+      @"schemaVersion" : @1,
+      @"snapshotId" : snapshotID,
+      @"capturedAt" : [[NSISO8601DateFormatter new] stringFromDate:[NSDate date]],
+      @"source" : @"core-simulator-ax",
+      @"screen" : @{
+        @"x" : @(screenFrame.origin.x),
+        @"y" : @(screenFrame.origin.y),
+        @"width" : @(screenFrame.size.width),
+        @"height" : @(screenFrame.size.height)
+      },
+      @"root" : root,
+      @"stats" : @{@"nodeCount" : @(ordinal), @"truncated" : @(truncated)}
     };
   } @catch (NSException *exception) {
-    if (error) *error = SVError(4, exception.reason ?: @"Accessibility translation failed");
+    if (error)
+      *error = SVError(4, exception.reason ?: @"Accessibility translation failed");
     return nil;
   } @finally {
     [SVDispatcher().devices removeObjectForKey:token];
@@ -336,13 +343,7 @@ static NSDictionary *SVResolve(
                       screenHeight:(double)screenHeight
                              error:(NSError **)error {
   CGPoint point = CGPointMake(x, y);
-  return SVResolve(
-    device,
-    &point,
-    NSMakeRect(0, 0, screenWidth, screenHeight),
-    1,
-    error
-  );
+  return SVResolve(device, &point, NSMakeRect(0, 0, screenWidth, screenHeight), 1, error);
 }
 
 @end

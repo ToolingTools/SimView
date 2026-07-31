@@ -1,9 +1,20 @@
 # Distribution
 
-SimView keeps generated executables out of Git. GitHub Actions builds the
-release from source, signs the resulting Mach-O files, notarizes the plugin
-archive, and then uses those same signed bytes for GitHub Releases, npm, Codex,
-Claude Code, and MCPB.
+SimView keeps generated executables out of Git. The public source repository is
+the first distribution milestone. Binary publishing remains disabled until the
+licensing, signing, and compatibility acknowledgements in
+`docs/binary-redistribution.md` are explicitly satisfied.
+
+GitHub Actions builds from source, signs the resulting Mach-O files, notarizes
+the plugin archive, and then uses those same signed bytes for GitHub Releases,
+npm, Codex, Claude Code, and MCPB. Raw executables are never uploaded as release
+assets; permission-preserving archives and packages are the distribution unit.
+
+The unprivileged verification job builds and smoke-tests an unsigned candidate.
+Only the tag-triggered publish job has the release environment, signing
+secrets, npm provenance, artifact-attestation permissions, and GitHub release
+write access. `bun run check:release` fails closed when a maintainer has not
+acknowledged the binary licensing, signing, and compatibility gates.
 
 ## Release contents
 
@@ -13,6 +24,17 @@ The generated npm package and plugin contain:
 - `bin/simview-core`: the universal Swift native boundary.
 - `bin/libSimViewProbe.dylib`: the universal Simulator probe.
 - the MCP App, portable skill, plugin manifests, assets, license, and notices.
+
+The packaged client resolves the bundled native core before any local build
+output. Shared backend instance IDs include that packaged binary's SHA-256, the
+SimView version, protocol version, and Simulator UDID. Updating a plugin or npm
+package therefore creates a compatible backend identity instead of attaching
+to an older executable; old backends drain through their normal idle timeout.
+
+Each release also contains `SHA256SUMS`, `release-manifest.json` (artifact names,
+architectures, hashes, and signatures), and `sbom.cdx.json` (the resolved
+dependency and compiled-artifact CycloneDX inventory). The manifest is the
+artifact index; the SBOM is not a file-list substitute.
 
 The internal Bun workspaces are private and are not published separately.
 `scripts/package-npm.ts` generates the public `simview` package under
@@ -34,11 +56,19 @@ Configure these GitHub Actions secrets:
 - `APPLE_NOTARY_KEY_ID`: App Store Connect API key ID.
 - `APPLE_NOTARY_ISSUER_ID`: App Store Connect API issuer ID.
 
-The release workflow imports the certificate into an ephemeral keychain,
+The tag-only release workflow imports the certificate into an ephemeral keychain,
 requires signing, verifies both architectures and the Developer ID authority,
 submits `simview-plugin.zip` with `notarytool`, smoke tests the npm tarball
 through both `npx` and `bunx`, uploads the workflow artifact, publishes npm,
+creates a CycloneDX dependency SBOM and release manifest, attests the artifacts,
 and creates the GitHub release.
+
+The protected `release` environment must define these repository variables as
+`1` only after review:
+
+- `SIMVIEW_BINARY_LICENSE_REVIEWED`
+- `SIMVIEW_SIGNING_READY`
+- `SIMVIEW_COMPATIBILITY_VERIFIED`
 
 The probe must pass its real-Simulator injection smoke test with the Developer
 ID signature before the first public release. Ad-hoc local success is not that

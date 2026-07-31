@@ -1,6 +1,20 @@
 import Foundation
 import SimViewAXShim
 
+func validateAccessibilitySelector(_ selector: [String: Any]) throws {
+    let fields = ["ref", "identifier", "role", "name", "value"]
+    let hasMatchingField = fields.contains { key in
+        guard let value = selector[key] as? String else { return false }
+        return !value.isEmpty
+    }
+    guard hasMatchingField else {
+        throw SimViewError(
+            "PARAMETER_INVALID",
+            "An accessibility selector requires ref, identifier, role, name, or value"
+        )
+    }
+}
+
 final class AccessibilityService {
     private var screenBounds: [String: (width: Double, height: Double)] = [:]
 
@@ -22,8 +36,7 @@ final class AccessibilityService {
             if scope == "interactive", let root = snapshot["root"] as? [String: Any] {
                 snapshot["root"] = interactiveTree(root) ?? root
             }
-            if
-                let screen = snapshot["screen"] as? [String: Any],
+            if let screen = snapshot["screen"] as? [String: Any],
                 let width = number(screen["width"]),
                 let height = number(screen["height"])
             {
@@ -80,10 +93,12 @@ final class AccessibilityService {
         selector: [String: Any],
         scope: String = "visible"
     ) throws -> [String: Any] {
+        try validateAccessibilitySelector(selector)
         let bridgedSnapshot = try snapshot(udid: udid, scope: scope)
-        let snapshot = try JSONSerialization.jsonObject(
-            with: JSONSerialization.data(withJSONObject: bridgedSnapshot)
-        ) as? [String: Any] ?? bridgedSnapshot
+        let snapshot =
+            try JSONSerialization.jsonObject(
+                with: JSONSerialization.data(withJSONObject: bridgedSnapshot)
+            ) as? [String: Any] ?? bridgedSnapshot
         guard let root = snapshot["root"] as? [String: Any] else {
             throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "Accessibility snapshot has no root")
         }
@@ -105,12 +120,18 @@ final class AccessibilityService {
         state: String,
         timeoutMs: Int
     ) throws -> [String: Any] {
+        guard state == "visible" || state == "hidden" else {
+            throw SimViewError(
+                "PARAMETER_INVALID",
+                "accessibility.wait state must be visible or hidden"
+            )
+        }
         let deadline = Date().addingTimeInterval(Double(max(1, min(timeoutMs, 30_000))) / 1_000)
         var lastCount = 0
         repeat {
             let result = try find(udid: udid, selector: selector, scope: "visible")
             lastCount = result["count"] as? Int ?? 0
-            let satisfied = state == "absent" ? lastCount == 0 : lastCount > 0
+            let satisfied = state == "hidden" ? lastCount == 0 : lastCount > 0
             if satisfied {
                 return [
                     "schemaVersion": 1,
@@ -139,15 +160,15 @@ final class AccessibilityService {
             "button", "checkbox", "link", "menu", "radio", "search", "slider",
             "switch", "textfield", "textarea", "tab", "statictext", "heading",
         ].contains { role.contains($0) }
-        let useful = usefulRole
+        let useful =
+            usefulRole
             || !actions.isEmpty
             || node["identifier"] != nil
             || node["label"] != nil
             || node["title"] != nil
             || !children.isEmpty
         guard useful, node["hidden"] as? Bool != true else { return nil }
-        if children.isEmpty { value.removeValue(forKey: "children") }
-        else { value["children"] = children }
+        if children.isEmpty { value.removeValue(forKey: "children") } else { value["children"] = children }
         return value
     }
 

@@ -21,14 +21,7 @@ export function createNpmPackageManifest(
     bugs: {
       url: `${repositoryUrl}/issues`,
     },
-    keywords: [
-      "ios",
-      "simulator",
-      "cli",
-      "mcp",
-      "codex",
-      "claude-code",
-    ],
+    keywords: ["ios", "simulator", "cli", "mcp", "codex", "claude-code"],
     os: ["darwin"],
     cpu: ["arm64", "x64"],
     bin: {

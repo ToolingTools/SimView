@@ -1,11 +1,11 @@
-import { cp, mkdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 
 const root = resolve(import.meta.dir, "..");
 const artifacts = join(root, "artifacts", "release");
 const archiveRoot = join(root, "artifacts", "archive");
-const rootManifest = await Bun.file(join(root, "package.json")).json() as {
+const rootManifest = (await Bun.file(join(root, "package.json")).json()) as {
   version: string;
 };
 const { version } = rootManifest;
@@ -33,9 +33,7 @@ await cp(probeBinary, packagedProbe);
 if (process.env.SIMVIEW_SIGNING_IDENTITY) {
   await $`bun run release:sign`;
 } else if (process.env.SIMVIEW_REQUIRE_SIGNING === "1") {
-  throw new Error(
-    "SIMVIEW_REQUIRE_SIGNING=1 but SIMVIEW_SIGNING_IDENTITY was not provided",
-  );
+  throw new Error("SIMVIEW_REQUIRE_SIGNING=1 but SIMVIEW_SIGNING_IDENTITY was not provided");
 } else {
   console.warn("Building unsigned release artifacts; set SIMVIEW_SIGNING_IDENTITY to sign them.");
 }
@@ -45,9 +43,6 @@ await $`bun run package:mcpb`;
 await $`bun run package:npm`;
 
 await Promise.all([
-  cp(cliBinary, join(artifacts, "simview")),
-  cp(packagedCore, join(artifacts, "simview-core")),
-  cp(packagedProbe, join(artifacts, "libSimViewProbe.dylib")),
   cp(join(root, "artifacts/simview-plugin.zip"), join(artifacts, "simview-plugin.zip")),
   cp(join(root, "artifacts/simview.mcpb"), join(artifacts, "simview.mcpb")),
 ]);
@@ -64,27 +59,47 @@ await Promise.all([
 ]);
 await $`ditto -c -k --norsrc --keepParent ${archiveStage} ${join(artifacts, `simview-${version}-macos.zip`)}`;
 
-const files = [...new Bun.Glob("*").scanSync({ cwd: artifacts })].sort();
-const components = await Promise.all(files.map(async name => ({
-  type: "file",
-  name,
-  version,
-  hashes: [{
-    alg: "SHA-256",
-    content: new Bun.CryptoHasher("sha256")
+await $`bun ${join(root, "scripts/generate-sbom.ts")} ${join(artifacts, "sbom.cdx.json")}`;
+
+const files = [...new Bun.Glob("*").scanSync({ cwd: artifacts })]
+  .filter((name) => name !== "SHA256SUMS" && name !== "release-manifest.json")
+  .sort();
+const releaseFiles = await Promise.all(
+  files.map(async (name) => ({
+    name,
+    bytes: (await stat(join(artifacts, name))).size,
+    sha256: new Bun.CryptoHasher("sha256")
       .update(await Bun.file(join(artifacts, name)).arrayBuffer())
       .digest("hex"),
-  }],
-})));
-await writeFile(join(artifacts, "sbom.cdx.json"), `${JSON.stringify({
-  bomFormat: "CycloneDX",
-  specVersion: "1.6",
-  version: 1,
-  metadata: { component: { type: "application", name: "simview", version } },
-  components,
-}, null, 2)}\n`);
-const sums = components
-  .map(component => `${component.hashes[0]!.content}  ${component.name}`)
-  .join("\n");
+  })),
+);
+await writeFile(
+  join(artifacts, "release-manifest.json"),
+  `${JSON.stringify(
+    {
+      schemaVersion: 1,
+      name: "simview",
+      version,
+      sourceRevision: process.env.GITHUB_SHA ?? null,
+      architectures: ["arm64", "x86_64"],
+      signed: Boolean(process.env.SIMVIEW_SIGNING_IDENTITY),
+      files: releaseFiles,
+    },
+    null,
+    2,
+  )}\n`,
+);
+
+const checksumFiles = [...files, "release-manifest.json"];
+const sums = (
+  await Promise.all(
+    checksumFiles.map(async (name) => {
+      const hash = new Bun.CryptoHasher("sha256")
+        .update(await Bun.file(join(artifacts, name)).arrayBuffer())
+        .digest("hex");
+      return `${hash}  ${name}`;
+    }),
+  )
+).join("\n");
 await writeFile(join(artifacts, "SHA256SUMS"), `${sums}\n`);
 console.log(artifacts);

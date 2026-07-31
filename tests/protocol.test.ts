@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import {
+  encodeFrame,
   FrameDecoder,
   FrameKind,
-  encodeFrame,
   validateNormalizedCoordinate,
 } from "@simview/client";
 
@@ -16,8 +16,11 @@ describe("binary protocol", () => {
     const decoder = new FrameDecoder();
     expect(decoder.push(combined.slice(0, 7))).toHaveLength(0);
     const frames = decoder.push(combined.slice(7));
-    expect(frames.map(frame => frame.kind)).toEqual([FrameKind.Response, FrameKind.PngScreenshot]);
-    expect([...frames[1]!.payload]).toEqual([1, 2, 3]);
+    expect(frames.map((frame) => frame.kind)).toEqual([
+      FrameKind.Response,
+      FrameKind.PngScreenshot,
+    ]);
+    expect([...(frames[1]?.payload ?? [])]).toEqual([1, 2, 3]);
   });
 
   test("rejects non-normalized input", () => {

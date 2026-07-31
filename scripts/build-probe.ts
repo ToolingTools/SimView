@@ -11,19 +11,28 @@ await mkdir(outputDir, { recursive: true });
 const sdk = (await Bun.$`xcrun --sdk iphonesimulator --show-sdk-path`.text()).trim();
 const deployment = "14.0";
 const command = [
-  "/usr/bin/xcrun", "clang",
+  "/usr/bin/xcrun",
+  "clang",
   "-fobjc-arc",
   "-dynamiclib",
-  "-arch", "arm64",
-  "-arch", "x86_64",
-  "-isysroot", sdk,
+  "-arch",
+  "arm64",
+  "-arch",
+  "x86_64",
+  "-isysroot",
+  sdk,
   `-mios-simulator-version-min=${deployment}`,
-  "-framework", "Foundation",
-  "-framework", "CoreGraphics",
-  "-framework", "UIKit",
-  "-install_name", "@rpath/libSimViewProbe.dylib",
+  "-framework",
+  "Foundation",
+  "-framework",
+  "CoreGraphics",
+  "-framework",
+  "UIKit",
+  "-install_name",
+  "@rpath/libSimViewProbe.dylib",
   source,
-  "-o", output,
+  "-o",
+  output,
 ];
 const child = Bun.spawn(command, { stdout: "inherit", stderr: "inherit" });
 const status = await child.exited;

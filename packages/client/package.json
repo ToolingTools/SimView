@@ -6,7 +6,9 @@
   "license": "Apache-2.0",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@simview/core": "workspace:*"
+    "@simview/contracts": "workspace:*",
+    "@simview/core": "workspace:*",
+    "zod": "4.4.3"
   },
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outdir=dist",

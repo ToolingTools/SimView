@@ -1,29 +1,36 @@
 import Foundation
 
 final class Metrics: @unchecked Sendable {
+    private static let latencyCapacity = 2_000
+
     private let lock = NSLock()
     private var captured: UInt64 = 0
     private var encoded: UInt64 = 0
     private var delivered: UInt64 = 0
     private var dropped: UInt64 = 0
-    private var latencies: [Double] = []
+    private var latencies = [Double](repeating: 0, count: latencyCapacity)
+    private var latencyCount = 0
+    private var nextLatencyIndex = 0
     private let started = Date()
 
     func didCapture() { mutate { captured += 1 } }
+
     func didEncode(latencyMS: Double) {
         mutate {
             encoded += 1
-            latencies.append(latencyMS)
-            if latencies.count > 2_000 { latencies.removeFirst(latencies.count - 2_000) }
+            latencies[nextLatencyIndex] = latencyMS
+            nextLatencyIndex = (nextLatencyIndex + 1) % Self.latencyCapacity
+            latencyCount = min(latencyCount + 1, Self.latencyCapacity)
         }
     }
+
     func didDeliver() { mutate { delivered += 1 } }
     func didDrop() { mutate { dropped += 1 } }
 
     var dictionary: [String: Any] {
         lock.lock()
         defer { lock.unlock() }
-        let sorted = latencies.sorted()
+        let sorted = Array(latencies.prefix(latencyCount)).sorted()
         func percentile(_ fraction: Double) -> Double {
             guard !sorted.isEmpty else { return 0 }
             return sorted[min(sorted.count - 1, Int(Double(sorted.count - 1) * fraction))]

@@ -1,5 +1,12 @@
 # Native protocol version 1
 
+The TypeScript source of truth for this protocol is
+`packages/contracts/src/protocol.ts`. It exports the `SimViewMethodMap`,
+`ParamsFor<M>`, `ResultFor<M>`, protocol constants, and Zod parsers used by the
+client and MCP server. Swift keeps an explicit `Codable` mirror. Changes to a
+method, event, or error must update the contract, Swift handling, fixtures, and
+both Bun/XCTest coverage together.
+
 `simview-core serve` accepts authenticated clients over a Unix domain socket.
 Every frame has a five-byte header:
 
@@ -19,7 +26,9 @@ bytes  payload
 | `0x20` | PNG screenshot |
 
 The maximum payload is 64 MiB. Unknown kinds, oversized frames, and requests
-before authentication are rejected.
+before authentication are rejected. Receivers must accept arbitrary TCP/Unix
+socket fragmentation and coalescing; a frame is complete only after its full
+five-byte header and payload have arrived.
 
 ## Handshake
 
@@ -31,7 +40,7 @@ The first request must be:
   "protocolVersion": 1,
   "method": "hello",
   "params": {
-    "token": "random session token",
+    "token": "32-byte random session token",
     "codecs": ["h264", "mjpeg"],
     "maxFrameRate": 60
   }
@@ -39,7 +48,27 @@ The first request must be:
 ```
 
 The response selects one codec and confirms the protocol version. Tokens are
-read from the launch-time file descriptor and compared in constant time.
+read from the launch-time file descriptor and compared in constant time. The
+token is never written to logs, process arguments, MCP structured state, or a
+browser URL. Unauthenticated sockets are closed after the native handshake
+deadline.
+
+After the handshake, each request has the following shape:
+
+```json
+{
+  "id": "uuid",
+  "protocolVersion": 1,
+  "method": "devices.list",
+  "params": {}
+}
+```
+
+The client parses `params` against the method schema before sending and parses
+the corresponding `result` schema after receiving it. Native errors retain a
+stable code, message, recoverability flag, and JSON details object. A response
+must contain a result or an error; the client then validates the selected
+method's result shape.
 
 ## Methods
 
@@ -80,6 +109,28 @@ Accessibility responses carry `schemaVersion: 1` and generation-scoped
 `ax:<snapshot>:<ordinal>` references. References are not stable across
 navigation; semantic actions re-resolve identifiers, roles, and names before
 using existing physical HID input.
+
+Accessibility selectors must include at least one of `ref`, `identifier`,
+`role`, `name`, or `value`. `accessibility.wait` uses `state: "visible"` or
+`state: "hidden"`; the same names are used by the CLI and MCP tools. Probe
+inspection exposes `probe.target` so callers can see the currently selected
+bundle before requesting context or changing it.
+
+`health.get` is a diagnostic response. It reports server status, native PID,
+instance ID, configured UDID, selected device, capture state, idle deadline,
+capabilities, authenticated client counts (including counts by codec), and
+bounded capture metrics. It deliberately excludes socket paths and capability
+tokens.
+
+The native server supports multiple authenticated clients and broadcasts one
+H.264 or MJPEG stream to clients that requested that codec. `capture.stop` is a
+process-global capture operation in the current protocol; callers should treat
+device selection, orientation, physical input, and probe state as Simulator-
+global rather than review-local. Protocol version 1 supports both the explicit
+ephemeral client path and the shared daemon client path; the latter is selected
+by `SimViewClient.acquire` and is keyed by Simulator UDID plus compatible
+binary/protocol identity. Review isolation is provided above the native
+protocol by the MCP session's `reviewId` and per-review relay/annotation state.
 
 The optional probe is a bundled, read-only iOS Simulator dylib. `probe.enable`
 requires an explicit non-Apple bundle identifier and terminates/relaunches that

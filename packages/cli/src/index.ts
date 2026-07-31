@@ -1,46 +1,122 @@
 #!/usr/bin/env bun
 import { writeFile } from "node:fs/promises";
-import { resolveBinary } from "@simview/core";
+import { parseArgs } from "node:util";
 import {
   compactAccessibilityTree,
+  daemonStatuses,
   FrameKind,
+  pruneDaemons,
   SimViewClient,
-  type AccessibilityNode,
-  type AccessibilitySnapshot,
+  stopDaemons,
 } from "@simview/client";
+import { accessibilitySelectorSchema, SIMVIEW_VERSION } from "@simview/contracts";
+import { resolveBinary } from "@simview/core";
 import { runServer, SimViewSession } from "@simview/mcp";
 
-type Options = Record<string, string | boolean>;
+type Options = Record<string, string | boolean | undefined>;
+type OptionDefinition = { type: "string" | "boolean"; short?: string };
 
-function parse(argv: string[]) {
+const commonOptions: Record<string, OptionDefinition> = {
+  udid: { type: "string" },
+  json: { type: "boolean" },
+};
+
+const commandOptions: Record<string, Record<string, OptionDefinition>> = {
+  devices: { json: { type: "boolean" } },
+  doctor: { json: { type: "boolean" } },
+  preview: {
+    udid: { type: "string" },
+    "no-open": { type: "boolean" },
+    "print-url": { type: "boolean" },
+  },
+  screenshot: { udid: { type: "string" }, output: { type: "string", short: "o" } },
+  observe: {
+    ...commonOptions,
+    scope: { type: "string" },
+    output: { type: "string", short: "o" },
+  },
+  tree: { ...commonOptions, scope: { type: "string" } },
+  find: selectorOptions(true),
+  "inspect-point": {
+    ...commonOptions,
+    x: { type: "string" },
+    y: { type: "string" },
+  },
+  "tap-element": selectorOptions(true),
+  wait: {
+    ...selectorOptions(true),
+    state: { type: "string" },
+    "timeout-ms": { type: "string" },
+  },
+  probe: { ...commonOptions, "bundle-id": { type: "string" } },
+  tap: { udid: { type: "string" }, x: { type: "string" }, y: { type: "string" } },
+  swipe: {
+    udid: { type: "string" },
+    from: { type: "string" },
+    to: { type: "string" },
+    "duration-ms": { type: "string" },
+  },
+  type: { udid: { type: "string" } },
+  button: { udid: { type: "string" } },
+  daemon: {
+    udid: { type: "string" },
+    all: { type: "boolean" },
+    json: { type: "boolean" },
+  },
+  mcp: {},
+  help: {},
+};
+
+function selectorOptions(includeCommon: boolean): Record<string, OptionDefinition> {
+  return {
+    ...(includeCommon ? commonOptions : {}),
+    id: { type: "string" },
+    role: { type: "string" },
+    name: { type: "string" },
+    value: { type: "string" },
+    contains: { type: "boolean" },
+    index: { type: "string" },
+  };
+}
+
+function parse(argv: string[]): { command: string; positional: string[]; options: Options } {
   const command = argv[2] ?? "help";
-  const positional: string[] = [];
-  const options: Options = {};
-  for (let index = 3; index < argv.length; index++) {
-    const value = argv[index]!;
-    if (!value.startsWith("--")) {
-      positional.push(value);
-    } else if (argv[index + 1] && !argv[index + 1]!.startsWith("--")) {
-      options[value.slice(2)] = argv[++index]!;
-    } else {
-      options[value.slice(2)] = true;
-    }
+  if (command === "--version" || command === "-v") {
+    return { command: "version", positional: [], options: {} };
   }
-  return { command, positional, options };
+  if (command === "serve") {
+    return { command, positional: argv.slice(3), options: {} };
+  }
+  const options = commandOptions[command];
+  if (!options) throw new Error(`Unknown command: ${command}`);
+  const parsed = parseArgs({
+    args: argv.slice(3),
+    options,
+    allowPositionals: true,
+    strict: true,
+  });
+  return {
+    command,
+    positional: parsed.positionals,
+    options: parsed.values as Options,
+  };
 }
 
 async function coreJSON(command: "doctor" | "devices"): Promise<unknown> {
-  const process = Bun.spawn([resolveBinary(), command], { stdout: "pipe", stderr: "pipe" });
+  const child = Bun.spawn([resolveBinary(), command], { stdout: "pipe", stderr: "pipe" });
   const [stdout, stderr, status] = await Promise.all([
-    new Response(process.stdout).text(),
-    new Response(process.stderr).text(),
-    process.exited,
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
   ]);
   if (status !== 0) throw new Error(stderr.trim() || `${command} failed`);
   return JSON.parse(stdout);
 }
 
-async function withClient<T>(udid: string | undefined, body: (client: SimViewClient) => Promise<T>) {
+async function withClient<T>(
+  udid: string | undefined,
+  body: (client: SimViewClient) => Promise<T>,
+): Promise<T> {
   const client = await SimViewClient.start({ udid });
   try {
     return await body(client);
@@ -51,227 +127,284 @@ async function withClient<T>(udid: string | undefined, body: (client: SimViewCli
 
 export async function run(argv = process.argv): Promise<void> {
   const { command, positional, options } = parse(argv);
-  const udid = typeof options.udid === "string" ? options.udid : undefined;
+  const udid = stringOption(options, "udid", false);
   switch (command) {
-  case "devices":
-    console.log(JSON.stringify(await coreJSON("devices"), null, options.json ? 0 : 2));
-    break;
-  case "doctor":
-    console.log(JSON.stringify(await coreJSON("doctor"), null, options.json ? 0 : 2));
-    break;
-  case "preview": {
-    const session = new SimViewSession();
-    const state = await session.open(udid);
-    console.log(JSON.stringify({
-      browserUrl: state.browserUrl,
-      device: state.device,
-      note: "Press Ctrl-C to stop SimView.",
-    }, null, 2));
-    if (!options["no-open"] && state.browserUrl) Bun.spawn(["/usr/bin/open", state.browserUrl]);
-    const stop = async () => {
-      await session.close();
-      process.exit(0);
-    };
-    process.on("SIGINT", stop);
-    process.on("SIGTERM", stop);
-    await new Promise(() => {});
-    break;
-  }
-  case "screenshot": {
-    if (typeof options.output !== "string") throw new Error("--output is required");
-    await withClient(udid, async client => {
-      await client.request("capture.start", { udid });
-      const bytes = new Promise<Uint8Array>(resolve => {
-        const unsubscribe = client.on(FrameKind.PngScreenshot, payload => {
-          unsubscribe();
-          resolve(payload);
-        });
-      });
-      const metadata = await client.request("capture.screenshot");
-      await writeFile(options.output as string, await bytes);
-      console.log(JSON.stringify({ output: options.output, ...metadata as object }));
-    });
-    break;
-  }
-  case "tree":
-  case "observe": {
-    await withClient(udid, async client => {
-      const snapshot = await client.request<AccessibilitySnapshot>("accessibility.snapshot", {
-        udid,
-        scope: typeof options.scope === "string" ? options.scope : "interactive",
-      });
-      if (command === "observe" && typeof options.output === "string") {
-        await client.request("capture.start", { udid });
-        const bytes = new Promise<Uint8Array>(resolve => {
-          const unsubscribe = client.on(FrameKind.PngScreenshot, payload => {
-            unsubscribe();
-            resolve(payload);
-          });
-        });
-        await client.request("capture.screenshot");
-        await writeFile(options.output, await bytes);
+    case "version":
+      console.log(SIMVIEW_VERSION);
+      break;
+    case "devices":
+      printJson(await coreJSON("devices"), options.json === true);
+      break;
+    case "doctor":
+      printJson(await coreJSON("doctor"), options.json === true);
+      break;
+    case "daemon": {
+      const action = positional[0] ?? "status";
+      if (positional.length > 1) throw new Error("daemon accepts only one action");
+      if (action === "status") {
+        if (options.all || udid) throw new Error("daemon status accepts only --json");
+        const statuses = await daemonStatuses(SimViewClient);
+        printJson({ backends: statuses, count: statuses.length }, options.json === true);
+        break;
       }
-      console.log(options.json
-        ? JSON.stringify(snapshot)
-        : compactAccessibilityTree(snapshot));
-    });
-    break;
-  }
-  case "find": {
-    await withClient(udid, async client => {
-      const result = await client.request("accessibility.find", {
-        udid,
-        selector: selectorFromOptions(options),
-      });
-      console.log(JSON.stringify(result, null, options.json ? 0 : 2));
-    });
-    break;
-  }
-  case "inspect-point": {
-    await withClient(udid, async client => {
-      const result = await client.request("accessibility.elementAtPoint", {
-        udid,
-        x: numberOption(options, "x"),
-        y: numberOption(options, "y"),
-      });
-      console.log(JSON.stringify(result, null, options.json ? 0 : 2));
-    });
-    break;
-  }
-  case "tap-element": {
-    await withClient(udid, async client => {
-      const result = await client.request<{ matches: AccessibilityNode[]; count: number }>(
-        "accessibility.find",
-        { udid, selector: selectorFromOptions(options) },
+      if (action === "prune") {
+        if (options.all || udid || options.json) throw new Error("daemon prune accepts no options");
+        printJson({ pruned: await pruneDaemons() }, true);
+        break;
+      }
+      if (action === "stop") {
+        if (options.json) throw new Error("daemon stop does not accept --json");
+        if ((options.all === true) === Boolean(udid)) {
+          throw new Error("daemon stop requires exactly one of --udid or --all");
+        }
+        if (
+          udid &&
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(udid)
+        ) {
+          throw new Error("--udid must be a UUID");
+        }
+        printJson(
+          { stopped: await stopDaemons(SimViewClient, { udid, all: options.all === true }) },
+          true,
+        );
+        break;
+      }
+      throw new Error(`Unknown daemon action: ${action}`);
+    }
+    case "preview": {
+      const session = new SimViewSession();
+      const state = await session.open(udid);
+      const browserUrl = session.browserUrl();
+      const shouldOpen = options["no-open"] !== true;
+      printJson(
+        {
+          device: state.device,
+          ...(shouldOpen ? {} : { browserUrl }),
+          note: "Press Ctrl-C to stop SimView.",
+        },
+        false,
       );
-      const index = typeof options.index === "string" ? Number(options.index) : 0;
-      if (result.count !== 1 && options.index === undefined) {
-        throw new Error(`Selector matched ${result.count} elements; refine it or pass --index`);
-      }
-      const match = result.matches[index];
-      const frame = match?.frame?.normalized;
-      if (!match || !frame || match.enabled === false) {
-        throw new Error("Selected element is unavailable, disabled, or has no visible frame");
-      }
-      const point = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
-      const receipt = await client.request("input.tap", point);
-      console.log(JSON.stringify({ selector: selectorFromOptions(options), element: match, point, receipt }));
-    });
-    break;
-  }
-  case "wait": {
-    const timeout = typeof options.timeout === "string" ? Number(options.timeout) : 5_000;
-    const desired = typeof options.state === "string" ? options.state : "visible";
-    await withClient(udid, async client => {
-      const started = performance.now();
-      let count = 0;
-      do {
-        const result = await client.request<{ count: number }>("accessibility.find", {
+      if (shouldOpen && browserUrl) Bun.spawn(["/usr/bin/open", browserUrl]);
+      if (options["print-url"] === true && browserUrl) console.log(browserUrl);
+      const stop = async () => {
+        await session.close();
+        process.exit(0);
+      };
+      process.on("SIGINT", stop);
+      process.on("SIGTERM", stop);
+      await new Promise<never>(() => {});
+      break;
+    }
+    case "screenshot": {
+      const output = stringOption(options, "output", true);
+      await withClient(udid, async (client) => {
+        await client.request("capture.start", { udid });
+        const bytes = nextFrame(client, FrameKind.PngScreenshot);
+        const metadata = await client.request("capture.screenshot", {});
+        await writeFile(output, await bytes);
+        printJson({ output, ...metadata }, true);
+      });
+      break;
+    }
+    case "tree":
+    case "observe": {
+      await withClient(udid, async (client) => {
+        const snapshot = await client.request("accessibility.snapshot", {
+          udid,
+          scope: scopeOption(options),
+        });
+        if (command === "observe" && typeof options.output === "string") {
+          await client.request("capture.start", { udid });
+          const bytes = nextFrame(client, FrameKind.PngScreenshot);
+          await client.request("capture.screenshot", {});
+          await writeFile(options.output, await bytes);
+        }
+        console.log(
+          options.json === true ? JSON.stringify(snapshot) : compactAccessibilityTree(snapshot),
+        );
+      });
+      break;
+    }
+    case "find": {
+      await withClient(udid, async (client) => {
+        const result = await client.request("accessibility.find", {
           udid,
           selector: selectorFromOptions(options),
         });
-        count = result.count;
-        if ((desired === "hidden" && count === 0) || (desired !== "hidden" && count > 0)) {
-          console.log(JSON.stringify({ state: desired, matched: count, durationMs: performance.now() - started }));
-          return;
-        }
-        await Bun.sleep(200);
-      } while (performance.now() - started < timeout);
-      throw new Error(`Timed out after ${timeout}ms waiting for element to be ${desired}; last count ${count}`);
-    });
-    break;
-  }
-  case "probe": {
-    const action = positional[0] ?? "status";
-    await withClient(udid, async client => {
-      let result: unknown;
-      if (action === "enable") {
-        if (typeof options["bundle-id"] !== "string") throw new Error("--bundle-id is required");
-        result = await client.request("probe.enable", {
+        printJson(result, options.json === true);
+      });
+      break;
+    }
+    case "inspect-point": {
+      await withClient(udid, async (client) => {
+        const result = await client.request("accessibility.elementAtPoint", {
           udid,
-          bundleId: options["bundle-id"],
+          x: numberOption(options, "x"),
+          y: numberOption(options, "y"),
         });
-      } else if (action === "disable") {
-        result = await client.request("probe.disable", { udid });
-      } else if (action === "context") {
-        result = await client.request("probe.context");
-      } else {
-        result = await client.request("probe.status");
+        printJson(result, options.json === true);
+      });
+      break;
+    }
+    case "tap-element": {
+      await withClient(udid, async (client) => {
+        const selector = selectorFromOptions(options);
+        const result = await client.request("accessibility.find", { udid, selector });
+        const index = integerOption(options, "index", 0);
+        if (result.count !== 1 && options.index === undefined) {
+          throw new Error(`Selector matched ${result.count} elements; refine it or pass --index`);
+        }
+        const match = result.matches[index];
+        const frame = match?.frame?.normalized;
+        if (!match || !frame || match.enabled === false) {
+          throw new Error("Selected element is unavailable, disabled, or has no visible frame");
+        }
+        const point = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+        const receipt = await client.request("input.tap", point);
+        printJson({ selector, element: match, point, receipt }, true);
+      });
+      break;
+    }
+    case "wait": {
+      const timeoutMs = integerOption(options, "timeout-ms", 5_000);
+      const state = options.state === "hidden" ? "hidden" : "visible";
+      await withClient(udid, async (client) => {
+        const started = performance.now();
+        const result = await client.request("accessibility.wait", {
+          udid,
+          selector: selectorFromOptions(options),
+          state,
+          timeoutMs,
+        });
+        printJson({ ...result, durationMs: performance.now() - started }, true);
+      });
+      break;
+    }
+    case "probe": {
+      const action = positional[0] ?? "status";
+      if (!["status", "target", "enable", "disable", "context"].includes(action)) {
+        throw new Error(`Unknown probe action: ${action}`);
       }
-      console.log(JSON.stringify(result, null, options.json ? 0 : 2));
-    });
-    break;
-  }
-  case "tap":
-    await withClient(udid, client => client.request("input.tap", {
-      x: numberOption(options, "x"),
-      y: numberOption(options, "y"),
-    }));
-    break;
-  case "swipe":
-    await withClient(udid, client => client.request("input.swipe", {
-      from: pairOption(options, "from"),
-      to: pairOption(options, "to"),
-      durationMs: typeof options.duration === "string" ? Number(options.duration) : 350,
-    }));
-    break;
-  case "type":
-    await withClient(udid, client => client.request("input.typeText", {
-      text: positional.join(" "),
-    }));
-    break;
-  case "button":
-    await withClient(udid, client => client.request("input.button", {
-      button: positional[0],
-    }));
-    break;
-  case "serve": {
-    const child = Bun.spawn([resolveBinary(), "serve", ...argv.slice(3)], {
-      stdin: "inherit",
-      stdout: "inherit",
-      stderr: "inherit",
-    });
-    process.exit(await child.exited);
-  }
-  case "mcp":
-    await runServer();
-    break;
-  default:
-    console.log(`SimView 0.1.0
-
-Usage:
-  simview devices --json
-  simview doctor --json
-  simview preview [--udid <udid>] [--no-open]
-  simview screenshot --output <path> [--udid <udid>]
-  simview observe [--scope interactive|visible|full] [--output <png>] [--json]
-  simview tree [--scope interactive|visible|full] [--json]
-  simview find [--id <identifier>] [--role <role>] [--name <name>]
-  simview inspect-point --x <0..1> --y <0..1>
-  simview tap-element [--id <identifier>] [--role <role>] [--name <name>]
-  simview wait [selector] --state visible|hidden --timeout <ms>
-  simview probe status|enable|disable|context [--bundle-id <id>]
-  simview tap --x <0..1> --y <0..1>
-  simview swipe --from <x,y> --to <x,y> --duration <ms>
-  simview type <text>
-  simview button <home|lock|volume-up|volume-down|action>
-  simview mcp
-  simview serve --socket <path> --token-fd <fd>`);
+      await withClient(udid, async (client) => {
+        let result: Record<string, unknown>;
+        switch (action) {
+          case "enable":
+            result = await client.request("probe.enable", {
+              udid,
+              bundleId: stringOption(options, "bundle-id", true),
+            });
+            break;
+          case "disable":
+            result = await client.request("probe.disable", { udid });
+            break;
+          case "context":
+            result = await client.request("probe.context", {});
+            break;
+          case "target":
+            result = await client.request("probe.target", { udid });
+            break;
+          default:
+            result = await client.request("probe.status", {});
+        }
+        printJson(result, options.json === true);
+      });
+      break;
+    }
+    case "tap":
+      await withClient(udid, (client) =>
+        client.request("input.tap", {
+          x: numberOption(options, "x"),
+          y: numberOption(options, "y"),
+        }),
+      );
+      break;
+    case "swipe":
+      await withClient(udid, (client) =>
+        client.request("input.swipe", {
+          from: pairOption(options, "from"),
+          to: pairOption(options, "to"),
+          durationMs: integerOption(options, "duration-ms", 350),
+        }),
+      );
+      break;
+    case "type":
+      await withClient(udid, (client) =>
+        client.request("input.typeText", {
+          text: positional.join(" "),
+        }),
+      );
+      break;
+    case "button": {
+      const button = positional[0];
+      if (
+        button !== "home" &&
+        button !== "lock" &&
+        button !== "volume-up" &&
+        button !== "volume-down" &&
+        button !== "action"
+      ) {
+        throw new Error("button must be home, lock, volume-up, volume-down, or action");
+      }
+      await withClient(udid, (client) => client.request("input.button", { button }));
+      break;
+    }
+    case "serve": {
+      const child = Bun.spawn([resolveBinary(), "serve", ...positional], {
+        stdin: "inherit",
+        stdout: "inherit",
+        stderr: "inherit",
+      });
+      process.exit(await child.exited);
+      return;
+    }
+    case "mcp":
+      await runServer();
+      break;
+    default:
+      console.log(helpText());
   }
 }
 
+function nextFrame(client: SimViewClient, kind: FrameKind): Promise<Uint8Array> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      unsubscribe();
+      reject(new Error(`Timed out waiting for frame kind ${kind}`));
+    }, 5_000);
+    const unsubscribe = client.on(kind, (payload) => {
+      clearTimeout(timeout);
+      unsubscribe();
+      resolve(payload);
+    });
+  });
+}
+
 function selectorFromOptions(options: Options) {
-  const selector = {
-    identifier: typeof options.id === "string" ? options.id : undefined,
-    role: typeof options.role === "string" ? options.role : undefined,
-    name: typeof options.name === "string" ? options.name : undefined,
-    value: typeof options.value === "string" ? options.value : undefined,
-    exact: options.contains ? false : true,
-  };
-  if (!selector.identifier && !selector.role && !selector.name && !selector.value) {
-    throw new Error("Pass at least one of --id, --role, --name, or --value");
+  return accessibilitySelectorSchema.parse({
+    identifier: stringOption(options, "id", false),
+    role: stringOption(options, "role", false),
+    name: stringOption(options, "name", false),
+    value: stringOption(options, "value", false),
+    exact: options.contains !== true,
+    index: options.index === undefined ? undefined : integerOption(options, "index", 0),
+  });
+}
+
+function scopeOption(options: Options): "interactive" | "visible" | "full" {
+  const scope = options.scope ?? "interactive";
+  if (scope !== "interactive" && scope !== "visible" && scope !== "full") {
+    throw new Error("--scope must be interactive, visible, or full");
   }
-  return selector;
+  return scope;
+}
+
+function stringOption(options: Options, name: string, required: true): string;
+function stringOption(options: Options, name: string, required: false): string | undefined;
+function stringOption(options: Options, name: string, required: boolean): string | undefined {
+  const value = options[name];
+  if (typeof value === "string" && value.length > 0) return value;
+  if (required) throw new Error(`--${name} is required`);
+  return undefined;
 }
 
 function numberOption(options: Options, name: string): number {
@@ -280,15 +413,61 @@ function numberOption(options: Options, name: string): number {
   return value;
 }
 
+function integerOption(options: Options, name: string, fallback: number): number {
+  if (options[name] === undefined) return fallback;
+  const value = Number(options[name]);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`--${name} must be a non-negative integer`);
+  }
+  return value;
+}
+
 function pairOption(options: Options, name: string): { x: number; y: number } {
-  const [x, y] = String(options[name] ?? "").split(",").map(Number);
+  const [x, y] = String(options[name] ?? "")
+    .split(",")
+    .map(Number);
   if (!Number.isFinite(x) || !Number.isFinite(y)) throw new Error(`--${name} must be x,y`);
-  return { x: x!, y: y! };
+  if (x === undefined || y === undefined) throw new Error(`--${name} must be x,y`);
+  return { x, y };
+}
+
+function printJson(value: unknown, compact: boolean): void {
+  console.log(JSON.stringify(value, null, compact ? 0 : 2));
+}
+
+function helpText(): string {
+  return `SimView ${SIMVIEW_VERSION}
+
+Usage:
+  simview --version
+  simview devices --json
+  simview doctor --json
+  simview preview [--udid <udid>] [--no-open] [--print-url]
+  simview screenshot --output <path> [--udid <udid>]
+  simview observe [--scope interactive|visible|full] [--output <png>] [--json]
+  simview tree [--scope interactive|visible|full] [--json]
+  simview find [--id <identifier>] [--role <role>] [--name <name>]
+  simview inspect-point --x <0..1> --y <0..1>
+  simview tap-element [--id <identifier>] [--role <role>] [--name <name>]
+  simview wait [selector] --state visible|hidden --timeout-ms <ms>
+  simview probe status|target|enable|disable|context [--bundle-id <id>]
+  simview tap --x <0..1> --y <0..1>
+  simview swipe --from <x,y> --to <x,y> --duration-ms <ms>
+  simview type <text>
+  simview button <home|lock|volume-up|volume-down|action>
+  simview daemon status [--json]
+  simview daemon stop --udid <uuid>
+  simview daemon stop --all
+  simview daemon prune
+  simview mcp
+  simview serve --socket <path> --token-fd <fd>`;
 }
 
 if (import.meta.main) {
-  run().catch(error => {
-    console.error(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+  run().catch((error) => {
+    console.error(
+      JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+    );
     process.exit(1);
   });
 }
