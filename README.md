@@ -40,9 +40,7 @@ release archives and agent plugins do not require either runtime.
 
 ```sh
 bun install --frozen-lockfile
-bun run build:app
-bun run build:packages
-swift build --package-path native/SimViewCore -c release
+bun run build
 bun run check
 ```
 

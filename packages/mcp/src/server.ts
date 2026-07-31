@@ -806,8 +806,7 @@ function registerAccessibilityTools(
 function registerInputTools(server: McpServer, session: SimViewSession): void {
   const input = async (value: unknown) => {
     const parsed = relayInputSchema.parse(value);
-    const client = session.requireClient();
-    const result = await dispatchInput(client, parsed);
+    const result = await session.dispatchInput(parsed);
     return toolResult("Simulator input accepted.", result);
   };
   server.registerTool(
@@ -940,8 +939,7 @@ function registerAppBridgeTools(
     },
     async ({ method, params }) => {
       const parsed = relayInputSchema.parse({ method, params });
-      const client = session.requireClient();
-      const result = await dispatchInput(client, parsed);
+      const result = await session.dispatchInput(parsed);
       return {
         content: [],
         structuredContent: result,
@@ -1031,28 +1029,6 @@ function toolResult(text: string, structuredContent: unknown) {
     content: [{ type: "text" as const, text }],
     structuredContent: json,
   };
-}
-
-async function dispatchInput(
-  client: ReturnType<SimViewSession["requireClient"]>,
-  input: ReturnType<typeof relayInputSchema.parse>,
-): Promise<Record<string, unknown>> {
-  switch (input.method) {
-    case "input.touch":
-      return client.request(input.method, input.params);
-    case "input.tap":
-      return client.request(input.method, input.params);
-    case "input.longPress":
-      return client.request(input.method, input.params);
-    case "input.swipe":
-      return client.request(input.method, input.params);
-    case "input.typeText":
-      return client.request(input.method, input.params);
-    case "input.key":
-      return client.request(input.method, input.params);
-    case "input.button":
-      return client.request(input.method, input.params);
-  }
 }
 
 export async function runServer(session = new SimViewSession()): Promise<void> {

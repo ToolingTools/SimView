@@ -85,6 +85,16 @@ export interface AccessibilityNode {
   [key: string]: unknown;
 }
 
+export function flattenAccessibilityTree(root: AccessibilityNode): AccessibilityNode[] {
+  const nodes: AccessibilityNode[] = [];
+  const visit = (node: AccessibilityNode) => {
+    nodes.push(node);
+    node.children?.forEach(visit);
+  };
+  visit(root);
+  return nodes;
+}
+
 export const accessibilitySnapshotSchema = z
   .object({
     schemaVersion: z.literal(1),

@@ -1,7 +1,7 @@
 import {
-  type AccessibilityNode,
   type AccessibilitySnapshot,
   type ElementSnapshot,
+  flattenAccessibilityTree,
   MAXIMUM_FRAME_BYTES,
 } from "@simview/contracts";
 
@@ -14,16 +14,6 @@ export enum FrameKind {
   H264Frame = 0x11,
   JpegFrame = 0x12,
   PngScreenshot = 0x20,
-}
-
-export function flattenAccessibilityTree(root: AccessibilityNode): AccessibilityNode[] {
-  const nodes: AccessibilityNode[] = [];
-  const visit = (node: AccessibilityNode) => {
-    nodes.push(node);
-    node.children?.forEach(visit);
-  };
-  visit(root);
-  return nodes;
 }
 
 export function compactAccessibilityTree(

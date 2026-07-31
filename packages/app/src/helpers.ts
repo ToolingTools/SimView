@@ -15,6 +15,8 @@ import {
   type UiContext,
 } from "@simview/contracts";
 
+export { flattenAccessibilityTree as flattenTree } from "@simview/contracts";
+
 export type Point = AnnotationGeometry;
 export type Rect = { x: number; y: number; width: number; height: number };
 export type AnnotationMessageContent = { type: "text"; text: string };
@@ -302,16 +304,6 @@ export function streamMessage(kind: number, payload: Uint8Array): Uint8Array {
   return message;
 }
 
-export function flattenTree(root: AccessibilityNode): AccessibilityNode[] {
-  const result: AccessibilityNode[] = [];
-  const visit = (node: AccessibilityNode) => {
-    result.push(node);
-    node.children?.forEach(visit);
-  };
-  visit(root);
-  return result;
-}
-
 export type InspectorTreeRow = {
   node: AccessibilityNode;
   depth: number;
@@ -370,9 +362,10 @@ export function visibleTree(
   expanded: Set<string>,
   search: string,
   renderedOnly = false,
+  projectedRows?: readonly InspectorTreeRow[],
 ): InspectorTreeRow[] {
   const query = search.trim().toLowerCase();
-  const allRows = inspectorTreeRows(root, renderedOnly);
+  const allRows = projectedRows ?? inspectorTreeRows(root, renderedOnly);
   if (query) {
     return allRows
       .filter(({ node }) => node !== root)

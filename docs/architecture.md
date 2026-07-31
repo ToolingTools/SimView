@@ -108,9 +108,10 @@ backend. `SimViewClient.start()` remains the explicit ephemeral/test path, and
 `SIMVIEW_BACKEND_MODE=ephemeral` is the rollback switch.
 
 The client package exports registry status, stop, and prune helpers for
-diagnostics. The top-level CLI currently exposes the shared backend indirectly
-through MCP session startup; `simview daemon ...` command wiring should be
-added alongside its tests before documenting those subcommands as public API.
+diagnostics. The top-level CLI exposes them as `simview daemon status`,
+`simview daemon stop --udid <uuid>` (or `--all`), and `simview daemon prune`.
+These commands operate only on trusted registry records and never print backend
+capability tokens.
 
 ## Contract and validation boundary
 

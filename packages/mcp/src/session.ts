@@ -532,7 +532,7 @@ export class SimViewSession {
           }
           if (url.pathname === "/input" && request.method === "POST") {
             return Response.json(
-              await session.#dispatchInput(relayInputSchema.parse(await request.json())),
+              await session.dispatchInput(relayInputSchema.parse(await request.json())),
             );
           }
           if (url.pathname === "/annotation" && request.method === "POST") {
@@ -682,7 +682,7 @@ export class SimViewSession {
     return this.client;
   }
 
-  async #dispatchInput(input: z.output<typeof relayInputSchema>): Promise<Record<string, unknown>> {
+  async dispatchInput(input: z.output<typeof relayInputSchema>): Promise<Record<string, unknown>> {
     const client = this.requireClient();
     switch (input.method) {
       case "input.touch":
@@ -804,9 +804,7 @@ export class SimViewSession {
             }
           }
           this.#notifyPreviewWaiters();
-          const message = new Uint8Array(payload.length + 1);
-          message[0] = kind;
-          message.set(payload, 1);
+          let message: Uint8Array | undefined;
           for (const viewer of this.viewers) {
             if (viewer.data.codec === "h264" && viewer.readyState === WebSocket.OPEN) {
               if (viewer.data.paused) continue;
@@ -817,6 +815,7 @@ export class SimViewSession {
                 }
                 viewer.data.waitingForKeyframe = false;
               }
+              message ??= previewMessage(kind, payload);
               const status = viewer.send(message);
               if (status < 0) {
                 viewer.data.paused = true;
@@ -866,10 +865,7 @@ export class SimViewSession {
   }
 
   #sendFrame(viewer: ServerWebSocket<ViewerData>, kind: FrameKind, payload: Uint8Array): number {
-    const message = new Uint8Array(payload.length + 1);
-    message[0] = kind;
-    message.set(payload, 1);
-    return viewer.send(message);
+    return viewer.send(previewMessage(kind, payload));
   }
 
   async #waitForPreview(predicate: () => boolean, timeoutMs: number): Promise<void> {
@@ -904,6 +900,13 @@ export class SimViewSession {
     this.#previewPackets = [];
     this.#notifyPreviewWaiters();
   }
+}
+
+function previewMessage(kind: FrameKind, payload: Uint8Array): Uint8Array {
+  const message = new Uint8Array(payload.length + 1);
+  message[0] = kind;
+  message.set(payload, 1);
+  return message;
 }
 
 async function writePng(path: string, encoded: string): Promise<void> {

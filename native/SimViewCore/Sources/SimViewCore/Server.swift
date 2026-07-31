@@ -54,13 +54,16 @@ final class ClientConnection: Hashable, @unchecked Sendable {
     }
 
     func send(_ frame: WireFrame) {
-        let data = frame.encoded
+        sendEncoded(frame.encoded, kind: frame.kind)
+    }
+
+    func sendEncoded(_ data: Data, kind: FrameKind) {
         stateLock.lock()
         guard !closed else {
             stateLock.unlock()
             return
         }
-        if frame.kind == .h264Frame || frame.kind == .jpegFrame {
+        if kind == .h264Frame || kind == .jpegFrame {
             previewFrame = data
         } else {
             controlFrames.append(data)
@@ -643,8 +646,9 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func broadcast(_ frame: WireFrame, codec: String) {
+        let data = frame.encoded
         for connection in connections where connection.authenticated && connection.codec == codec {
-            connection.send(frame)
+            connection.sendEncoded(data, kind: frame.kind)
             metrics.didDeliver()
         }
     }

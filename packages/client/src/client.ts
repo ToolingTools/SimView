@@ -248,6 +248,7 @@ export class SimViewClient {
       const timeoutMs = options.timeoutMs ?? 10_000;
       const timeout = setTimeout(() => {
         this.#pending.delete(id);
+        options.signal?.removeEventListener("abort", abort);
         reject(new Error(`${method} timed out after ${timeoutMs}ms`));
       }, timeoutMs);
       const abort = () => {

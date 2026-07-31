@@ -15,7 +15,6 @@ await rm(archiveRoot, { recursive: true, force: true });
 await mkdir(artifacts, { recursive: true });
 
 await $`bun run check`;
-await $`bun run build:app`;
 await $`bun run build:packages`;
 await $`bun run build:probe`;
 await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64 --arch x86_64`;

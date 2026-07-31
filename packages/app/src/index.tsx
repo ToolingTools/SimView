@@ -1395,12 +1395,24 @@ function SimView() {
   }
 
   const renderedOnly = accessibility?.source === "react-native-fiber";
-  const allInspectorRows =
-    elementsOpen && accessibility ? inspectorTreeRows(accessibility.root, renderedOnly) : [];
-  const elementRows =
-    elementsOpen && accessibility
-      ? visibleTree(accessibility.root, expandedElements, elementSearch, renderedOnly)
-      : [];
+  const allInspectorRows = useMemo(
+    () =>
+      elementsOpen && accessibility ? inspectorTreeRows(accessibility.root, renderedOnly) : [],
+    [elementsOpen, accessibility, renderedOnly],
+  );
+  const elementRows = useMemo(
+    () =>
+      elementsOpen && accessibility
+        ? visibleTree(
+            accessibility.root,
+            expandedElements,
+            elementSearch,
+            renderedOnly,
+            allInspectorRows,
+          )
+        : [],
+    [elementsOpen, accessibility, expandedElements, elementSearch, renderedOnly, allInspectorRows],
+  );
   const visibleElementCount = Math.max(0, allInspectorRows.length - 1);
   const inspectedElement = hoveredElement ?? selectedElement;
   const highlightedElement = inspectedElement ?? selectedElement;
@@ -2284,124 +2296,140 @@ function croppedAnnotationScreenshot(
   return output.toDataURL("image/png").split(",", 2)[1];
 }
 
+function iconPaths(name: string): ComponentChildren {
+  switch (name) {
+    case "cursor":
+      return (
+        <>
+          <path d="m5 3 11 9-6 .8L7 18z" />
+          <path d="m11 13 4 6" />
+        </>
+      );
+    case "finger":
+      return (
+        <>
+          <path d="M9.5 11V5.5a2 2 0 0 1 4 0V11" />
+          <path d="M13.5 10V7.5a2 2 0 0 1 4 0V12" />
+          <path d="M17.5 11v-1a2 2 0 0 1 4 0v4.5c0 4-2.6 6.5-6.5 6.5h-1.6a6 6 0 0 1-4.7-2.3L4.2 13a1.9 1.9 0 0 1 2.8-2.6l2.5 2.2" />
+        </>
+      );
+    case "annotate":
+      return (
+        <path d="M12 4c5 0 8.5 3 8.5 7.1 0 4-3.5 6.9-8.5 6.9-1.1 0-2.2-.2-3.2-.5L5 19.5l.9-4C4.4 14.4 3.5 12.8 3.5 11.1 3.5 7 7 4 12 4Z" />
+      );
+    case "home":
+      return (
+        <>
+          <path d="m3 11 9-8 9 8" />
+          <path d="M5.5 9.5V21h13V9.5M9 21v-7h6v7" />
+        </>
+      );
+    case "type":
+      return <path d="M5 5h14M12 5v14M8 19h8" />;
+    case "capture":
+      return (
+        <>
+          <path d="M4 8h3l1.5-2h7L17 8h3v11H4z" />
+          <circle cx="12" cy="13" r="3.5" />
+        </>
+      );
+    case "record":
+      return <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />;
+    case "expand":
+      return <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />;
+    case "menu":
+      return (
+        <>
+          <path d="M4 7h16" />
+          <path d="M4 12h16" />
+          <path d="M4 17h16" />
+        </>
+      );
+    case "phone":
+      return (
+        <>
+          <rect x="7" y="2.5" width="10" height="19" rx="2.3" />
+          <path d="M10.5 5h3M11 18.5h2" />
+        </>
+      );
+    case "check":
+      return <path d="m5 12 4 4L19 6" />;
+    case "comment-bubble":
+      return (
+        <path
+          d="M12 3.5c5 0 8.5 3.1 8.5 7.4 0 4.2-3.5 7.2-8.5 7.2-1.1 0-2.2-.2-3.1-.5L5 19.5l.9-4C4.4 14.3 3.5 12.7 3.5 10.9c0-4.3 3.5-7.4 8.5-7.4Z"
+          fill="currentColor"
+          stroke="white"
+          stroke-width="1.5"
+        />
+      );
+    case "sidebar":
+      return (
+        <>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M15 4v16" />
+        </>
+      );
+    case "send":
+      return (
+        <>
+          <path d="m3 11 18-8-7 18-3-7z" />
+          <path d="m11 14 4-4" />
+        </>
+      );
+    case "sliders":
+      return (
+        <>
+          <path d="M4 7h16M4 17h16" />
+          <circle cx="9" cy="7" r="2" fill="var(--popover)" />
+          <circle cx="15" cy="17" r="2" fill="var(--popover)" />
+        </>
+      );
+    case "trash":
+      return <path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" />;
+    case "refresh":
+      return (
+        <>
+          <path d="M19 8a8 8 0 1 0 1 7" />
+          <path d="M19 3v5h-5" />
+        </>
+      );
+    case "chevron-down":
+      return <path d="m7 9 5 5 5-5" />;
+    case "chevron-right":
+      return <path d="m9 7 5 5-5 5" />;
+    case "collapse-tree":
+      return (
+        <>
+          <path d="m7 10 5-5 5 5" />
+          <path d="m7 19 5-5 5 5" />
+        </>
+      );
+    case "expand-tree":
+      return (
+        <>
+          <path d="m7 5 5 5 5-5" />
+          <path d="m7 14 5 5 5-5" />
+        </>
+      );
+    case "layers":
+      return (
+        <>
+          <path d="m12 3 9 5-9 5-9-5z" />
+          <path d="m3 12 9 5 9-5M3 16l9 5 9-5" />
+        </>
+      );
+    case "element":
+      return <rect x="5" y="5" width="14" height="14" rx="3" />;
+    default:
+      return undefined;
+  }
+}
+
 function Icon({ name }: { name: string }) {
-  const paths: Record<string, ComponentChildren> = {
-    cursor: (
-      <>
-        <path d="m5 3 11 9-6 .8L7 18z" />
-        <path d="m11 13 4 6" />
-      </>
-    ),
-    finger: (
-      <>
-        <path d="M9.5 11V5.5a2 2 0 0 1 4 0V11" />
-        <path d="M13.5 10V7.5a2 2 0 0 1 4 0V12" />
-        <path d="M17.5 11v-1a2 2 0 0 1 4 0v4.5c0 4-2.6 6.5-6.5 6.5h-1.6a6 6 0 0 1-4.7-2.3L4.2 13a1.9 1.9 0 0 1 2.8-2.6l2.5 2.2" />
-      </>
-    ),
-    annotate: (
-      <path d="M12 4c5 0 8.5 3 8.5 7.1 0 4-3.5 6.9-8.5 6.9-1.1 0-2.2-.2-3.2-.5L5 19.5l.9-4C4.4 14.4 3.5 12.8 3.5 11.1 3.5 7 7 4 12 4Z" />
-    ),
-    home: (
-      <>
-        <path d="m3 11 9-8 9 8" />
-        <path d="M5.5 9.5V21h13V9.5M9 21v-7h6v7" />
-      </>
-    ),
-    type: (
-      <>
-        <path d="M5 5h14M12 5v14M8 19h8" />
-      </>
-    ),
-    capture: (
-      <>
-        <path d="M4 8h3l1.5-2h7L17 8h3v11H4z" />
-        <circle cx="12" cy="13" r="3.5" />
-      </>
-    ),
-    record: <circle cx="12" cy="12" r="6" fill="currentColor" stroke="none" />,
-    expand: (
-      <>
-        <path d="M9 4H4v5M15 4h5v5M9 20H4v-5M15 20h5v-5" />
-      </>
-    ),
-    menu: (
-      <>
-        <path d="M4 7h16" />
-        <path d="M4 12h16" />
-        <path d="M4 17h16" />
-      </>
-    ),
-    phone: (
-      <>
-        <rect x="7" y="2.5" width="10" height="19" rx="2.3" />
-        <path d="M10.5 5h3M11 18.5h2" />
-      </>
-    ),
-    check: <path d="m5 12 4 4L19 6" />,
-    "comment-bubble": (
-      <path
-        d="M12 3.5c5 0 8.5 3.1 8.5 7.4 0 4.2-3.5 7.2-8.5 7.2-1.1 0-2.2-.2-3.1-.5L5 19.5l.9-4C4.4 14.3 3.5 12.7 3.5 10.9c0-4.3 3.5-7.4 8.5-7.4Z"
-        fill="currentColor"
-        stroke="white"
-        stroke-width="1.5"
-      />
-    ),
-    sidebar: (
-      <>
-        <rect x="3" y="4" width="18" height="16" rx="2" />
-        <path d="M15 4v16" />
-      </>
-    ),
-    send: (
-      <>
-        <path d="m3 11 18-8-7 18-3-7z" />
-        <path d="m11 14 4-4" />
-      </>
-    ),
-    sliders: (
-      <>
-        <path d="M4 7h16M4 17h16" />
-        <circle cx="9" cy="7" r="2" fill="var(--popover)" />
-        <circle cx="15" cy="17" r="2" fill="var(--popover)" />
-      </>
-    ),
-    trash: (
-      <>
-        <path d="M5 7h14M9 7V4h6v3M7 7l1 14h8l1-14M10 11v6M14 11v6" />
-      </>
-    ),
-    refresh: (
-      <>
-        <path d="M19 8a8 8 0 1 0 1 7" />
-        <path d="M19 3v5h-5" />
-      </>
-    ),
-    "chevron-down": <path d="m7 9 5 5 5-5" />,
-    "chevron-right": <path d="m9 7 5 5-5 5" />,
-    "collapse-tree": (
-      <>
-        <path d="m7 10 5-5 5 5" />
-        <path d="m7 19 5-5 5 5" />
-      </>
-    ),
-    "expand-tree": (
-      <>
-        <path d="m7 5 5 5 5-5" />
-        <path d="m7 14 5 5 5-5" />
-      </>
-    ),
-    layers: (
-      <>
-        <path d="m12 3 9 5-9 5-9-5z" />
-        <path d="m3 12 9 5 9-5M3 16l9 5 9-5" />
-      </>
-    ),
-    element: <rect x="5" y="5" width="14" height="14" rx="3" />,
-  };
   return (
     <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-      {paths[name]}
+      {iconPaths(name)}
     </svg>
   );
 }

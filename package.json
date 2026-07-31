@@ -8,8 +8,8 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "bun run build:app && bun run build:packages && bun run build:native",
-    "build:app": "bun build packages/app/src/index.tsx --target=browser --minify --outfile=packages/app/dist/preview.js && cp packages/app/src/preview.html packages/app/dist/preview.html",
+    "build": "bun run build:packages && bun run build:native",
+    "build:app": "bun run --cwd packages/app build",
     "build:packages": "bun run --filter '@simview/*' build",
     "build:native": "swift build --package-path native/SimViewCore -c release && mkdir -p packages/core/bin && cp native/SimViewCore/.build/release/simview-core packages/core/bin/simview-core",
     "build:probe": "bun scripts/build-probe.ts",
