@@ -5,19 +5,30 @@ import { createServer } from "../packages/mcp/src/server";
 import { SimViewSession } from "../packages/mcp/src/session";
 
 const appCalledTools = [
-  "connect_simulator",
-  "get_preview_packets",
-  "list_simulators",
-  "simulator_input",
-  "inspect_point",
-  "update_annotation",
-  "add_annotation",
+  "app_connect_simulator",
+  "app_enable_ui_probe",
+  "app_get_accessibility_tree",
+  "app_get_ui_context",
+  "app_inspect_point",
+  "app_list_simulators",
+  "app_take_screenshot",
+  "app_tap_element",
   "delete_annotation",
-  "take_screenshot",
+  "get_preview_packets",
+  "simulator_input",
+  "update_annotation",
+];
+
+const modelOnlyTools = [
+  "add_annotation",
+  "connect_simulator",
   "get_accessibility_tree",
   "get_simview_state",
   "get_ui_context",
   "enable_ui_probe",
+  "inspect_point",
+  "list_simulators",
+  "take_screenshot",
   "tap_element",
 ];
 
@@ -81,6 +92,20 @@ describe("MCP app tools", () => {
         expect(meta?.["openai/widgetAccessible"]).toBe(true);
         expect(meta?.ui?.resourceUri).toBe(openMeta?.ui?.resourceUri);
         expect(meta?.["ui/resourceUri"]).toBe(openMeta?.ui?.resourceUri);
+        expect(meta?.["openai/outputTemplate"]).toBeUndefined();
+      }
+
+      for (const name of modelOnlyTools) {
+        const meta = byName.get(name)?._meta as
+          | {
+              ui?: { resourceUri?: string; visibility?: string[] };
+              "ui/resourceUri"?: string;
+              "openai/outputTemplate"?: string;
+            }
+          | undefined;
+        expect(meta?.ui?.visibility).toEqual(["model"]);
+        expect(meta?.ui?.resourceUri).toBeUndefined();
+        expect(meta?.["ui/resourceUri"]).toBeUndefined();
         expect(meta?.["openai/outputTemplate"]).toBeUndefined();
       }
 

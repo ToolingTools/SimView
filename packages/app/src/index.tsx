@@ -20,6 +20,7 @@ import { type ComponentChildren, render } from "preact";
 import { useEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   annotationMessageContent,
+  claimFullscreenRequest,
   commentableNodeAtPoint,
   compactIdentifier,
   contextForInspectedNode,
@@ -156,6 +157,9 @@ function SimView() {
   const mjpegFrameRef = useRef(0);
   const sentAnnotationIds = useRef<Set<string>>(new Set());
   const pendingAnnotationsRef = useRef<Annotation[]>([]);
+  const bridgeConnectedRef = useRef(false);
+  const connectedForFullscreenRef = useRef(Boolean(initialState?.connected));
+  const fullscreenRequestGateRef = useRef({ claimed: false });
   editorOpenRef.current = Boolean(editor);
 
   const token = useMemo(() => {
@@ -172,10 +176,11 @@ function SimView() {
     bridge.ontoolresult = (result) => {
       const nextState = parseSessionState(result.structuredContent);
       if (nextState) {
+        connectedForFullscreenRef.current = nextState.connected;
         if (nextState.connected) {
           setStartupError("");
           setStartupPhase((current) => (current === "ready" ? current : "waiting-for-frame"));
-          void enterFullscreen();
+          if (bridgeConnectedRef.current) void enterFullscreen();
         }
         setState((current) =>
           current.reviewId && current.reviewId !== nextState.reviewId ? current : nextState,
@@ -185,9 +190,11 @@ function SimView() {
     bridge
       .connect()
       .then(() => {
-        if (initialState?.connected) void enterFullscreen();
+        bridgeConnectedRef.current = true;
+        if (connectedForFullscreenRef.current) void enterFullscreen();
       })
       .catch((error) => {
+        bridgeConnectedRef.current = false;
         const message = error instanceof Error ? error.message : String(error);
         setStartupError(message);
         setStartupPhase("error");
@@ -196,12 +203,7 @@ function SimView() {
 
   async function enterFullscreen() {
     const context = bridge.getHostContext();
-    if (
-      context?.displayMode === "fullscreen" ||
-      !context?.availableDisplayModes?.includes("fullscreen")
-    ) {
-      return;
-    }
+    if (!claimFullscreenRequest(fullscreenRequestGateRef.current, context)) return;
     try {
       const result = await bridge.requestDisplayMode({ mode: "fullscreen" });
       if (result.mode !== "fullscreen") show(`Host kept SimView in ${result.mode} mode`);
@@ -387,7 +389,7 @@ function SimView() {
       const devices = embedded
         ? await bridge
             .callServerTool({
-              name: "list_simulators",
+              name: "app_list_simulators",
               arguments: {},
             })
             .then((result) => {
@@ -438,7 +440,7 @@ function SimView() {
       const nextState = embedded
         ? await bridge
             .callServerTool({
-              name: "connect_simulator",
+              name: "app_connect_simulator",
               arguments: { udid: device.udid },
             })
             .then((result) => sessionStateSchema.parse(result.structuredContent))
@@ -754,7 +756,7 @@ function SimView() {
       const snapshot = embedded
         ? await bridge
             .callServerTool({
-              name: "inspect_point",
+              name: "app_inspect_point",
               arguments: { x: point.x, y: point.y },
             })
             .then((result) => inspectPointOutputSchema.parse(result.structuredContent))
@@ -955,7 +957,7 @@ function SimView() {
 
   async function captureOnly() {
     if (!embedded) return show("Capture is available inside an MCP host");
-    await bridge.callServerTool({ name: "take_screenshot", arguments: {} });
+    await bridge.callServerTool({ name: "app_take_screenshot", arguments: {} });
     show("Screenshot captured");
   }
 
@@ -1071,7 +1073,7 @@ function SimView() {
       const snapshot = embedded
         ? await bridge
             .callServerTool({
-              name: "get_accessibility_tree",
+              name: "app_get_accessibility_tree",
               arguments: { scope: "full", maxNodes: 1_200 },
             })
             .then((result) => accessibilitySnapshotSchema.parse(result.structuredContent))
@@ -1112,7 +1114,7 @@ function SimView() {
       if (embedded) {
         const result = await bridge
           .callServerTool({
-            name: "get_ui_context",
+            name: "app_get_ui_context",
             arguments: {},
           })
           .then((response) => uiContextSchema.parse(response.structuredContent));
@@ -1157,7 +1159,7 @@ function SimView() {
     try {
       if (embedded) {
         await bridge.callServerTool({
-          name: "enable_ui_probe",
+          name: "app_enable_ui_probe",
           arguments: { bundleId },
         });
       } else {
@@ -1185,7 +1187,7 @@ function SimView() {
       const snapshot = embedded
         ? await bridge
             .callServerTool({
-              name: "inspect_point",
+              name: "app_inspect_point",
               arguments: { x: point.x, y: point.y },
             })
             .then((result) => inspectPointOutputSchema.parse(result.structuredContent))
@@ -1276,7 +1278,7 @@ function SimView() {
     if (!selectedElement) return;
     if (embedded) {
       await bridge.callServerTool({
-        name: "tap_element",
+        name: "app_tap_element",
         arguments: { ref: selectedElement.ref },
       });
       scheduleAccessibilityRefresh();

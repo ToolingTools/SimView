@@ -42,10 +42,8 @@ function resourceMetadata(reviewId: string) {
       "openai/outputTemplate": resourceUri,
       "openai/widgetAccessible": true,
     },
-    appCallable: {
-      ui: { resourceUri, visibility: ["model", "app"] as const },
-      "ui/resourceUri": resourceUri,
-      "openai/widgetAccessible": true,
+    modelOnly: {
+      ui: { visibility: ["model"] as const },
     },
     appOnly: {
       ui: { resourceUri, visibility: ["app"] as const },
@@ -96,6 +94,37 @@ const observeOutputSchema = z.object({
 export function createServer(session = new SimViewSession()): McpServer {
   const server = new McpServer({ name: "simview", version: VERSION });
   const metadata = resourceMetadata(session.reviewId);
+  const connectSimulator = async (udid?: string) => {
+    const state = await session.open(udid);
+    return toolResult(`SimView is connected to ${state.device?.name}.`, state);
+  };
+  const listSimulators = async () => {
+    const devices = await import("@simview/client").then(({ SimViewClient }) =>
+      SimViewClient.listDevices(),
+    );
+    return toolResult("Local simulator devices.", { devices });
+  };
+  const takeScreenshot = async () => {
+    const screenshot = await session.screenshot();
+    return {
+      content: [
+        {
+          type: "image" as const,
+          data: Buffer.from(screenshot.bytes).toString("base64"),
+          mimeType: "image/png" as const,
+        },
+        {
+          type: "text" as const,
+          text: `Captured frame ${screenshot.frameId} at ${screenshot.width}×${screenshot.height}.`,
+        },
+      ],
+      structuredContent: {
+        frameId: screenshot.frameId,
+        width: screenshot.width,
+        height: screenshot.height,
+      },
+    };
+  };
 
   registerAppTool(
     server,
@@ -109,10 +138,7 @@ export function createServer(session = new SimViewSession()): McpServer {
       outputSchema: sessionStateSchema,
       _meta: metadata.openPreview,
     },
-    async ({ udid }) => {
-      const state = await session.open(udid);
-      return toolResult(`SimView is connected to ${state.device?.name}.`, state);
-    },
+    ({ udid }) => connectSimulator(udid),
   );
 
   server.registerTool(
@@ -122,12 +148,21 @@ export function createServer(session = new SimViewSession()): McpServer {
       description: "Start or select a simulator session without opening the interactive preview.",
       inputSchema: { udid: z.string().uuid().optional() },
       outputSchema: sessionStateSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async ({ udid }) => {
-      const state = await session.open(udid);
-      return toolResult(`SimView is connected to ${state.device?.name}.`, state);
+    ({ udid }) => connectSimulator(udid),
+  );
+
+  server.registerTool(
+    "app_connect_simulator",
+    {
+      title: "Switch simulator",
+      description: "Switch the Simulator used by the open SimView preview.",
+      inputSchema: { udid: z.string().uuid().optional() },
+      outputSchema: sessionStateSchema,
+      _meta: metadata.appOnly,
     },
+    ({ udid }) => connectSimulator(udid),
   );
 
   server.registerTool(
@@ -137,14 +172,21 @@ export function createServer(session = new SimViewSession()): McpServer {
       description: "List local iOS Simulators and their current state.",
       inputSchema: {},
       outputSchema: simulatorListSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async () => {
-      const devices = await import("@simview/client").then(({ SimViewClient }) =>
-        SimViewClient.listDevices(),
-      );
-      return toolResult("Local simulator devices.", { devices });
+    listSimulators,
+  );
+
+  server.registerTool(
+    "app_list_simulators",
+    {
+      title: "List simulators",
+      description: "List local iOS Simulators for the open SimView preview.",
+      inputSchema: {},
+      outputSchema: simulatorListSchema,
+      _meta: metadata.appOnly,
     },
+    listSimulators,
   );
 
   registerInputTools(server, session);
@@ -160,29 +202,21 @@ export function createServer(session = new SimViewSession()): McpServer {
         "Observe the selected simulator as a PNG. Use its pixel positions to choose normalized coordinates for tap, swipe, or long_press, then observe again.",
       inputSchema: {},
       outputSchema: screenshotOutputSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async () => {
-      const screenshot = await session.screenshot();
-      return {
-        content: [
-          {
-            type: "image" as const,
-            data: Buffer.from(screenshot.bytes).toString("base64"),
-            mimeType: "image/png",
-          },
-          {
-            type: "text" as const,
-            text: `Captured frame ${screenshot.frameId} at ${screenshot.width}×${screenshot.height}.`,
-          },
-        ],
-        structuredContent: {
-          frameId: screenshot.frameId,
-          width: screenshot.width,
-          height: screenshot.height,
-        },
-      };
+    takeScreenshot,
+  );
+
+  server.registerTool(
+    "app_take_screenshot",
+    {
+      title: "Capture preview screenshot",
+      description: "Capture a screenshot from the open SimView preview.",
+      inputSchema: {},
+      outputSchema: screenshotOutputSchema,
+      _meta: metadata.appOnly,
     },
+    takeScreenshot,
   );
 
   server.registerTool(
@@ -192,7 +226,7 @@ export function createServer(session = new SimViewSession()): McpServer {
       description: "Get the current device, stream, frame, route context, and annotation count.",
       inputSchema: {},
       outputSchema: sessionStateSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
     async () => toolResult("Current SimView state.", session.state()),
   );
@@ -284,6 +318,64 @@ function registerAccessibilityTools(
     exact: z.boolean().default(true),
     index: z.number().int().min(0).optional(),
   };
+  const getAccessibilityTree = async (
+    scope: "interactive" | "visible" | "full",
+    maxNodes: number,
+  ) => {
+    const snapshot = await session.accessibilitySnapshot(scope, maxNodes);
+    return toolResult(compactAccessibilityTree(snapshot), snapshot);
+  };
+  const tapElement = async (selector: unknown) => {
+    const parsedSelector = accessibilitySelectorSchema.parse(selector);
+    const result = await session.findElements(parsedSelector);
+    const index = parsedSelector.index ?? 0;
+    if (result.count !== 1 && parsedSelector.index === undefined) {
+      throw new Error(
+        `Selector matched ${result.count} elements; refine the selector or pass index`,
+      );
+    }
+    const match = result.matches[index];
+    const frame = match?.frame?.normalized;
+    if (!match) throw new Error("The selected element does not exist");
+    if (match.enabled === false) throw new Error("The selected element is disabled");
+    if (!frame || frame.width <= 0 || frame.height <= 0) {
+      throw new Error("The selected element has no visible frame");
+    }
+    const point = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+    const receipt = await session.requireClient().request("input.tap", point);
+    return toolResult("Physical element tap accepted; observe the screen to verify the outcome.", {
+      selector: parsedSelector,
+      element: match,
+      point,
+      receipt,
+    });
+  };
+  const inspectPoint = async (x: number, y: number) => {
+    const accessibility = await session.inspectPoint(x, y);
+    const status = await session.probeStatus();
+    const native = status.connected ? await session.probeInspectPoint(x, y) : undefined;
+    return toolResult("Element context at the requested point.", {
+      element: accessibility,
+      native,
+      probe: status,
+    });
+  };
+  const getUiContext = async () => {
+    const status = await session.probeStatus();
+    const target = status.connected ? undefined : await session.probeTarget();
+    const context = status.connected ? await session.probeContext() : undefined;
+    return toolResult(
+      status.connected
+        ? "UIKit probe context."
+        : "UIKit probe is not enabled; accessibility remains available.",
+      { status, context, target },
+    );
+  };
+  const enableUiProbe = async (bundleId: string) =>
+    toolResult(
+      "The target app relaunched and connected to the UIKit probe.",
+      await session.enableProbe(bundleId),
+    );
 
   server.registerTool(
     "observe_screen",
@@ -334,12 +426,24 @@ function registerAccessibilityTools(
         maxNodes: z.number().int().min(1).max(1_200).default(1_200),
       },
       outputSchema: accessibilitySnapshotSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async ({ scope, maxNodes }) => {
-      const snapshot = await session.accessibilitySnapshot(scope, maxNodes);
-      return toolResult(compactAccessibilityTree(snapshot), snapshot);
+    ({ scope, maxNodes }) => getAccessibilityTree(scope, maxNodes),
+  );
+
+  server.registerTool(
+    "app_get_accessibility_tree",
+    {
+      title: "Get preview accessibility tree",
+      description: "Read the accessibility hierarchy for the open SimView preview.",
+      inputSchema: {
+        scope: z.enum(["interactive", "visible", "full"]).default("interactive"),
+        maxNodes: z.number().int().min(1).max(1_200).default(1_200),
+      },
+      outputSchema: accessibilitySnapshotSchema,
+      _meta: metadata.appOnly,
     },
+    ({ scope, maxNodes }) => getAccessibilityTree(scope, maxNodes),
   );
 
   server.registerTool(
@@ -370,35 +474,26 @@ function registerAccessibilityTools(
         point: normalizedPointSchema,
         receipt: acceptedOutputSchema,
       }),
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async (selector) => {
-      const result = await session.findElements(accessibilitySelectorSchema.parse(selector));
-      const index = selector.index ?? 0;
-      if (result.count !== 1 && selector.index === undefined) {
-        throw new Error(
-          `Selector matched ${result.count} elements; refine the selector or pass index`,
-        );
-      }
-      const match = result.matches[index];
-      const frame = match?.frame?.normalized;
-      if (!match) throw new Error("The selected element does not exist");
-      if (match.enabled === false) throw new Error("The selected element is disabled");
-      if (!frame || frame.width <= 0 || frame.height <= 0) {
-        throw new Error("The selected element has no visible frame");
-      }
-      const point = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
-      const receipt = await session.requireClient().request("input.tap", point);
-      return toolResult(
-        "Physical element tap accepted; observe the screen to verify the outcome.",
-        {
-          selector,
-          element: match,
-          point,
-          receipt,
-        },
-      );
+    tapElement,
+  );
+
+  server.registerTool(
+    "app_tap_element",
+    {
+      title: "Tap preview element",
+      description: "Re-resolve and physically tap an element selected in the open preview.",
+      inputSchema: selectorSchema,
+      outputSchema: z.object({
+        selector: accessibilitySelectorSchema,
+        element: accessibilityNodeSchema,
+        point: normalizedPointSchema,
+        receipt: acceptedOutputSchema,
+      }),
+      _meta: metadata.appOnly,
     },
+    tapElement,
   );
 
   server.registerTool(
@@ -411,18 +506,24 @@ function registerAccessibilityTools(
         y: z.number().min(0).max(1),
       },
       outputSchema: inspectPointOutputSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async ({ x, y }) => {
-      const accessibility = await session.inspectPoint(x, y);
-      const status = await session.probeStatus();
-      const native = status.connected ? await session.probeInspectPoint(x, y) : undefined;
-      return toolResult("Element context at the requested point.", {
-        element: accessibility,
-        native,
-        probe: status,
-      });
+    ({ x, y }) => inspectPoint(x, y),
+  );
+
+  server.registerTool(
+    "app_inspect_point",
+    {
+      title: "Inspect preview point",
+      description: "Return element context at a point selected in the open preview.",
+      inputSchema: {
+        x: z.number().min(0).max(1),
+        y: z.number().min(0).max(1),
+      },
+      outputSchema: inspectPointOutputSchema,
+      _meta: metadata.appOnly,
     },
+    ({ x, y }) => inspectPoint(x, y),
   );
 
   server.registerTool(
@@ -433,19 +534,21 @@ function registerAccessibilityTools(
         "Get the optional UIKit probe status and active scene, window, and controller hierarchy.",
       inputSchema: {},
       outputSchema: uiContextSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async () => {
-      const status = await session.probeStatus();
-      const target = status.connected ? undefined : await session.probeTarget();
-      const context = status.connected ? await session.probeContext() : undefined;
-      return toolResult(
-        status.connected
-          ? "UIKit probe context."
-          : "UIKit probe is not enabled; accessibility remains available.",
-        { status, context, target },
-      );
+    getUiContext,
+  );
+
+  server.registerTool(
+    "app_get_ui_context",
+    {
+      title: "Get preview UI context",
+      description: "Get optional UIKit probe context for the open preview.",
+      inputSchema: {},
+      outputSchema: uiContextSchema,
+      _meta: metadata.appOnly,
     },
+    getUiContext,
   );
 
   server.registerTool(
@@ -464,13 +567,29 @@ function registerAccessibilityTools(
           }),
       },
       outputSchema: genericObjectOutputSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
-    async ({ bundleId }) =>
-      toolResult(
-        "The target app relaunched and connected to the UIKit probe.",
-        await session.enableProbe(bundleId),
-      ),
+    ({ bundleId }) => enableUiProbe(bundleId),
+  );
+
+  server.registerTool(
+    "app_enable_ui_probe",
+    {
+      title: "Enable preview UIKit probe",
+      description: "Enable the optional UIKit probe from the open preview.",
+      inputSchema: {
+        bundleId: z
+          .string()
+          .min(3)
+          .max(255)
+          .refine((value) => !value.startsWith("com.apple."), {
+            message: "Apple platform applications cannot load the UIKit probe",
+          }),
+      },
+      outputSchema: genericObjectOutputSchema,
+      _meta: metadata.appOnly,
+    },
+    ({ bundleId }) => enableUiProbe(bundleId),
   );
 
   server.registerTool(
@@ -658,7 +777,7 @@ function registerAnnotationTools(
         context: annotationContextSchema.optional(),
       },
       outputSchema: annotationSchema,
-      _meta: metadata.appCallable,
+      _meta: metadata.modelOnly,
     },
     async (input) => {
       const annotation = session.addAnnotation(input);

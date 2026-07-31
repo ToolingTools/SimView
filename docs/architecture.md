@@ -57,6 +57,11 @@ The process model has two layers:
   of them when the bridge ends. Its MCP App resource is
   `ui://simview/<version>/reviews/<reviewId>/preview.html`; the UUID identifies
   the review and is not a capability secret.
+- `open_simview` is the only model-visible tool associated with that UI
+  resource. Model-side discovery, connection, screenshot, accessibility, and
+  annotation tools explicitly omit a resource URI so their results cannot
+  instantiate or replace the preview. The mounted app uses resource-scoped,
+  app-only aliases for its internal device and inspection calls.
 - `SimViewClient.acquire({ udid, codec })` shares one detached native backend
   per Simulator UDID and compatible protocol/version/binary identity. The
   backend record lives under `${tmpdir()}/simview-daemons/<uid>/<instanceId>`;

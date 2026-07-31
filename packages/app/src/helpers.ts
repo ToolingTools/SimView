@@ -57,6 +57,25 @@ export function parseSessionState(value: unknown): SessionState | undefined {
   return result.success ? result.data : undefined;
 }
 
+export function claimFullscreenRequest(
+  gate: { claimed: boolean },
+  context:
+    | {
+        displayMode?: string | undefined;
+        availableDisplayModes?: readonly string[] | undefined;
+      }
+    | undefined,
+): boolean {
+  if (gate.claimed) return false;
+  if (context?.displayMode === "fullscreen") {
+    gate.claimed = true;
+    return false;
+  }
+  if (!context?.availableDisplayModes?.includes("fullscreen")) return false;
+  gate.claimed = true;
+  return true;
+}
+
 export function requireAnnotation(value: unknown): Annotation {
   const result = annotationSchema.safeParse(value);
   if (!result.success) throw new Error("The annotation tool returned an invalid annotation");

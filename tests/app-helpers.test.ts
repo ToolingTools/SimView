@@ -3,6 +3,7 @@ import type { AccessibilityNode, AccessibilitySnapshot } from "@simview/contract
 import {
   ANNOTATION_IMPLEMENTATION_PROMPT,
   annotationMessageContent,
+  claimFullscreenRequest,
   commentableNodeAtPoint,
   contextForNode,
   elementPath,
@@ -70,6 +71,24 @@ describe("app helpers", () => {
     ).toBe(true);
     expect(parseSessionState({ connected: "yes" })).toBeUndefined();
     expect(() => requireAnnotation({ id: "not-a-uuid" })).toThrow();
+  });
+
+  test("claims fullscreen only once after the host advertises it", () => {
+    const gate = { claimed: false };
+    expect(claimFullscreenRequest(gate, undefined)).toBe(false);
+    expect(gate.claimed).toBe(false);
+    expect(
+      claimFullscreenRequest(gate, {
+        displayMode: "inline",
+        availableDisplayModes: ["inline", "fullscreen"],
+      }),
+    ).toBe(true);
+    expect(
+      claimFullscreenRequest(gate, {
+        displayMode: "inline",
+        availableDisplayModes: ["inline", "fullscreen"],
+      }),
+    ).toBe(false);
   });
 
   test("formats runtime names and frame messages", () => {

@@ -121,6 +121,10 @@ relay; MCP carries controls, screenshots, compact state, and session comments.
 it first and proceed only if it succeeds. When an interactive preview is
 requested, follow it with `open_simview` using the same UDID; the preview then
 boots from the connected session and immediately requests fullscreen.
+`open_simview` is the only model-callable tool linked to the MCP App resource;
+discovery and connection results remain text-only so preflight calls cannot
+mount or replace the preview. Once open, resource-scoped app-only tools handle
+device switching and preview interactions.
 
 Agents navigate with a semantic visual loop: call `observe_screen`, choose an
 accessible identifier/role/name, call `tap_element`, wait for an observable
