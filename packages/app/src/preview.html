@@ -349,6 +349,7 @@
       canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
       .screen-wrap.annotate-cursor {
         cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='32' height='32' viewBox='0 0 32 32'%3E%3Cpath d='M16 4C23.2 4 28 8.2 28 14c0 5.6-4.8 9.7-12 9.7-1.7 0-3.2-.2-4.6-.7L6 26l1.3-5.6C5.2 18.8 4 16.6 4 14 4 8.2 8.8 4 16 4Z' fill='%231683ff' stroke='white' stroke-width='2'/%3E%3C/svg%3E") 6 26, pointer;
+        touch-action: none;
       }
       .empty {
         position: absolute;
@@ -804,45 +805,69 @@
       }
       .annotation-dot:hover { border-color: white; background: #0077ed; }
       .annotation-dot:hover::after { background: #0077ed; }
+      .annotation-dot.draft-point { pointer-events: none; }
+      .annotation-region {
+        position: absolute;
+        z-index: 5;
+        border: max(2px, .55cqw) dashed #0878f9;
+        border-radius: 0;
+        background: rgba(8, 120, 249, .05);
+        pointer-events: none;
+      }
       .comment-popover {
         --popover: #2c2c2e;
         z-index: 6;
-        width: min(330px, calc(100% - 20px));
-        gap: 10px;
-        padding: 12px;
-        border-color: rgba(255, 255, 255, .16);
-        border-radius: 16px;
+        width: min(310px, calc(100% - 20px));
+        min-height: 58px;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 7px;
+        padding: 7px 8px 7px 12px;
+        border: 0;
+        border-radius: 29px;
         background: var(--popover);
         box-shadow: 0 18px 48px rgba(0, 0, 0, .46);
         backdrop-filter: blur(28px);
       }
-      .comment-head {
-        display: flex;
-        align-items: center;
-        gap: 9px;
-        min-width: 0;
+      .comment-popover.has-delete { grid-template-columns: auto minmax(0, 1fr) auto; }
+      .comment-popover textarea {
+        height: 38px;
+        min-height: 38px;
+        max-height: 76px;
+        padding: 8px 2px;
+        overflow-y: hidden;
+        border: 0;
+        border-radius: 0;
+        outline: 0;
+        background: transparent;
+        color: white;
+        line-height: 22px;
       }
-      .comment-head > div { min-width: 0; display: grid; gap: 2px; }
-      .comment-head strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .comment-head small { color: var(--muted); }
-      .comment-pin {
-        width: 30px;
-        height: 30px;
+      .comment-popover textarea::placeholder { color: rgba(255, 255, 255, .62); }
+      .comment-popover textarea:focus-visible { outline: 0; }
+      .comment-submit, .comment-delete {
+        width: 44px;
+        height: 44px;
+        min-height: 44px;
+        padding: 0;
         display: grid;
         place-items: center;
-        color: #1683ff;
+        border: 0;
+        border-radius: 50%;
       }
-      .comment-pin .icon { width: 27px; height: 27px; filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .3)); }
-      .comment-popover textarea {
-        min-height: 76px;
-        padding: 10px;
-        border-color: transparent;
-        border-radius: 10px;
-        background: rgba(0, 0, 0, .18);
-        color: white;
+      .comment-submit {
+        background: white;
+        color: #202124;
       }
-      .comment-actions { grid-template-columns: auto 1fr auto auto; }
-      .comment-actions .danger { color: #ff6961; }
+      .comment-submit:hover { background: #f0f0f0; }
+      .comment-submit .icon { width: 25px; height: 25px; stroke-width: 2.25; }
+      .comment-delete {
+        width: 34px;
+        height: 34px;
+        min-height: 34px;
+        background: transparent;
+        color: #ff6961;
+      }
       .icon-action {
         width: 30px;
         min-height: 30px;
@@ -1266,13 +1291,8 @@
         button:active { background: rgba(0, 0, 0, .09); }
         .mode-switch button[aria-pressed="false"]:hover { background: rgba(0, 0, 0, .05); }
         input, textarea, select { background: rgba(118, 118, 128, .09); }
-        .comment-popover {
-          --popover: #f4f4f5;
-          border-color: rgba(60, 60, 67, .2);
-          color: #1d1d1f;
-          box-shadow: 0 18px 48px rgba(0, 0, 0, .22);
-        }
-        .comment-popover textarea { background: white; color: #1d1d1f; }
+        .comment-popover { --popover: #2c2c2e; color: white; box-shadow: 0 18px 48px rgba(0, 0, 0, .22); }
+        .comment-popover textarea { background: transparent; color: white; }
         .single-stage .screen-wrap { box-shadow: 0 1px 4px rgba(0, 0, 0, .12); }
         .toast { color: #1d1d1f; }
       }

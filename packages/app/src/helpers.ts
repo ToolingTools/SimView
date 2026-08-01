@@ -17,7 +17,7 @@ import {
 
 export { flattenAccessibilityTree as flattenTree } from "@simview/contracts";
 
-export type Point = AnnotationGeometry;
+export type Point = Extract<AnnotationGeometry, { kind: "point" }>;
 export type Rect = { x: number; y: number; width: number; height: number };
 export type AnnotationMessageContent = { type: "text"; text: string };
 export type AnnotationMessageItem = {
@@ -124,7 +124,9 @@ export function annotationMessageContext(annotation: Annotation): string[] {
     : (metro?.source ?? annotation.component?.source);
   return [
     object && `Object: ${object.replace(/^AX/, "")}`,
-    `Coordinate: x=${percent(annotation.geometry.x)}, y=${percent(annotation.geometry.y)}`,
+    annotation.geometry.kind === "rect"
+      ? `Selection: x=${percent(annotation.geometry.x)}, y=${percent(annotation.geometry.y)}, width=${percent(annotation.geometry.width)}, height=${percent(annotation.geometry.height)}`
+      : `Coordinate: x=${percent(annotation.geometry.x)}, y=${percent(annotation.geometry.y)}`,
     accessibility?.identifier && `ID: ${accessibility.identifier}`,
     accessibility?.title && `Title: "${accessibility.title}"`,
     accessibility?.label && `Label: "${accessibility.label}"`,
@@ -250,6 +252,10 @@ export function annotationMessageContent(
 }
 
 export function annotationCropRect(annotation: Annotation): Rect {
+  if (annotation.geometry.kind === "rect") {
+    const { x, y, width, height } = annotation.geometry;
+    return { x, y, width, height };
+  }
   const frame = annotation.context?.accessibility?.frame;
   const centerX = frame ? frame.x + frame.width / 2 : annotation.geometry.x;
   const centerY = frame ? frame.y + frame.height / 2 : annotation.geometry.y;

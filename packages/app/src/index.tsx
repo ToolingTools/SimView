@@ -43,13 +43,13 @@ import {
   inspectorTreeRows,
   PreviewBridgeGate,
   parseSessionState,
-  percent,
   requireAnnotation,
   streamMessage,
   visibleTree,
 } from "./helpers";
 
-type Point = AnnotationGeometry;
+type Point = Extract<AnnotationGeometry, { kind: "point" }>;
+type RectGeometry = Extract<AnnotationGeometry, { kind: "rect" }>;
 type AccessibilityNode = ContractAccessibilityNode;
 type AccessibilitySnapshot = ContractElementSnapshot & {
   native?: {
@@ -67,10 +67,18 @@ type State = SessionState & {
 };
 type Editor = {
   point: Point;
+  geometry: AnnotationGeometry;
   note: string;
   frameId: string;
   annotationId?: string | undefined;
   context?: AnnotationContext | undefined;
+};
+type AnnotationDrag = {
+  pointerId: number;
+  start: Point;
+  startClientX: number;
+  startClientY: number;
+  frameId: string;
 };
 type PointerInput = {
   contactId: number;
@@ -92,6 +100,7 @@ const bridge = new App(
   { autoResize: true },
 );
 const HOVER_SLOP_PX = 10;
+const ANNOTATION_DRAG_THRESHOLD_PX = 5;
 const elementFallbackLabels: Record<ElementFallbackReason, string> = {
   "metro-target-unavailable": "No matching React Native Metro target",
   "metro-fiber-unavailable": "React Native Fiber root unavailable",
@@ -130,7 +139,6 @@ function SimView() {
   const [elementSearch, setElementSearch] = useState("");
   const [selectedElement, setSelectedElement] = useState<AccessibilityNode>();
   const [hoveredElement, setHoveredElement] = useState<AccessibilityNode>();
-  const [hoveredContext, setHoveredContext] = useState<AnnotationContext>();
   const [expandedElements, setExpandedElements] = useState<Set<string>>(new Set());
   const [sidebarWidth, setSidebarWidth] = useState(292);
   const [toolsOpen, setToolsOpen] = useState(false);
@@ -145,6 +153,7 @@ function SimView() {
   const [typeText, setTypeText] = useState("");
   const [typingText, setTypingText] = useState(false);
   const [savingComment, setSavingComment] = useState(false);
+  const [draftSelection, setDraftSelection] = useState<RectGeometry>();
   const [startupPhase, setStartupPhase] = useState<StartupPhase>(
     initialState?.connected ? "waiting-for-frame" : "connecting",
   );
@@ -152,6 +161,7 @@ function SimView() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const screenRef = useRef<HTMLDivElement>(null);
   const editorInputRef = useRef<HTMLTextAreaElement>(null);
+  const commentPopoverRef = useRef<HTMLFormElement>(null);
   const toolsMenuRef = useRef<HTMLDivElement>(null);
   const deviceMenuRef = useRef<HTMLDivElement>(null);
   const decoderRef = useRef<VideoDecoder>();
@@ -161,6 +171,7 @@ function SimView() {
   const previewReadyRef = useRef(false);
   const recordingRef = useRef<MediaRecorder>();
   const activePointer = useRef<number>();
+  const annotationDragRef = useRef<AnnotationDrag>();
   const pointerInputQueueRef = useRef<PointerInput[]>([]);
   const pointerInputRunningRef = useRef(false);
   const hoverRequest = useRef(0);
@@ -232,8 +243,25 @@ function SimView() {
 
   useEffect(() => {
     if (!editor) return;
-    requestAnimationFrame(() => editorInputRef.current?.focus());
+    requestAnimationFrame(() => {
+      const input = editorInputRef.current;
+      if (!input) return;
+      resizeCommentInput(input);
+      input.focus();
+    });
   }, [editor?.point.x, editor?.point.y]);
+
+  useEffect(() => {
+    if (!editor) return;
+    const dismissOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !commentPopoverRef.current?.contains(target)) {
+        setEditor(undefined);
+      }
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    return () => document.removeEventListener("pointerdown", dismissOutside);
+  }, [editor]);
 
   useEffect(() => {
     if (!toolsOpen && !deviceMenuOpen) return;
@@ -504,7 +532,6 @@ function SimView() {
       setEditor(undefined);
       setSelectedElement(undefined);
       setHoveredElement(undefined);
-      setHoveredContext(undefined);
       setAccessibility(undefined);
       setScreenContext(undefined);
       setElementFallback(undefined);
@@ -730,18 +757,18 @@ function SimView() {
   function onPointerDown(event: PointerEvent) {
     const point = coordinate(event);
     if (mode === "annotate") {
-      const node = accessibility
-        ? commentableNodeAtPoint(accessibility.root, point, hoverSlop())
-        : undefined;
-      const context = node ? elementContext(node) : hoveredContext;
-      setSelectedElement(node);
-      setEditor({
-        point,
-        note: "",
+      if (editor) return;
+      annotationDragRef.current = {
+        pointerId: event.pointerId,
+        start: point,
+        startClientX: event.clientX,
+        startClientY: event.clientY,
         frameId: frozenFrameId ?? latestFrameIdRef.current ?? state.frameId ?? "current",
-        context,
-      });
-      void inspectAnnotationPoint(point);
+      };
+      setDraftSelection(undefined);
+      setSelectedElement(undefined);
+      setHoveredElement(undefined);
+      screenRef.current?.setPointerCapture(event.pointerId);
       return;
     }
     activePointer.current = event.pointerId;
@@ -757,12 +784,22 @@ function SimView() {
   function onPointerMove(event: PointerEvent) {
     const point = coordinate(event);
     if (mode === "annotate") {
+      const drag = annotationDragRef.current;
+      if (drag?.pointerId === event.pointerId) {
+        const movedX = Math.abs(event.clientX - drag.startClientX);
+        const movedY = Math.abs(event.clientY - drag.startClientY);
+        setDraftSelection(
+          movedX >= ANNOTATION_DRAG_THRESHOLD_PX && movedY >= ANNOTATION_DRAG_THRESHOLD_PX
+            ? annotationRect(drag.start, point)
+            : undefined,
+        );
+        return;
+      }
       if (!editor && accessibility) {
         const slop = hoverSlop();
         const node = commentableNodeAtPoint(accessibility.root, point, slop);
         if (node?.ref !== hoveredElement?.ref) {
           setHoveredElement(node);
-          setHoveredContext(node ? elementContext(node) : undefined);
         }
         if (node) return;
       }
@@ -814,18 +851,12 @@ function SimView() {
       const frame = snapshot.element.frame?.normalized;
       if (!frame || frame.width <= 0 || frame.height <= 0 || snapshot.element.hidden) {
         setHoveredElement(undefined);
-        setHoveredContext(undefined);
         return;
       }
       setHoveredElement(snapshot.element);
-      setHoveredContext({
-        ...contextForInspectedNode(accessibility, snapshot.element),
-        native: snapshot.native ? { ...snapshot.native, matchConfidence: "strong" } : undefined,
-      });
     } catch {
       if (request === hoverRequest.current) {
         setHoveredElement(undefined);
-        setHoveredContext(undefined);
       }
     } finally {
       hoverPending.current = false;
@@ -859,7 +890,35 @@ function SimView() {
   }
 
   function onPointerUp(event: PointerEvent) {
-    if (mode !== "interact" || activePointer.current !== event.pointerId) return;
+    if (mode === "annotate") {
+      const drag = annotationDragRef.current;
+      if (!drag || drag.pointerId !== event.pointerId) return;
+      annotationDragRef.current = undefined;
+      screenRef.current?.releasePointerCapture(event.pointerId);
+      const point = coordinate(event);
+      const movedX = Math.abs(event.clientX - drag.startClientX);
+      const movedY = Math.abs(event.clientY - drag.startClientY);
+      const geometry: AnnotationGeometry =
+        movedX >= ANNOTATION_DRAG_THRESHOLD_PX && movedY >= ANNOTATION_DRAG_THRESHOLD_PX
+          ? annotationRect(drag.start, point)
+          : point;
+      const inspectionPoint = annotationGeometryCenter(geometry);
+      const node = accessibility
+        ? commentableNodeAtPoint(accessibility.root, inspectionPoint, hoverSlop())
+        : undefined;
+      setDraftSelection(undefined);
+      setSelectedElement(node);
+      setEditor({
+        point: annotationEditorAnchor(geometry),
+        geometry,
+        note: "",
+        frameId: drag.frameId,
+        context: node ? elementContext(node) : undefined,
+      });
+      void inspectAnnotationPoint(inspectionPoint);
+      return;
+    }
+    if (activePointer.current !== event.pointerId) return;
     activePointer.current = undefined;
     const point = coordinate(event);
     enqueuePointerInput({
@@ -867,6 +926,26 @@ function SimView() {
       phase: "up",
       x: point.x,
       y: point.y,
+    });
+  }
+
+  function onPointerCancel(event: PointerEvent) {
+    if (mode === "annotate" && annotationDragRef.current?.pointerId === event.pointerId) {
+      annotationDragRef.current = undefined;
+      setDraftSelection(undefined);
+      return;
+    }
+    onPointerUp(event);
+  }
+
+  function editAnnotation(annotation: Annotation) {
+    setEditor({
+      point: annotationEditorAnchor(annotation.geometry),
+      geometry: annotation.geometry,
+      note: annotation.note,
+      frameId: annotation.frameId,
+      annotationId: annotation.id,
+      context: annotation.context,
     });
   }
 
@@ -902,7 +981,7 @@ function SimView() {
               body: JSON.stringify({
                 action: "add",
                 frameId: currentEditor.frameId,
-                geometry: currentEditor.point,
+                geometry: currentEditor.geometry,
                 note,
                 context: currentEditor.context,
               }),
@@ -1284,7 +1363,7 @@ function SimView() {
           );
       const node = snapshot.element;
       setEditor((current) =>
-        current && current.point.x === point.x && current.point.y === point.y
+        current && samePoint(annotationGeometryCenter(current.geometry), point)
           ? (() => {
               const inspected = contextForInspectedNode(accessibility, node);
               const currentAccessibility = current.context?.accessibility;
@@ -1347,9 +1426,9 @@ function SimView() {
     setElementsOpen(true);
     setSelectedElement(node);
     setHoveredElement(undefined);
-    setHoveredContext(undefined);
     setEditor({
       point,
+      geometry: point,
       note: "",
       frameId: frozenFrameId ?? currentFrameId,
       context: elementContext(node),
@@ -1416,6 +1495,8 @@ function SimView() {
   const visibleElementCount = Math.max(0, allInspectorRows.length - 1);
   const inspectedElement = hoveredElement ?? selectedElement;
   const highlightedElement = inspectedElement ?? selectedElement;
+  const visibleDraftSelection =
+    draftSelection ?? (editor?.geometry.kind === "rect" ? editor.geometry : undefined);
   const activeScene =
     uiContext?.context?.scenes?.find((scene) => scene.activationState === "foregroundActive") ??
     uiContext?.context?.scenes?.[0];
@@ -1591,12 +1672,11 @@ function SimView() {
             onPointerDown={onPointerDown}
             onPointerMove={onPointerMove}
             onPointerUp={onPointerUp}
-            onPointerCancel={onPointerUp}
+            onPointerCancel={onPointerCancel}
             onPointerLeave={() => {
-              if (mode === "annotate" && !editor) {
+              if (mode === "annotate" && !editor && !annotationDragRef.current) {
                 hoverRequest.current += 1;
                 setHoveredElement(undefined);
-                setHoveredContext(undefined);
               }
             }}
           >
@@ -1631,62 +1711,82 @@ function SimView() {
                 </span>
               </div>
             )}
-            {visibleAnnotations.map((annotation, index) => (
-              <button
-                type="button"
-                key={annotation.id}
-                class="annotation-dot"
+            {visibleDraftSelection && (
+              <div
+                class="annotation-region draft"
                 style={{
-                  left: `${annotation.geometry.x * 100}%`,
-                  top: `${annotation.geometry.y * 100}%`,
+                  left: `${visibleDraftSelection.x * 100}%`,
+                  top: `${visibleDraftSelection.y * 100}%`,
+                  width: `${visibleDraftSelection.width * 100}%`,
+                  height: `${visibleDraftSelection.height * 100}%`,
                 }}
-                title={annotation.note}
-                onPointerDown={(event) => {
-                  event.stopPropagation();
-                  setEditor({
-                    point: annotation.geometry,
-                    note: annotation.note,
-                    frameId: annotation.frameId,
-                    annotationId: annotation.id,
-                    context: annotation.context,
-                  });
+              />
+            )}
+            {editor && !editor.annotationId && editor.geometry.kind === "point" && (
+              <span
+                class="annotation-dot draft-point"
+                style={{
+                  left: `${editor.geometry.x * 100}%`,
+                  top: `${editor.geometry.y * 100}%`,
                 }}
-              >
-                {index + 1}
-              </button>
-            ))}
+              />
+            )}
+            {visibleAnnotations.map((annotation, index) => {
+              const anchor = annotationEditorAnchor(annotation.geometry);
+              return editor?.annotationId !== annotation.id ? (
+                <button
+                  type="button"
+                  key={annotation.id}
+                  class="annotation-dot"
+                  style={{
+                    left: `${anchor.x * 100}%`,
+                    top: `${anchor.y * 100}%`,
+                  }}
+                  title={annotation.note}
+                  aria-label={`Annotation ${index + 1}: ${annotation.note}`}
+                  onPointerDown={(event) => {
+                    event.stopPropagation();
+                    editAnnotation(annotation);
+                  }}
+                >
+                  {index + 1}
+                </button>
+              ) : null;
+            })}
             {editor && (
               <form
-                class={`comment-popover ${editor.point.x > 0.62 ? "align-right" : ""} ${editor.point.y > 0.65 ? "align-bottom" : ""}`}
+                ref={commentPopoverRef}
+                class={`comment-popover ${editor.annotationId ? "has-delete" : ""} ${editor.point.x > 0.62 ? "align-right" : ""} ${editor.point.y > 0.65 ? "align-bottom" : ""}`}
                 style={{ left: `${editor.point.x * 100}%`, top: `${editor.point.y * 100}%` }}
+                aria-label="Annotation comment"
                 onSubmit={(event) => {
                   event.preventDefault();
                   void saveComment();
                 }}
                 onPointerDown={(event) => event.stopPropagation()}
               >
-                <div class="comment-head">
-                  <span class="comment-pin">
-                    <Icon name="comment-bubble" />
-                  </span>
-                  <div>
-                    <strong>{editor.context?.accessibility?.label ?? "Screen comment"}</strong>
-                    <small>
-                      {editor.context?.accessibility?.role?.replace(/^AX/, "") ??
-                        `${percent(editor.point.x)} · ${percent(editor.point.y)}`}
-                    </small>
-                  </div>
-                </div>
+                {editor.annotationId && (
+                  <button
+                    type="button"
+                    class="comment-delete"
+                    aria-label="Delete comment"
+                    onClick={() => void deleteComment()}
+                  >
+                    <Icon name="trash" />
+                  </button>
+                )}
                 <textarea
                   ref={editorInputRef}
-                  rows={3}
+                  rows={1}
                   placeholder="Leave a comment…"
                   value={editor.note}
-                  onInput={(event) =>
+                  aria-label="Annotation message"
+                  onInput={(event) => {
+                    resizeCommentInput(event.currentTarget);
                     setEditor((current) =>
                       current ? { ...current, note: event.currentTarget.value } : current,
-                    )
-                  }
+                    );
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Escape") setEditor(undefined);
                     if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
@@ -1695,33 +1795,14 @@ function SimView() {
                     }
                   }}
                 />
-                <div class="comment-actions">
-                  {editor.annotationId && (
-                    <button
-                      type="button"
-                      class="danger icon-action"
-                      aria-label="Delete comment"
-                      onClick={() => void deleteComment()}
-                    >
-                      <Icon name="trash" />
-                    </button>
-                  )}
-                  <span />
-                  <button
-                    type="button"
-                    disabled={savingComment}
-                    onClick={() => setEditor(undefined)}
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    class="primary"
-                    type="submit"
-                    disabled={!editor.note.trim() || savingComment}
-                  >
-                    {savingComment ? "Saving…" : "Save"}
-                  </button>
-                </div>
+                <button
+                  class="comment-submit"
+                  type="submit"
+                  aria-label={savingComment ? "Saving comment" : "Save comment"}
+                  disabled={!editor.note.trim() || savingComment}
+                >
+                  <Icon name={savingComment ? "refresh" : "check"} />
+                </button>
               </form>
             )}
           </div>
@@ -2208,10 +2289,51 @@ function createDraftAnnotation(editor: Editor, note: string): Annotation {
     id: crypto.randomUUID(),
     frameId: editor.frameId,
     createdAt: new Date().toISOString(),
-    geometry: editor.point,
+    geometry: editor.geometry,
     note,
     context: editor.context,
   };
+}
+
+function annotationRect(start: Point, end: Point): RectGeometry {
+  return {
+    kind: "rect",
+    x: Math.min(start.x, end.x),
+    y: Math.min(start.y, end.y),
+    width: Math.abs(end.x - start.x),
+    height: Math.abs(end.y - start.y),
+  };
+}
+
+function annotationGeometryCenter(geometry: AnnotationGeometry): Point {
+  return geometry.kind === "rect"
+    ? {
+        kind: "point",
+        x: geometry.x + geometry.width / 2,
+        y: geometry.y + geometry.height / 2,
+      }
+    : geometry;
+}
+
+function annotationEditorAnchor(geometry: AnnotationGeometry): Point {
+  return geometry.kind === "rect"
+    ? {
+        kind: "point",
+        x: geometry.x + geometry.width,
+        y: geometry.y + geometry.height,
+      }
+    : geometry;
+}
+
+function samePoint(first: Point, second: Point): boolean {
+  return first.x === second.x && first.y === second.y;
+}
+
+function resizeCommentInput(input: HTMLTextAreaElement): void {
+  const maximumHeight = 76;
+  input.style.height = "auto";
+  input.style.height = `${Math.min(maximumHeight, Math.max(38, input.scrollHeight))}px`;
+  input.style.overflowY = input.scrollHeight > maximumHeight ? "auto" : "hidden";
 }
 
 function updateDraftAnnotation(annotations: Annotation[], id: string, note: string): Annotation {

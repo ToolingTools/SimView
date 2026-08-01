@@ -30,8 +30,9 @@ Simulator.
    and relaunching an explicitly selected third-party app is acceptable.
 6. Treat React Native route, component, testID, and source context as optional;
    never block on Metro or require Metro MCP itself to be installed.
-7. Add point annotations at the exact mismatch coordinates. Keep comments brief
-   and specific.
+7. Add point annotations at exact mismatch coordinates, or rectangular
+   annotations when a bounded screen region is the relevant evidence. Keep
+   comments brief and specific.
 8. Annotations remain session-local. Use **Send to Chat** to save the current
    PNG and crops in a private temporary directory and send their paths with the
    compact coordinate comments.

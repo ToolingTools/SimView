@@ -488,4 +488,24 @@ describe("app helpers", () => {
     expect(crop.width).toBeCloseTo(0.36);
     expect(crop.height).toBeCloseTo(0.24);
   });
+
+  test("uses a rectangular annotation as the exact crop and reports its bounds", () => {
+    const annotation: Annotation = {
+      id: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
+      frameId: "frame-1",
+      createdAt: "2026-07-31T10:00:00.000Z",
+      geometry: { kind: "rect", x: 0.12, y: 0.24, width: 0.5, height: 0.3 },
+      note: "Align this region",
+    };
+
+    expect(annotationCropRect(annotation)).toEqual({
+      x: 0.12,
+      y: 0.24,
+      width: 0.5,
+      height: 0.3,
+    });
+    expect(annotationMessageContext(annotation)).toContain(
+      "Selection: x=12.0%, y=24.0%, width=50.0%, height=30.0%",
+    );
+  });
 });

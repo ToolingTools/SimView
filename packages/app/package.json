@@ -1,6 +1,6 @@
 {
   "name": "@simview/app",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",

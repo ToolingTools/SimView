@@ -14,6 +14,7 @@ import {
   accessibilitySelectorSchema,
   accessibilitySnapshotSchema,
   annotationContextSchema,
+  annotationGeometrySchema,
   annotationSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   ELEMENT_TREE_TRANSFER_MAX_BYTES,
@@ -122,12 +123,6 @@ function elementTreePage(cache: ElementTreePageCache, pageIndex: number): Elemen
     ...(pageIndex + 1 < pageCount ? { nextCursor: cache.cursors[pageIndex + 1] } : {}),
   };
 }
-
-const geometry = z.object({
-  kind: z.literal("point"),
-  x: z.number().min(0).max(1),
-  y: z.number().min(0).max(1),
-});
 
 const acceptedOutputSchema = z.object({ accepted: z.literal(true) }).passthrough();
 const genericObjectOutputSchema = z.object({}).catchall(jsonValueSchema);
@@ -957,9 +952,10 @@ function registerAnnotationTools(
     "add_annotation",
     {
       title: "Add annotation",
-      description: "Add a comment at a normalized point on the current simulator frame.",
+      description:
+        "Add a comment at a normalized point or rectangular region on the current simulator frame.",
       inputSchema: {
-        geometry,
+        geometry: annotationGeometrySchema,
         note: z.string().min(1).max(2_000),
         frameId: z.string().optional(),
         route: z.string().optional(),
@@ -977,7 +973,7 @@ function registerAnnotationTools(
     },
     async (input) => {
       const annotation = session.addAnnotation(input);
-      return toolResult("Added point annotation.", annotation);
+      return toolResult("Added screen annotation.", annotation);
     },
   );
 
@@ -989,7 +985,7 @@ function registerAnnotationTools(
       inputSchema: {
         id: z.string().uuid(),
         note: z.string().min(1).max(2_000).optional(),
-        geometry: geometry.optional(),
+        geometry: annotationGeometrySchema.optional(),
       },
       outputSchema: annotationSchema,
       _meta: metadata.appOnly,

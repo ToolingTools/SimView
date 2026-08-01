@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   accessibilitySelectorSchema,
+  annotationGeometrySchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   elementTreeOutputSchema,
   elementTreePageSchema,
@@ -53,6 +54,27 @@ describe("shared protocol contracts", () => {
 
   test("rejects out-of-range input at the protocol boundary", () => {
     expect(methodSchemas["input.tap"].params.safeParse({ x: 1.1, y: 0.5 }).success).toBe(false);
+  });
+
+  test("accepts bounded rectangular annotations", () => {
+    expect(
+      annotationGeometrySchema.safeParse({
+        kind: "rect",
+        x: 0.2,
+        y: 0.3,
+        width: 0.5,
+        height: 0.4,
+      }).success,
+    ).toBe(true);
+    expect(
+      annotationGeometrySchema.safeParse({
+        kind: "rect",
+        x: 0.8,
+        y: 0.3,
+        width: 0.4,
+        height: 0.4,
+      }).success,
+    ).toBe(false);
   });
 
   test("keeps relay secrets out of model-visible session state", () => {

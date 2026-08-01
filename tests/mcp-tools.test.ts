@@ -135,7 +135,7 @@ describe("MCP app tools", () => {
         name: "add_annotation",
         arguments: {
           frameId: "42",
-          geometry: { kind: "point", x: 0.25, y: 0.75 },
+          geometry: { kind: "rect", x: 0.2, y: 0.3, width: 0.4, height: 0.25 },
           note: "Works",
         },
       });
@@ -145,7 +145,11 @@ describe("MCP app tools", () => {
         frameId: string;
       };
       annotationId = annotation.id;
-      expect(annotation).toMatchObject({ note: "Works", frameId: "42" });
+      expect(annotation).toMatchObject({
+        note: "Works",
+        frameId: "42",
+        geometry: { kind: "rect", x: 0.2, y: 0.3, width: 0.4, height: 0.25 },
+      });
 
       const stateAfterAdd = await client.callTool({
         name: "get_simview_state",

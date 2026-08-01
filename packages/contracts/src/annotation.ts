@@ -1,11 +1,38 @@
 import { z } from "zod";
 import { normalizedRectSchema } from "./accessibility";
 
-export const annotationGeometrySchema = z.object({
-  kind: z.literal("point"),
-  x: z.number().min(0).max(1),
-  y: z.number().min(0).max(1),
-});
+export const annotationGeometrySchema = z
+  .discriminatedUnion("kind", [
+    z.object({
+      kind: z.literal("point"),
+      x: z.number().min(0).max(1),
+      y: z.number().min(0).max(1),
+    }),
+    z.object({
+      kind: z.literal("rect"),
+      x: z.number().min(0).max(1),
+      y: z.number().min(0).max(1),
+      width: z.number().positive().max(1),
+      height: z.number().positive().max(1),
+    }),
+  ])
+  .superRefine((geometry, context) => {
+    if (geometry.kind !== "rect") return;
+    if (geometry.x + geometry.width > 1) {
+      context.addIssue({
+        code: "custom",
+        message: "Rectangle extends beyond the right edge",
+        path: ["width"],
+      });
+    }
+    if (geometry.y + geometry.height > 1) {
+      context.addIssue({
+        code: "custom",
+        message: "Rectangle extends beyond the bottom edge",
+        path: ["height"],
+      });
+    }
+  });
 
 export const annotationContextSchema = z.object({
   capturedAt: z.string(),
