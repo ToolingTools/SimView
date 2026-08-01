@@ -1,6 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
-import { createNpmPackageManifest, repositoryUrl } from "../scripts/release-config";
+import {
+  assertCodexPluginArchiveSize,
+  createNpmPackageManifest,
+  maxCodexPluginArchiveBytes,
+  repositoryUrl,
+} from "../scripts/release-config";
 
 const root = join(import.meta.dir, "..");
 
@@ -47,5 +52,14 @@ describe("release distribution", () => {
       command: "$" + "{__dirname}/bin/simview",
       args: ["mcp"],
     });
+  });
+
+  test("rejects npm archives larger than the Codex plugin limit", () => {
+    expect(() =>
+      assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes, "simview.tgz"),
+    ).not.toThrow();
+    expect(() =>
+      assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes + 1, "simview.tgz"),
+    ).toThrow("exceeding the Codex plugin archive limit");
   });
 });

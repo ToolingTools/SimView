@@ -25,6 +25,13 @@ The generated npm package and plugin contain:
 - `bin/libSimViewProbe.dylib`: the universal Simulator probe.
 - the MCP App, portable skill, plugin manifests, assets, license, and notices.
 
+Release builds minify the embedded Bun bundle and strip local Mach-O symbols
+before applying either an ad-hoc development signature or the release Developer
+ID signature. npm and plugin archives include only the referenced 512-pixel icon;
+the larger source/MCPB artwork is not duplicated into those archives. npm
+packaging fails if the resulting tarball exceeds Codex's 50 MiB plugin archive
+limit.
+
 The packaged client resolves the bundled native core before any local build
 output. Shared backend instance IDs include that packaged binary's SHA-256, the
 SimView version, protocol version, and Simulator UDID. Updating a plugin or npm
@@ -42,8 +49,8 @@ The internal Bun workspaces are private and are not published separately.
 
 ## GitHub release setup
 
-Tags must match the root package version exactly: version `0.1.8` is released
-from tag `v0.1.8`.
+Tags must match the root package version exactly: version `0.1.9` is released
+from tag `v0.1.9`.
 
 Configure these GitHub Actions secrets:
 
@@ -116,7 +123,7 @@ The Codex catalog entry can reference the npm package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.8",
+    "version": "^0.1.9",
     "registry": "https://registry.npmjs.org"
   },
   "policy": {
@@ -135,7 +142,7 @@ The Claude Code catalog can reference the same package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.8",
+    "version": "^0.1.9",
     "registry": "https://registry.npmjs.org"
   },
   "category": "Developer Tools"

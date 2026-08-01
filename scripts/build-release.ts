@@ -26,16 +26,30 @@ const probeBinary = join(root, "native/SimViewProbe/build/libSimViewProbe.dylib"
 const cliBinary = join(root, "packages/cli/dist/simview");
 const packagedCore = join(root, "packages/core/bin/simview-core");
 const packagedProbe = join(root, "packages/core/bin/libSimViewProbe.dylib");
+const releaseBinaries = [
+  { path: cliBinary, identifier: "com.simview.cli" },
+  { path: packagedCore, identifier: "com.simview.core" },
+  { path: packagedProbe, identifier: "com.simview.probe" },
+];
 await mkdir(join(root, "packages/core/bin"), { recursive: true });
 await cp(nativeBinary, packagedCore);
 await cp(probeBinary, packagedProbe);
+
+for (const binary of releaseBinaries) {
+  await $`/usr/bin/strip -x ${binary.path}`;
+}
 
 if (process.env.SIMVIEW_SIGNING_IDENTITY) {
   await $`bun run release:sign`;
 } else if (process.env.SIMVIEW_REQUIRE_SIGNING === "1") {
   throw new Error("SIMVIEW_REQUIRE_SIGNING=1 but SIMVIEW_SIGNING_IDENTITY was not provided");
 } else {
-  console.warn("Building unsigned release artifacts; set SIMVIEW_SIGNING_IDENTITY to sign them.");
+  for (const binary of releaseBinaries) {
+    await $`/usr/bin/codesign --force --sign - --identifier ${binary.identifier} --options runtime ${binary.path}`;
+  }
+  console.warn(
+    "Building ad-hoc signed release artifacts; set SIMVIEW_SIGNING_IDENTITY to Developer ID sign them.",
+  );
 }
 
 await $`bun run package:plugin`;
