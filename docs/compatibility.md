@@ -27,7 +27,6 @@ record a passing real-device-set run here.
 | 26.5 (17F42) | 26.5.2 | arm64 | iOS 26.1, iPhone 17 Pro Max | direct PNG passes | Indigo probes and authenticated tap pass | AX 25-node tree and injected UIKit probe pass |
 | previous stable minor | — | arm64 | — | — | — | not tested |
 | second previous minor | — | arm64 | — | — | — | not tested |
-| retained Intel line | — | x86_64 | — | — | — | not tested |
 
 ## Required release smoke test
 
@@ -57,7 +56,7 @@ For every supported row:
 ScreenCaptureKit is reserved for an explicit compatibility backend. It is not
 the default and requires Screen Recording permission.
 
-The passing row used development ad-hoc signatures for the core and universal
+The passing row used development ad-hoc signatures for the arm64 core and
 probe dylib. Developer ID signing,
 notarization, the 60 fps soak, typing matrix, rotation, and multi-client checks
 remain release gates rather than claims made from this local spike.

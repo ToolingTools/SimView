@@ -50,7 +50,7 @@ bun run doctor                 # Report Xcode, Simulator, capture, and input cap
 
 `bun run check` includes the toolchain and version gates, formatting, TypeScript
 type-checking, Bun coverage tests, and XCTest. For a distributable build, run
-`bun run release:build`; it rebuilds the universal CLI/core/probe and produces
+`bun run release:build`; it rebuilds the arm64 CLI/core/probe and produces
 the release manifest, checksums, packages, and CycloneDX SBOM. Run
 `bun run smoke:npm` against the generated tarball before publishing. Packaging
 must happen after a fresh release build so compiled MCP/CLI binaries and the

@@ -16,7 +16,7 @@ the high-throughput capture/input path.
   shared per-Simulator daemon registry.
 - `packages/core` resolves the packaged `simview-core` binary before local
   SwiftPM build output. Release scripts verify that the packaged binary is
-  fresh and universal.
+  fresh and arm64-native.
 - `packages/mcp` owns MCP tool registration and output schemas, one MCP stdio
   session, per-review resource metadata, in-memory annotations, preview
   buffering, and the authenticated loopback relay. It does not persist
@@ -167,7 +167,7 @@ documentation.
 `@simview/core` resolves `packages/core/bin/simview-core` before local SwiftPM
 release output. After native or protocol changes, run `bun run release:build`
 before packaging or plugin testing so the compiled artifacts cannot be stale.
-The release build produces universal arm64/x86_64 binaries, permission-safe
+The release build produces arm64 binaries, permission-safe
 archives, SHA-256 checksums, `release-manifest.json`, and a CycloneDX SBOM.
 Binary publication remains blocked until the licensing, Developer ID signing,
 notarization, and real-Simulator gates in `docs/binary-redistribution.md` and

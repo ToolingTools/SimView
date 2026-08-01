@@ -18,10 +18,13 @@ await mkdir(artifacts, { recursive: true });
 await $`bun run check`;
 await $`bun run build:packages`;
 await $`bun run build:probe`;
-await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64 --arch x86_64`;
+await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64`;
 await $`bun run --cwd ${join(root, "packages/cli")} compile`;
 
-const nativeBinary = join(root, "native/SimViewCore/.build/apple/Products/Release/simview-core");
+const nativeBinary = join(
+  root,
+  "native/SimViewCore/.build/arm64-apple-macosx/release/simview-core",
+);
 const probeBinary = join(root, "native/SimViewProbe/build/libSimViewProbe.dylib");
 const cliBinary = join(root, "packages/cli/dist/simview");
 const packagedCore = join(root, "packages/core/bin/simview-core");
@@ -95,7 +98,7 @@ await writeFile(
       name,
       version,
       sourceRevision: process.env.GITHUB_SHA ?? null,
-      architectures: ["arm64", "x86_64"],
+      architectures: ["arm64"],
       signed: Boolean(process.env.SIMVIEW_SIGNING_IDENTITY),
       files: releaseFiles,
     },

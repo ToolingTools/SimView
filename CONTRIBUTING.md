@@ -39,7 +39,7 @@ bun run release:build
 bun run smoke:npm
 ```
 
-The release build refreshes the packaged universal CLI, native core, and probe,
+The release build refreshes the packaged arm64 CLI, native core, and probe,
 then writes checksums, a release manifest, packages, and a CycloneDX SBOM. Do
 not package an npm, MCPB, or Codex artifact from stale `dist` or native output.
 

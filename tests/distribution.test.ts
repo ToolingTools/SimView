@@ -24,7 +24,7 @@ describe("release distribution", () => {
     expect(manifest.name).toBe("@toolingtools/simview");
     expect(manifest.version).toBe("1.2.3");
     expect(manifest.os).toEqual(["darwin"]);
-    expect(manifest.cpu).toEqual(["arm64", "x64"]);
+    expect(manifest.cpu).toEqual(["arm64"]);
     expect(manifest.bin).toEqual({ simview: "./bin/simview" });
     expect(manifest.dependencies).toBeUndefined();
     expect(repositoryUrl).toBe("https://github.com/ToolingTools/SimView");

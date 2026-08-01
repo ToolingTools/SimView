@@ -17,8 +17,6 @@ const command = [
   "-dynamiclib",
   "-arch",
   "arm64",
-  "-arch",
-  "x86_64",
   "-isysroot",
   sdk,
   `-mios-simulator-version-min=${deployment}`,

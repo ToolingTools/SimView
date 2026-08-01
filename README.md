@@ -19,7 +19,7 @@ consume its versioned binary protocol.
 - Full Xcode with an installed iOS Simulator runtime
 - Bun 1.3.14 for source development only
 
-Release archives contain compiled Bun clients and a universal Swift executable.
+Release archives contain compiled arm64 Bun clients and an arm64 Swift executable.
 End users do not need Bun, Node, Homebrew, AXe, IDB, a simulator helper app, or
 Screen Recording permission.
 
@@ -33,7 +33,7 @@ bunx simview preview
 ```
 
 `npx` requires Node and `bunx` requires Bun only as the package runner. The
-SimView command they launch is a standalone universal executable. GitHub
+SimView command they launch is a standalone arm64 executable. GitHub
 release archives and agent plugins do not require either runtime.
 
 ### Codex plugin
@@ -87,7 +87,7 @@ bun run release:build
 bun run smoke:npm
 ```
 
-`release:build` refreshes the universal CLI, native core, and probe before
+`release:build` refreshes the arm64 CLI, native core, and probe before
 writing checksums, `release-manifest.json`, and a CycloneDX SBOM. Do not test a
 packaged plugin or npm tarball against stale `dist` or native output.
 
@@ -233,8 +233,8 @@ The ownership and trust boundaries are described in
 
 ## Release safety
 
-`scripts/build-release.ts` creates a universal standalone command, the
-universal native core and probe, plugin/MCPB/npm packages, checksums, and a
+`scripts/build-release.ts` creates an arm64 standalone command, the arm64
+native core and probe, plugin/MCPB/npm packages, checksums, and a
 CycloneDX-style SBOM. Generated executables remain ignored by Git. When
 `SIMVIEW_SIGNING_IDENTITY` is present, it signs every distributed Mach-O before
 packaging; release CI requires that identity and notarizes the signed plugin.

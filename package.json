@@ -1,6 +1,6 @@
 {
   "name": "@toolingtools/simview",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "private": true,
   "license": "Apache-2.0",
   "packageManager": "bun@1.3.14",
@@ -11,7 +11,7 @@
     "build": "bun run build:packages && bun run build:native",
     "build:app": "bun run --cwd packages/app build",
     "build:packages": "bun run --filter '@simview/*' build",
-    "build:native": "swift build --package-path native/SimViewCore -c release && mkdir -p packages/core/bin && cp native/SimViewCore/.build/release/simview-core packages/core/bin/simview-core",
+    "build:native": "swift build --package-path native/SimViewCore -c release --arch arm64 && mkdir -p packages/core/bin && cp native/SimViewCore/.build/arm64-apple-macosx/release/simview-core packages/core/bin/simview-core",
     "build:probe": "bun scripts/build-probe.ts",
     "build:test-fixtures": "bun run build:app && bun run build:native && bun run build:probe && cp native/SimViewProbe/build/libSimViewProbe.dylib packages/core/bin/libSimViewProbe.dylib && bun run --cwd packages/cli compile",
     "check": "bun run check:toolchain && bun run check:version && bun run check:format && bun run typecheck && bun run build:test-fixtures && bun test --coverage && swift test --package-path native/SimViewCore",

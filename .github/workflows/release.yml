@@ -84,13 +84,13 @@ jobs:
           SIMVIEW_REQUIRE_SIGNING: "1"
           SIMVIEW_SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
         run: bun run release:build
-      - name: Verify universal Developer ID binaries
+      - name: Verify arm64 Developer ID binaries
         env:
           SIMVIEW_SIGNING_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION }}
         run: |
           for BINARY in packages/cli/dist/simview packages/core/bin/simview-core packages/core/bin/libSimViewProbe.dylib
           do
-            lipo "${BINARY}" -verify_arch arm64 x86_64
+            test "$(lipo -archs "${BINARY}")" = "arm64"
             codesign --verify --strict --verbose=2 "${BINARY}"
             codesign -dv --verbose=4 "${BINARY}" 2>&1 | grep -F "Authority=${SIMVIEW_SIGNING_IDENTITY}"
           done

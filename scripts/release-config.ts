@@ -32,7 +32,7 @@ export function createNpmPackageManifest(
     },
     keywords: ["ios", "simulator", "cli", "mcp", "codex", "claude-code"],
     os: ["darwin"],
-    cpu: ["arm64", "x64"],
+    cpu: ["arm64"],
     bin: {
       simview: "./bin/simview",
     },

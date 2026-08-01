@@ -20,9 +20,9 @@ acknowledged the binary licensing, signing, and compatibility gates.
 
 The generated npm package and plugin contain:
 
-- `bin/simview`: a universal Bun-compiled CLI with an `mcp` subcommand.
-- `bin/simview-core`: the universal Swift native boundary.
-- `bin/libSimViewProbe.dylib`: the universal Simulator probe.
+- `bin/simview`: an arm64 Bun-compiled CLI with an `mcp` subcommand.
+- `bin/simview-core`: the arm64 Swift native boundary.
+- `bin/libSimViewProbe.dylib`: the arm64 Simulator probe.
 - the MCP App, portable skill, plugin manifests, assets, license, and notices.
 
 Release builds minify the embedded Bun bundle and strip local Mach-O symbols
@@ -49,8 +49,8 @@ The internal Bun workspaces are private and are not published separately.
 
 ## GitHub release setup
 
-Tags must match the root package version exactly: version `0.1.9` is released
-from tag `v0.1.9`.
+Tags must match the root package version exactly: version `0.1.10` is released
+from tag `v0.1.10`.
 
 Configure these GitHub Actions secrets:
 
@@ -64,7 +64,7 @@ Configure these GitHub Actions secrets:
 - `APPLE_NOTARY_ISSUER_ID`: App Store Connect API issuer ID.
 
 The tag-only release workflow imports the certificate into an ephemeral keychain,
-requires signing, verifies both architectures and the Developer ID authority,
+requires signing, verifies the arm64 architecture and Developer ID authority,
 submits `simview-plugin.zip` with `notarytool`, smoke tests the npm tarball
 through both `npx` and `bunx`, uploads the workflow artifact, publishes npm,
 creates a CycloneDX dependency SBOM and release manifest, attests the artifacts,
@@ -123,7 +123,7 @@ The Codex catalog entry can reference the npm package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.9",
+    "version": "^0.1.10",
     "registry": "https://registry.npmjs.org"
   },
   "policy": {
@@ -142,7 +142,7 @@ The Claude Code catalog can reference the same package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.9",
+    "version": "^0.1.10",
     "registry": "https://registry.npmjs.org"
   },
   "category": "Developer Tools"

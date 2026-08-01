@@ -2,7 +2,7 @@ import { accessSync, constants } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-export type SupportedArchitecture = "arm64" | "x64";
+export type SupportedArchitecture = "arm64";
 
 function executable(path: string): boolean {
   try {
@@ -14,7 +14,10 @@ function executable(path: string): boolean {
 }
 
 export function resolveBinary(options: { architecture?: SupportedArchitecture } = {}): string {
-  const architecture = options.architecture ?? (process.arch === "arm64" ? "arm64" : "x64");
+  const architecture = options.architecture ?? process.arch;
+  if (architecture !== "arm64") {
+    throw new Error(`SimView supports Apple silicon only; received ${architecture}`);
+  }
   const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
   const executableRoot = dirname(process.execPath);
   const candidates = [
