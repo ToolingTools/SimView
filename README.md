@@ -46,7 +46,8 @@ codex plugin marketplace add toolingtools/plugins
 codex plugin add simview@toolingtools
 ```
 
-The marketplace is catalog-only: Codex downloads the versioned `simview` npm
+The marketplace is catalog-only: Codex downloads the versioned
+`@toolingtools/simview` npm
 package, which includes the plugin manifest, MCP server, skills, and assets.
 
 ### MCP server
