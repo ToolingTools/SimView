@@ -335,7 +335,7 @@ export function createServer(session = new SimViewSession()): McpServer {
                 resourceDomains: [],
               },
             },
-            "openai/widgetMinFrameHeight": 0,
+            "openai/widgetMinFrameHeight": 600,
             "openai/widgetPrefersBorder": false,
           },
         },

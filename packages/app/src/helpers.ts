@@ -1,3 +1,4 @@
+import type { McpUiHostContext } from "@modelcontextprotocol/ext-apps";
 import {
   type AccessibilityNode,
   type AccessibilitySnapshot,
@@ -25,6 +26,8 @@ export type AnnotationMessageItem = {
   context: readonly string[];
   screenshotPath: string;
 };
+
+export const PREFERRED_INLINE_HEIGHT = 600;
 
 export class PreviewBridgeGate {
   #priorityRequests = 0;
@@ -280,12 +283,7 @@ export function parseSessionState(value: unknown): SessionState | undefined {
 
 export function claimFullscreenRequest(
   gate: { claimed: boolean },
-  context:
-    | {
-        displayMode?: string | undefined;
-        availableDisplayModes?: readonly string[] | undefined;
-      }
-    | undefined,
+  context: McpUiHostContext | undefined,
 ): boolean {
   if (gate.claimed) return false;
   if (context?.displayMode === "fullscreen") {
@@ -295,6 +293,16 @@ export function claimFullscreenRequest(
   if (!context?.availableDisplayModes?.includes("fullscreen")) return false;
   gate.claimed = true;
   return true;
+}
+
+export function preferredInlineHeight(context: McpUiHostContext | undefined): number | undefined {
+  if (context?.displayMode !== undefined && context.displayMode !== "inline") return undefined;
+  const dimensions = context?.containerDimensions;
+  if (dimensions && "height" in dimensions) return undefined;
+  const maximumHeight = dimensions && "maxHeight" in dimensions ? dimensions.maxHeight : undefined;
+  return typeof maximumHeight === "number" && maximumHeight > 0
+    ? Math.min(PREFERRED_INLINE_HEIGHT, maximumHeight)
+    : PREFERRED_INLINE_HEIGHT;
 }
 
 export function requireAnnotation(value: unknown): Annotation {

@@ -1,6 +1,6 @@
 {
   "name": "simview",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "description": "Control and review a local iOS Simulator.",
   "author": {
     "name": "SimView contributors",

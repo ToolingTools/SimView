@@ -25,6 +25,7 @@ import {
   inspectorTreeRows,
   PreviewBridgeGate,
   parseSessionState,
+  preferredInlineHeight,
   requireAnnotation,
   streamMessage,
   visibleTree,
@@ -317,6 +318,30 @@ describe("app helpers", () => {
         availableDisplayModes: ["inline", "fullscreen"],
       }),
     ).toBe(false);
+  });
+
+  test("requests a useful intrinsic height only for flexible inline hosts", () => {
+    expect(preferredInlineHeight(undefined)).toBe(600);
+    expect(
+      preferredInlineHeight({
+        displayMode: "inline",
+        containerDimensions: { maxWidth: 900, maxHeight: 480 },
+      }),
+    ).toBe(480);
+    expect(
+      preferredInlineHeight({
+        displayMode: "inline",
+        containerDimensions: { maxWidth: 900, maxHeight: 800 },
+      }),
+    ).toBe(600);
+    expect(
+      preferredInlineHeight({
+        displayMode: "inline",
+        containerDimensions: { width: 900, height: 420 },
+      }),
+    ).toBeUndefined();
+    expect(preferredInlineHeight({ displayMode: "fullscreen" })).toBeUndefined();
+    expect(preferredInlineHeight({ displayMode: "pip" })).toBeUndefined();
   });
 
   test("formats runtime names and frame messages", () => {

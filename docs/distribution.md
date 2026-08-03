@@ -49,8 +49,8 @@ The internal Bun workspaces are private and are not published separately.
 
 ## GitHub release setup
 
-Tags must match the root package version exactly: version `0.1.11` is released
-from tag `v0.1.11`.
+Tags must match the root package version exactly: version `0.1.12` is released
+from tag `v0.1.12`.
 
 Configure these GitHub Actions secrets:
 
@@ -123,7 +123,7 @@ The Codex catalog entry can reference the npm package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.11",
+    "version": "^0.1.12",
     "registry": "https://registry.npmjs.org"
   },
   "policy": {
@@ -142,7 +142,7 @@ The Claude Code catalog can reference the same package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.11",
+    "version": "^0.1.12",
     "registry": "https://registry.npmjs.org"
   },
   "category": "Developer Tools"

@@ -100,6 +100,11 @@ describe("MCP app tools", () => {
         connectDomains: [],
         resourceDomains: [],
       });
+      expect(
+        (resource.contents[0]?._meta as { "openai/widgetMinFrameHeight"?: number })?.[
+          "openai/widgetMinFrameHeight"
+        ],
+      ).toBe(600);
 
       for (const name of appCalledTools) {
         const meta = byName.get(name)?._meta as

@@ -1,4 +1,4 @@
-import { App } from "@modelcontextprotocol/ext-apps";
+import { App, type McpUiHostContext } from "@modelcontextprotocol/ext-apps";
 import {
   type AnnotationContext,
   type AnnotationGeometry,
@@ -43,6 +43,7 @@ import {
   inspectorTreeRows,
   PreviewBridgeGate,
   parseSessionState,
+  preferredInlineHeight,
   requireAnnotation,
   streamMessage,
   visibleTree,
@@ -124,6 +125,7 @@ function SimView() {
   const [frozenFrameId, setFrozenFrameId] = useState<string>();
   const [editor, setEditor] = useState<Editor>();
   const [toast, setToast] = useState("");
+  const [hostContext, setHostContext] = useState<McpUiHostContext>();
   const [accessibility, setAccessibility] = useState<AccessibilitySnapshot>();
   const [screenContext, setScreenContext] = useState<ScreenContext>();
   const [elementFallback, setElementFallback] = useState<ElementFallbackReason>();
@@ -202,6 +204,9 @@ function SimView() {
       return;
     }
     setEmbedded(true);
+    bridge.onhostcontextchanged = (update) => {
+      setHostContext((current) => ({ ...(current ?? {}), ...update }));
+    };
     bridge.ontoolresult = (result) => {
       const nextState = parseSessionState(result.structuredContent);
       if (nextState) {
@@ -220,6 +225,7 @@ function SimView() {
       .connect()
       .then(() => {
         bridgeConnectedRef.current = true;
+        setHostContext(bridge.getHostContext());
         if (connectedForFullscreenRef.current) void enterFullscreen();
       })
       .catch((error) => {
@@ -235,6 +241,11 @@ function SimView() {
     if (!claimFullscreenRequest(fullscreenRequestGateRef.current, context)) return;
     try {
       const result = await bridge.requestDisplayMode({ mode: "fullscreen" });
+      setHostContext((current) => ({
+        ...(current ?? {}),
+        ...(context ?? {}),
+        displayMode: result.mode,
+      }));
       if (result.mode !== "fullscreen") show(`Host kept SimView in ${result.mode} mode`);
     } catch (error) {
       show(`Unable to enter fullscreen: ${error instanceof Error ? error.message : String(error)}`);
@@ -1505,11 +1516,15 @@ function SimView() {
     activeScene?.windows?.find((window) => !window.hidden);
   const visibleController = keyWindow?.visibleControllerPath?.at(-1);
   const displayedScreenContext = frozenScreenContext ?? screenContext;
+  const inlineHeight = embedded ? preferredInlineHeight(hostContext) : undefined;
 
   return (
     <main
-      class={`shell single ${elementsOpen ? "sidebar-open" : "sidebar-closed"}`}
-      style={{ "--sidebar-width": `${sidebarWidth}px` }}
+      class={`shell single ${elementsOpen ? "sidebar-open" : "sidebar-closed"} ${inlineHeight ? "inline-flexible" : ""}`}
+      style={{
+        "--sidebar-width": `${sidebarWidth}px`,
+        ...(inlineHeight ? { "--app-inline-height": `${inlineHeight}px` } : {}),
+      }}
     >
       <header class="topbar">
         <div class="left-actions">
