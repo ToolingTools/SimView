@@ -49,8 +49,8 @@ The internal Bun workspaces are private and are not published separately.
 
 ## GitHub release setup
 
-Tags must match the root package version exactly: version `0.1.12` is released
-from tag `v0.1.12`.
+Tags must match the root package version exactly: version `0.1.13` is released
+from tag `v0.1.13`.
 
 Configure these GitHub Actions secrets:
 
@@ -103,6 +103,12 @@ The generated package has no lifecycle scripts and does not download a binary
 at install time. Codex can therefore install it from an npm marketplace source
 without relying on lifecycle execution.
 
+The root `.mcp.json` uses `./bin/simview` with `cwd: "."` for Codex's packaged
+plugin resolver. Claude Code resolves relative MCP commands from the directory
+where Claude was launched, so its plugin manifest declares the same server
+inline with `${CLAUDE_PLUGIN_ROOT}/bin/simview`. Keep both host-specific launch
+contracts covered by `tests/distribution.test.ts`.
+
 ## Marketplace repository
 
 Keep the shared marketplace repository catalog-only. It should not contain
@@ -123,7 +129,7 @@ The Codex catalog entry can reference the npm package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.12",
+    "version": "^0.1.13",
     "registry": "https://registry.npmjs.org"
   },
   "policy": {
@@ -142,7 +148,7 @@ The Claude Code catalog can reference the same package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.12",
+    "version": "^0.1.13",
     "registry": "https://registry.npmjs.org"
   },
   "category": "Developer Tools"

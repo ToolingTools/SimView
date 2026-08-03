@@ -1,6 +1,6 @@
 {
   "name": "simview",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Control and review a local iOS Simulator.",
   "author": {
     "name": "SimView contributors",
@@ -9,5 +9,11 @@
   "homepage": "https://github.com/toolingtools/SimView",
   "repository": "https://github.com/toolingtools/SimView",
   "license": "Apache-2.0",
-  "keywords": ["ios", "simulator", "mcp"]
+  "keywords": ["ios", "simulator", "mcp"],
+  "mcpServers": {
+    "simview": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/simview",
+      "args": ["mcp"]
+    }
+  }
 }

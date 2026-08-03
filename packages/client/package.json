@@ -1,6 +1,6 @@
 {
   "name": "@simview/client",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",

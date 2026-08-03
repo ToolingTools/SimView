@@ -28,8 +28,8 @@ Screen Recording permission.
 Run SimView from npm without a global install:
 
 ```sh
-npx simview doctor --json
-bunx simview preview
+npx --yes --package @toolingtools/simview -- simview doctor --json
+bunx --package @toolingtools/simview simview preview
 ```
 
 `npx` requires Node and `bunx` requires Bun only as the package runner. The
@@ -60,15 +60,19 @@ packaged command:
   "mcpServers": {
     "simview": {
       "command": "npx",
-      "args": ["-y", "simview", "mcp"]
+      "args": ["--yes", "--package", "@toolingtools/simview", "--", "simview", "mcp"]
     }
   }
 }
 ```
 
-For a local npm installation, replace `npx` and its arguments with the
-installed `simview` executable and `mcp` argument. Run `simview mcp` directly
-while developing from source.
+The equivalent Bun runner command is
+`bunx --package @toolingtools/simview simview mcp`. Running only
+`bunx @toolingtools/simview` starts the CLI without a subcommand, prints its
+usage, and exits; it does not start the MCP server. For a local npm
+installation, replace `npx` and its arguments with the installed `simview`
+executable and `mcp` argument. Run `simview mcp` directly while developing from
+source.
 
 ## Build from source
 

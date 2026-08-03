@@ -35,6 +35,12 @@ describe("release distribution", () => {
     const mcp = (await Bun.file(join(root, ".mcp.json")).json()) as {
       mcpServers: { simview: { command: string; args: string[]; cwd: string } };
     };
+    const claudePlugin = (await Bun.file(join(root, ".claude-plugin/plugin.json")).json()) as {
+      mcpServers: { simview: { command: string; args: string[] } };
+    };
+    const codexPlugin = (await Bun.file(join(root, ".codex-plugin/plugin.json")).json()) as {
+      mcpServers: string;
+    };
     const mcpb = (await Bun.file(join(root, "manifest.json")).json()) as {
       server: {
         entry_point: string;
@@ -46,6 +52,11 @@ describe("release distribution", () => {
       command: "./bin/simview",
       args: ["mcp"],
       cwd: ".",
+    });
+    expect(codexPlugin.mcpServers).toBe("./.mcp.json");
+    expect(claudePlugin.mcpServers.simview).toEqual({
+      command: "$" + "{CLAUDE_PLUGIN_ROOT}/bin/simview",
+      args: ["mcp"],
     });
     expect(mcpb.server.entry_point).toBe("bin/simview");
     expect(mcpb.server.mcp_config).toEqual({
