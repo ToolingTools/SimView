@@ -1,25 +1,37 @@
 # SimView
 
-SimView is a local-first iOS Simulator framebuffer and input transport for
-agents, MCP hosts, and humans. It captures the simulator's `IOSurface` directly,
-encodes H.264 with VideoToolbox, and injects physical input through
-SimulatorKit's Indigo HID functions.
+SimView is a local-first iOS Simulator and Android device preview and input
+transport for agents, MCP hosts, and humans. On iOS it captures the Simulator's
+`IOSurface` directly, encodes H.264 with VideoToolbox, and injects physical input
+through SimulatorKit's Indigo HID functions. On Android it discovers emulators,
+authorized USB devices, and already-paired Wi-Fi devices with the installed
+official ADB, using a transient SimView-owned agent for streaming and input.
 
 The native boundary is one executable, `simview-core`. The TypeScript client,
 CLI, MCP server, MCP App, Codex plugin, Claude Code plugin, and MCPB package all
 consume its versioned binary protocol.
 
-> SimView uses private SimulatorKit interfaces and is distributed as a macOS
-> developer tool. It is not an App Store product. Xcode compatibility is checked
-> at runtime and must be verified on real simulators before each release.
+> SimView uses private SimulatorKit interfaces and Android system APIs available
+> to the ADB shell user. It is distributed as a macOS developer tool, not an App
+> Store or Play Store product. Supported Xcode and Android runtime rows must be
+> verified on real targets before each release.
 
 ## Requirements
 
 - macOS 14 or later
-- Full Xcode with an installed iOS Simulator runtime
+- Full Xcode with an installed iOS Simulator runtime for iOS support
+- Android SDK Platform Tools (`adb`) for Android support
 - Bun 1.3.14 for source development only
+- JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
 
-Release archives contain compiled arm64 Bun clients and an arm64 Swift executable.
+Android support targets API 26 or later. SimView uses the user's existing ADB
+server and authorization keys; it does not pair devices, enable legacy
+`adb tcpip 5555`, or install a persistent helper app. ADB is resolved from
+`SIMVIEW_ADB_PATH`, `ANDROID_SDK_ROOT`, `ANDROID_HOME`, `PATH`, then the standard
+macOS Android SDK location. Missing ADB does not prevent iOS use.
+
+Release archives contain compiled arm64 Bun clients, an arm64 Swift executable,
+and the versioned Android agent DEX/JAR.
 End users do not need Bun, Node, Homebrew, AXe, IDB, a simulator helper app, or
 Screen Recording permission.
 
@@ -91,6 +103,12 @@ bun run release:build
 bun run smoke:npm
 ```
 
+With a ready Android emulator, `bun run smoke:android` verifies the transient
+agent, H.264, exact PNG capture, UIAutomator, and foreground context. Set
+`SIMVIEW_ANDROID_INPUT_SMOKE=1` to include state-changing input and keyframe
+recovery, and `SIMVIEW_ANDROID_ROTATION_SMOKE=1` to rotate and restore the
+target. Physical targets additionally require `SIMVIEW_ANDROID_ALLOW_PHYSICAL=1`.
+
 `release:build` refreshes the arm64 CLI, native core, and probe before
 writing checksums, `release-manifest.json`, and a CycloneDX SBOM. Do not test a
 packaged plugin or npm tarball against stale `dist` or native output.
@@ -105,38 +123,52 @@ swift test --disable-sandbox --package-path native/SimViewCore
 
 ```sh
 bun packages/cli/src/index.ts devices --json
+bun packages/cli/src/index.ts devices --booted --json
 bun packages/cli/src/index.ts doctor --json
 bun packages/cli/src/index.ts preview
-bun packages/cli/src/index.ts screenshot --output ./simulator.png
+bun packages/cli/src/index.ts screenshot --device-id android:emulator-5554 --output ./device.png
 bun packages/cli/src/index.ts tree --json
 bun packages/cli/src/index.ts ax-tree --json
 bun packages/cli/src/index.ts tap --x 0.5 --y 0.75
 bun packages/cli/src/index.ts swipe --from 0.5,0.8 --to 0.5,0.2 --duration-ms 350
-bun packages/cli/src/index.ts type "Hello 👋"
+bun packages/cli/src/index.ts type "Hello"
 bun packages/cli/src/index.ts button home
 bun packages/cli/src/index.ts daemon status --json
-bun packages/cli/src/index.ts daemon stop --udid <uuid>
+bun packages/cli/src/index.ts daemon stop --device-id <id>
 bun packages/cli/src/index.ts daemon prune
 ```
 
 `tree` and `observe` use the same unified inspection path as the preview: they
 return a matching development-mode React Native Fiber tree and screen/route
-context when Metro is available, with a diagnostic AX fallback otherwise.
-`ax-tree` explicitly bypasses Metro and reads only the native accessibility
-hierarchy.
+context when Metro is available, with a diagnostic native accessibility
+fallback otherwise. `ax-tree` explicitly bypasses Metro and reads the iOS AX or
+Android UIAutomator hierarchy.
 
 `preview` binds an authenticated relay to a random port on `127.0.0.1`. The
 session token is random, endpoints reject unauthenticated requests, and the
 native core uses a mode-0700 temporary directory with a mode-0600 Unix socket.
-MCP sessions acquire one detached native backend per Simulator UDID, so several
-Codex/MCP tasks share the same capture and encoder process. Each task still has
+MCP sessions acquire one detached native backend per platform and native device
+identifier, so several Codex/MCP tasks share the same capture and encoder
+process. Each task still has
 its own stdio bridge, relay, review ID, and annotations. The backend stops
 capture when its last authenticated client leaves and exits after five idle
 minutes. `SimViewClient.start()` remains the explicit ephemeral/test path; set
 `SIMVIEW_BACKEND_MODE=ephemeral` to diagnose the registry in isolation.
-Use `simview daemon status`, `stop --udid <uuid>` (or `stop --all`), and
+Use `simview daemon status`, `stop --device-id <id>` (or `stop --all`), and
 `prune` to inspect or explicitly manage sanitized backend records. `prune`
 only removes records whose recorded process is confirmed dead.
+All device-scoped CLI commands accept `--device-id`; `--udid` remains an iOS
+compatibility alias.
+
+`devices --booted` returns only currently booted iOS Simulators and ready
+Android Emulators. The unfiltered command continues to include unavailable
+virtual devices and physical Android devices for diagnostics.
+
+`simview doctor --json` reports iOS framework/probe readiness and Android ADB
+path/version, agent compatibility, and discovered transport states. Unauthorized
+devices remain visible with an instruction to accept the ADB prompt; offline or
+still-booting targets remain visible but unavailable. No ADB key or agent token
+is included in diagnostics.
 
 ## MCP
 
@@ -149,6 +181,8 @@ bun packages/mcp/src/index.ts
 Tools:
 
 - `open_simview`
+- `connect_device`
+- `list_devices`
 - `connect_simulator`
 - `list_simulators`
 - `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`
@@ -167,19 +201,24 @@ priority gate pauses video polling only while an explicitly opened or refreshed
 Inspector (or the already-frozen Annotate mode) transfers element pages. SimView
 does not refresh the tree in the background while both surfaces are closed, so
 normal interaction leaves the serialized bridge dedicated to video and input.
-`connect_simulator` starts the simulator session without opening UI. Always call
-it first and proceed only if it succeeds. When an interactive preview is
-requested, follow it with `open_simview` using the same UDID; the preview then
-boots from the connected session and immediately requests fullscreen.
+`connect_device` starts the selected device session without opening UI. Always
+call it first and proceed only if it succeeds. When an interactive preview is
+requested, follow it with `open_simview` using the same device ID; the preview
+then boots from the connected session and immediately requests fullscreen.
 `open_simview` is the only model-callable tool linked to the MCP App resource;
 discovery and connection results remain text-only so preflight calls cannot
 mount or replace the preview. Once open, resource-scoped app-only tools handle
-device switching and preview interactions.
+device switching and preview interactions. `list_simulators` and
+`connect_simulator` remain compatibility aliases; the former includes iOS
+Simulators and Android Emulators but not physical Android devices.
 
 Agents navigate with a semantic visual loop: call `observe_screen`, choose an
 accessible identifier/role/name, call `tap_element`, wait for an observable
-state, and observe again. Input still uses physical SimulatorKit HID. Pixel
+state, and observe again. iOS input uses SimulatorKit HID; Android uses the
+SimView agent with ADB shell input as a reduced-capability fallback. Pixel
 coordinates remain the fallback for inaccessible or purely visual targets.
+Android currently declares ASCII text support; iOS supports the full Unicode
+typing path. Callers should inspect the selected device capability before typing.
 
 When a development-mode React Native target is available on a local Metro
 port, SimView uses `metro-bridge` to project its Fiber tree into visual elements
@@ -190,9 +229,10 @@ debugger connection; Metro MCP itself is not required. SimView never
 starts Metro, serializes component props or navigation params, or attaches an
 ambiguous target to a Simulator.
 Without a matching target it atomically falls back to the frontmost
-accessibility hierarchy read host-side through CoreSimulator. An optional
+accessibility hierarchy read through CoreSimulator or UIAutomator. An optional
 bundled UIKit probe can explicitly relaunch one third-party app to add concrete
-view class, hit-test, controller, window, and scene context.
+view class, hit-test, controller, window, and scene context on iOS only. Android
+screen context reports the foreground package and activity when available.
 
 Protocol requests and results are keyed by method and validated at runtime with
 the browser-safe Zod contracts in `packages/contracts`. Accessibility selectors
@@ -209,8 +249,8 @@ image-message support while keeping the images available to the local agent.
 The handoff tells the agent to implement the saved feedback in the current
 project without opening another SimView review. Temporary review images are
 removed when the session closes. Annotations are
-isolated by review and Simulator UDID, survive switching away and back during
-that live review, and are deleted when its MCP bridge closes. Entering
+isolated by review and platform-qualified device ID, survive switching away and
+back during that live review, and are deleted when its MCP bridge closes. Entering
 **Annotate** freezes the visible frame and returning to **Interact** resumes the
 live stream.
 
@@ -224,7 +264,9 @@ packages/cli      human and automation CLI
 packages/mcp      MCP tools, review state, authenticated relay
 packages/app      Preact MCP App and browser fallback
 native/SimViewCore
-                  SimulatorKit capture/input and local protocol server
+                  iOS/Android device backends and local protocol server
+native/SimViewAndroid
+                  transient Android capture/input agent
 skills/simview    portable Codex/Claude operational skill
 ```
 
@@ -245,8 +287,9 @@ packaging; release CI requires that identity and notarizes the signed plugin.
 
 Before publishing:
 
-1. Pass the real-simulator capture, tap, typing, resize, and orientation smoke
-   tests on every supported Xcode line.
+1. Pass the real-target capture, tap, typing, resize, orientation, accessibility,
+   disconnect, and reconnect smoke tests on every supported Xcode and Android
+   runtime row.
 2. Sign with Developer ID Application and submit the final archives for
    notarization.
 3. Validate the Codex plugin and MCPB archive on a clean macOS account.

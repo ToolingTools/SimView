@@ -37,7 +37,12 @@ describe("release SBOM", () => {
       expect(
         sbom.components
           .filter((component) =>
-            ["simview CLI", "simview-core", "libSimViewProbe.dylib"].includes(component.name),
+            [
+              "simview CLI",
+              "simview-core",
+              "libSimViewProbe.dylib",
+              "simview Android agent",
+            ].includes(component.name),
           )
           .every((component) => component.hashes?.[0]?.alg === "SHA-256"),
       ).toBe(true);

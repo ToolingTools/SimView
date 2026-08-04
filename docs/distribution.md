@@ -22,6 +22,8 @@ The generated npm package and plugin contain:
 
 - `bin/simview`: an arm64 Bun-compiled CLI with an `mcp` subcommand.
 - `bin/simview-core`: the arm64 Swift native boundary.
+- `bin/simview-android-agent.jar`: the versioned API-26+ DEX/JAR pushed
+  transiently to Android targets.
 - `bin/libSimViewProbe.dylib`: the arm64 Simulator probe.
 - the MCP App, portable skill, plugin manifests, assets, license, and notices.
 
@@ -34,7 +36,7 @@ limit.
 
 The packaged client resolves the bundled native core before any local build
 output. Shared backend instance IDs include that packaged binary's SHA-256, the
-SimView version, protocol version, and Simulator UDID. Updating a plugin or npm
+SimView version, protocol version, and platform-qualified device identity. Updating a plugin or npm
 package therefore creates a compatible backend identity instead of attaching
 to an older executable; old backends drain through their normal idle timeout.
 
@@ -49,8 +51,8 @@ The internal Bun workspaces are private and are not published separately.
 
 ## GitHub release setup
 
-Tags must match the root package version exactly: version `0.1.13` is released
-from tag `v0.1.13`.
+Tags must match the root package version exactly: version `0.2.0` is released
+from tag `v0.2.0`.
 
 Configure these GitHub Actions secrets:
 
@@ -129,7 +131,7 @@ The Codex catalog entry can reference the npm package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.13",
+    "version": "^0.2.0",
     "registry": "https://registry.npmjs.org"
   },
   "policy": {
@@ -148,7 +150,7 @@ The Claude Code catalog can reference the same package:
   "source": {
     "source": "npm",
     "package": "@toolingtools/simview",
-    "version": "^0.1.13",
+    "version": "^0.2.0",
     "registry": "https://registry.npmjs.org"
   },
   "category": "Developer Tools"

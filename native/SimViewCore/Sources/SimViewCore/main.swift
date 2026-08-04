@@ -45,7 +45,7 @@ do {
         let server = SimViewServer(
             socketPath: socket,
             token: token,
-            preferredUDID: arguments.values["--udid"],
+            preferredDeviceID: arguments.values["--device-id"] ?? arguments.values["--udid"],
             instanceID: arguments.values["--instance-id"],
             parentPID: arguments.values["--parent-pid"].flatMap(pid_t.init),
             idleTimeout: arguments.values["--idle-timeout"].flatMap(TimeInterval.init) ?? 60
@@ -54,39 +54,46 @@ do {
     case "doctor":
         print(String(data: try jsonData(Diagnostics.report()), encoding: .utf8)!)
     case "devices":
-        print(String(data: try jsonData(try SimulatorRuntime.devices().map(\.dictionary)), encoding: .utf8)!)
+        print(String(data: try jsonData(try DeviceRuntime.devices().map(\.dictionary)), encoding: .utf8)!)
     case "screenshot":
         guard let output = arguments.values["--output"] else {
             throw SimViewError("ARGUMENT_REQUIRED", "--output is required", recoverable: false)
         }
-        let device = try SimulatorRuntime.booted(preferredUDID: arguments.values["--udid"])
-        let semaphore = DispatchSemaphore(value: 0)
-        let capture = FrameCapture()
-        let failure = ErrorBox()
-        try capture.start(udid: device.udid) { frame, _, _ in
-            do {
-                try ImageEncoder.encode(frame, type: "public.png").write(to: URL(fileURLWithPath: output))
-            } catch {
-                failure.set(error)
+        let requested = arguments.values["--device-id"] ?? arguments.values["--udid"]
+        let device = try DeviceRuntime.select(requested: requested, configured: nil)
+        if device.platform == .android {
+            let client = try ADBClient()
+            let capture = AndroidFrameCapture(client: client, serial: device.nativeIdentifier)
+            try capture.screenshot().write(to: URL(fileURLWithPath: output))
+        } else {
+            let semaphore = DispatchSemaphore(value: 0)
+            let capture = FrameCapture()
+            let failure = ErrorBox()
+            try capture.start(udid: device.nativeIdentifier) { frame, _, _ in
+                do {
+                    try ImageEncoder.encode(frame, type: "public.png").write(to: URL(fileURLWithPath: output))
+                } catch {
+                    failure.set(error)
+                }
+                semaphore.signal()
             }
-            semaphore.signal()
+            if semaphore.wait(timeout: .now() + 10) == .timedOut {
+                throw SimViewError("CAPTURE_TIMEOUT", "No framebuffer arrived within 10 seconds")
+            }
+            capture.stop()
+            if let error = failure.get() { throw error }
         }
-        if semaphore.wait(timeout: .now() + 10) == .timedOut {
-            throw SimViewError("CAPTURE_TIMEOUT", "No framebuffer arrived within 10 seconds")
-        }
-        capture.stop()
-        if let error = failure.get() { throw error }
-        print(String(data: try jsonData(["output": output, "udid": device.udid]), encoding: .utf8)!)
+        print(String(data: try jsonData(["output": output, "deviceId": device.id]), encoding: .utf8)!)
     default:
         print(
             """
             simview-core \(SimViewVersion.current)
 
             Commands:
-              serve --socket <path> --token-fd <fd> [--udid <udid>]
+              serve --socket <path> --token-fd <fd> [--device-id <id>] [--udid <ios-udid>]
               doctor
               devices
-              screenshot --output <path> [--udid <udid>]
+              screenshot --output <path> [--device-id <id>] [--udid <ios-udid>]
             """)
     }
 } catch {

@@ -1,7 +1,7 @@
 {
   "name": "simview",
-  "version": "0.1.13",
-  "description": "Control and review a local iOS Simulator.",
+  "version": "0.2.0",
+  "description": "Control and review local iOS Simulators and Android ADB devices.",
   "author": {
     "name": "SimView contributors",
     "url": "https://github.com/toolingtools/SimView"
@@ -9,7 +9,7 @@
   "homepage": "https://github.com/toolingtools/SimView",
   "repository": "https://github.com/toolingtools/SimView",
   "license": "Apache-2.0",
-  "keywords": ["ios", "simulator", "mcp"],
+  "keywords": ["ios", "android", "simulator", "emulator", "adb", "mcp"],
   "mcpServers": {
     "simview": {
       "command": "${CLAUDE_PLUGIN_ROOT}/bin/simview",

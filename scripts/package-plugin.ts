@@ -5,7 +5,12 @@ import { $ } from "bun";
 const root = resolve(import.meta.dir, "..");
 const stage = join(root, "artifacts", "plugin", "simview");
 const output = join(root, "artifacts", "simview-plugin.zip");
-const compiledBinaries = ["packages/cli/dist/simview"];
+const compiledArtifacts = [
+  "packages/cli/dist/simview",
+  "packages/core/bin/simview-core",
+  "packages/core/bin/libSimViewProbe.dylib",
+  "packages/core/bin/simview-android-agent.jar",
+];
 const compiledSourcePackages = ["app", "client", "contracts", "core", "mcp", "cli"];
 
 const sourceFiles = compiledSourcePackages.flatMap((packageName) => [
@@ -27,6 +32,10 @@ sourceFiles.push(
     cwd: join(root, "native", "SimViewProbe"),
     absolute: true,
   }),
+  ...new Bun.Glob("src/**/*.java").scanSync({
+    cwd: join(root, "native", "SimViewAndroid"),
+    absolute: true,
+  }),
   join(root, "native", "SimViewCore", "Package.swift"),
   join(root, "packages", "app", "src", "preview.html"),
   join(root, "package.json"),
@@ -36,11 +45,11 @@ sourceFiles.push(
 const newestSource = Math.max(
   ...(await Promise.all(sourceFiles.map(async (path) => (await stat(path)).mtimeMs))),
 );
-for (const relativePath of compiledBinaries) {
+for (const relativePath of compiledArtifacts) {
   const binary = join(root, relativePath);
   if ((await stat(binary)).mtimeMs < newestSource) {
     throw new Error(
-      `${relativePath} is older than the TypeScript it embeds. ` +
+      `${relativePath} is older than the source used to build the release. ` +
         "Run `bun scripts/build-release.ts` before packaging the plugin.",
     );
   }
@@ -57,6 +66,7 @@ await $`cp -R ${join(root, "packages/app/dist")} ${join(stage, "app/dist")}`;
 await $`cp ${join(root, "packages/cli/dist/simview")} ${join(stage, "bin/simview")}`;
 await $`cp ${join(root, "packages/core/bin/simview-core")} ${join(stage, "bin/simview-core")}`;
 await $`cp ${join(root, "packages/core/bin/libSimViewProbe.dylib")} ${join(stage, "bin/libSimViewProbe.dylib")}`;
+await $`cp ${join(root, "packages/core/bin/simview-android-agent.jar")} ${join(stage, "bin/simview-android-agent.jar")}`;
 await $`chmod +x ${join(stage, "bin/simview")} ${join(stage, "bin/simview-core")}`;
 for (const path of new Bun.Glob("**/.DS_Store").scanSync({ cwd: stage, absolute: true })) {
   await rm(path, { force: true });

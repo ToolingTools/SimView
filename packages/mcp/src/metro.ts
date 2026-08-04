@@ -88,7 +88,7 @@ export class MetroInspector {
   #session: InspectorSession | undefined;
   #targetKey: string | undefined;
   #selected: SelectedTarget | undefined;
-  #deviceUdid: string | undefined;
+  #deviceId: string | undefined;
   #lastError: string | undefined;
   #fallbackReason: ElementFallbackReason | undefined;
   readonly #scan: () => Promise<MetroServerInfo[]>;
@@ -115,7 +115,7 @@ export class MetroInspector {
   > {
     try {
       const selected =
-        this.#session?.isConnected && this.#deviceUdid === device.udid
+        this.#session?.isConnected && this.#deviceId === device.id
           ? this.#selected
           : selectMetroTarget(await this.#scan(), device);
       if (!selected) {
@@ -124,11 +124,12 @@ export class MetroInspector {
         return undefined;
       }
       const session = await this.#connect(selected);
-      this.#deviceUdid = device.udid;
+      this.#deviceId = device.id;
+      const measurementViewport = metroMeasurementViewport(device, accessibility.screen);
       const raw = await evaluateInspection(
         session,
-        accessibility.screen.width,
-        accessibility.screen.height,
+        measurementViewport.width,
+        measurementViewport.height,
         maxNodes,
       );
       if (!raw?.root) {
@@ -136,6 +137,7 @@ export class MetroInspector {
         this.#fallbackReason = "metro-fiber-unavailable";
         return undefined;
       }
+      scaleMetroPointFrames(raw.root, measurementViewport.scaleX, measurementViewport.scaleY);
       const projectRoot = await symbolicateTree(raw, selected.server, this.#projectRoot);
 
       const capturedAt = new Date().toISOString();
@@ -161,15 +163,19 @@ export class MetroInspector {
       const screenContext: ReactNativeScreenContext = {
         schemaVersion: 1,
         kind: "react-native",
+        platform: device.platform,
         capturedAt,
         frameId,
         simulatorName: device.name,
+        deviceName: device.name,
         runtime: device.runtime,
         viewport,
         orientation: viewport.width > viewport.height ? "landscape" : "portrait",
         renderer: raw.renderer,
         target: selected.target.title || selected.target.id,
-        bundleId: targetAppId(selected.target),
+        ...(device.platform === "android"
+          ? { packageName: targetAppId(selected.target) }
+          : { bundleId: targetAppId(selected.target) }),
         route: raw.screen?.route,
         navigationPath: raw.screen?.navigationPath,
         screenComponent: raw.screen?.component,
@@ -221,7 +227,70 @@ export class MetroInspector {
     this.#session = undefined;
     this.#targetKey = undefined;
     this.#selected = undefined;
-    this.#deviceUdid = undefined;
+    this.#deviceId = undefined;
+  }
+}
+
+type MetroMeasurementViewport = {
+  width: number;
+  height: number;
+  scaleX: number;
+  scaleY: number;
+};
+
+export function metroMeasurementViewport(
+  device: DeviceDescription,
+  screen: AccessibilitySnapshot["screen"],
+): MetroMeasurementViewport {
+  if (device.platform !== "android") {
+    return { width: screen.width, height: screen.height, scaleX: 1, scaleY: 1 };
+  }
+
+  const densityDpi = Number(device.metadata?.densityDpi);
+  if (Number.isFinite(densityDpi) && densityDpi > 0) {
+    const density = densityDpi / 160;
+    return {
+      width: screen.width / density,
+      height: screen.height / density,
+      scaleX: density,
+      scaleY: density,
+    };
+  }
+
+  let pointWidth = device.pointWidth;
+  let pointHeight = device.pointHeight;
+  if (pointWidth && pointHeight) {
+    const screenIsLandscape = screen.width > screen.height;
+    const pointsAreLandscape = pointWidth > pointHeight;
+    if (screenIsLandscape !== pointsAreLandscape) {
+      [pointWidth, pointHeight] = [pointHeight, pointWidth];
+    }
+    return {
+      width: pointWidth,
+      height: pointHeight,
+      scaleX: screen.width / pointWidth,
+      scaleY: screen.height / pointHeight,
+    };
+  }
+
+  return { width: screen.width, height: screen.height, scaleX: 1, scaleY: 1 };
+}
+
+function scaleMetroPointFrames(node: RawNode, scaleX: number, scaleY: number): void {
+  if (node.frame && (scaleX !== 1 || scaleY !== 1)) {
+    const points = node.frame.points;
+    node.frame = {
+      ...node.frame,
+      points: {
+        x: points.x * scaleX,
+        y: points.y * scaleY,
+        width: points.width * scaleX,
+        height: points.height * scaleY,
+      },
+    };
+  }
+  for (const child of node.children ?? []) {
+    scaleMetroPointFrames(child, scaleX, scaleY);
   }
 }
 
@@ -233,22 +302,40 @@ export function selectMetroTarget(
     server.targets.map((target) => ({ server, target })),
   );
   const debuggable = candidates.filter(({ target }) => Boolean(target.webSocketDebuggerUrl));
-  const exact = debuggable.filter(
-    ({ target }) => target.reactNative?.logicalDeviceId === device.udid,
+  const nativeIdentifiers = new Set(
+    [device.id, device.udid, device.serial].filter((value): value is string => Boolean(value)),
   );
+  const exact = debuggable.filter(({ target }) => {
+    const logicalDeviceId = target.reactNative?.logicalDeviceId;
+    return logicalDeviceId !== undefined && nativeIdentifiers.has(logicalDeviceId);
+  });
   if (exact.length === 1) return exact[0];
   const normalizedDeviceName = normalizeDeviceName(device.name);
   const named = debuggable.filter(({ target }) =>
     normalizeDeviceName(target.deviceName ?? target.title).includes(normalizedDeviceName),
   );
   if (named.length === 1) return named[0];
-  if (debuggable.length === 1) return debuggable[0];
+  const compatible = debuggable.filter(({ target }) => targetSupportsPlatform(target, device));
+  if (compatible.length === 1) return compatible[0];
 
   for (const server of servers) {
-    const target = selectBestTarget(server.targets);
-    if (target && servers.length === 1 && server.targets.length === 1) return { server, target };
+    const compatibleTargets = server.targets.filter((target) =>
+      targetSupportsPlatform(target, device),
+    );
+    const target = selectBestTarget(compatibleTargets);
+    if (target && servers.length === 1 && compatibleTargets.length === 1) return { server, target };
   }
   return undefined;
+}
+
+function targetSupportsPlatform(target: MetroTarget, device: DeviceDescription): boolean {
+  const name = normalizeDeviceName(target.deviceName ?? target.title);
+  const explicitPlatform = /\b(?:iphone|ipad|ipod|ios)\b/.test(name)
+    ? "ios"
+    : /\b(?:android|emulator|pixel|sdk gphone)\b/.test(name)
+      ? "android"
+      : undefined;
+  return explicitPlatform === undefined || explicitPlatform === device.platform;
 }
 
 function normalizeDeviceName(value: string): string {

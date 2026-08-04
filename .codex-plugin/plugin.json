@@ -1,7 +1,7 @@
 {
   "name": "simview",
-  "version": "0.1.13",
-  "description": "Control and review a local iOS Simulator in a live MCP App preview.",
+  "version": "0.2.0",
+  "description": "Control and review local iOS Simulators and Android devices in a live MCP App preview.",
   "author": {
     "name": "SimView contributors",
     "url": "https://github.com/toolingtools/SimView"
@@ -9,20 +9,20 @@
   "homepage": "https://github.com/toolingtools/SimView",
   "repository": "https://github.com/toolingtools/SimView",
   "license": "Apache-2.0",
-  "keywords": ["ios", "simulator", "preview", "review", "mcp"],
+  "keywords": ["ios", "android", "simulator", "emulator", "adb", "preview", "review", "mcp"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "SimView",
-    "shortDescription": "See, control, and review an iOS Simulator.",
-    "longDescription": "Open a live local iOS Simulator preview, forward physical input, add coordinate comments, and send a screenshot with feedback to chat.",
+    "shortDescription": "See, control, and review mobile devices.",
+    "longDescription": "Open a live local iOS Simulator or Android ADB device preview, forward input, add coordinate comments, and send a screenshot with feedback to chat.",
     "developerName": "SimView contributors",
     "category": "Developer Tools",
     "capabilities": ["Interactive"],
     "defaultPrompt": [
-      "Use $simview to view the booted simulator.",
+      "Use $simview to view an available mobile device.",
       "Open SimView and navigate to the Account tab.",
-      "Capture the simulator and send coordinate comments."
+      "Capture the device and send coordinate comments."
     ],
     "brandColor": "#171717",
     "composerIcon": "./assets/icon-512.png",

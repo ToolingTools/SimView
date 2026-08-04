@@ -6,7 +6,6 @@ import { resolveBinary } from "@simview/core";
 import {
   type Codec,
   type DeviceDescription,
-  deviceDescriptionSchema,
   encodeFrame,
   FrameDecoder,
   FrameKind,
@@ -15,6 +14,7 @@ import {
   PROTOCOL_VERSION,
   type ProtocolRequest,
   type ProtocolResponse,
+  parseDeviceDescription,
   parseMethodParams,
   parseMethodResult,
   protocolResponseSchema,
@@ -24,6 +24,7 @@ import {
 type DataHandler = (payload: Uint8Array) => void;
 
 export interface SessionOptions {
+  deviceId?: string | undefined;
   udid?: string | undefined;
   codec?: Codec | undefined;
   idleTimeoutSeconds?: number | undefined;
@@ -31,7 +32,8 @@ export interface SessionOptions {
 }
 
 export interface AcquireOptions {
-  udid: string;
+  deviceId?: string | undefined;
+  udid?: string | undefined;
   codec?: Codec | undefined;
   binary?: string | undefined;
 }
@@ -83,7 +85,11 @@ export class SimViewClient {
         String(process.pid),
         "--idle-timeout",
         String(options.idleTimeoutSeconds ?? 60),
-        ...(options.udid ? ["--udid", options.udid] : []),
+        ...(options.deviceId
+          ? ["--device-id", options.deviceId]
+          : options.udid
+            ? ["--udid", options.udid]
+            : []),
       ],
       {
         stdin: new TextEncoder().encode(token),
@@ -117,8 +123,10 @@ export class SimViewClient {
       new Response(child.stderr).text(),
       child.exited,
     ]);
-    if (exitCode !== 0) throw new Error(stderr.trim() || "Unable to list iOS Simulators");
-    return deviceDescriptionSchema.array().parse(JSON.parse(stdout));
+    if (exitCode !== 0) throw new Error(stderr.trim() || "Unable to list devices");
+    const payload: unknown = JSON.parse(stdout);
+    if (!Array.isArray(payload)) throw new Error("Device list is not an array");
+    return payload.map(parseDeviceDescription);
   }
 
   static async attach(socketPath: string, token: string, codec: Codec = "h264") {
@@ -245,7 +253,11 @@ export class SimViewClient {
     };
     const payload = new TextEncoder().encode(JSON.stringify(request));
     const promise = new Promise<ResultFor<M>>((resolve, reject) => {
-      const timeoutMs = options.timeoutMs ?? 10_000;
+      // Emulator console rotation is asynchronous and may require up to three
+      // clockwise transitions. Keep the ordinary protocol deadline tight while
+      // allowing this explicitly slow device operation to finish honestly.
+      const timeoutMs =
+        options.timeoutMs ?? (method === "device.orientation.set" ? 30_000 : 10_000);
       const timeout = setTimeout(() => {
         this.#pending.delete(id);
         options.signal?.removeEventListener("abort", abort);
@@ -297,21 +309,37 @@ export class SimViewClient {
   }
 
   async close(): Promise<void> {
+    const ownedProcess = this.process;
+    if (ownedProcess && this.#socket) {
+      // Give an ephemeral backend the opportunity to remove device-side files,
+      // ADB forwarding rules, and other resources that a signal cannot clean up.
+      // Attached clients must never shut down their shared daemon.
+      await this.request("server.shutdown", {}, { timeoutMs: 1_000 }).catch(() => {});
+    }
+
+    let exited = !ownedProcess;
+    if (ownedProcess) {
+      exited = await Promise.race([
+        ownedProcess.exited.then(() => true),
+        Bun.sleep(2_000).then(() => false),
+      ]);
+      if (!exited) {
+        ownedProcess.kill();
+        exited = await Promise.race([
+          ownedProcess.exited.then(() => true),
+          Bun.sleep(2_000).then(() => false),
+        ]);
+      }
+      if (!exited) {
+        ownedProcess.kill(9);
+        await ownedProcess.exited;
+      }
+    }
+
     this.#socket?.end();
     this.#socket = undefined;
     this.#writeQueue = [];
     this.#writeOffset = 0;
-    if (this.process) {
-      this.process.kill();
-      const exited = await Promise.race([
-        this.process.exited.then(() => true),
-        Bun.sleep(2_000).then(() => false),
-      ]);
-      if (!exited) {
-        this.process.kill(9);
-        await this.process.exited;
-      }
-    }
     if (this.#sessionDirectory) await rm(this.#sessionDirectory, { recursive: true, force: true });
   }
 }

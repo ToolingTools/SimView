@@ -156,7 +156,7 @@ final class SimViewServer: @unchecked Sendable {
 
     private let socketPath: String
     private let token: String
-    private let preferredUDID: String?
+    private let preferredDeviceID: String?
     private let instanceID: String?
     private let parentPID: pid_t?
     private let idleTimeout: TimeInterval
@@ -166,16 +166,29 @@ final class SimViewServer: @unchecked Sendable {
     private var listenerFD: Int32 = -1
     private var listener: DispatchSourceRead?
     private var timer: DispatchSourceTimer?
+    private var signalSources: [DispatchSourceSignal] = []
     private var connections = Set<ClientConnection>()
     private var lastDisconnect = Date()
-    private var selectedDevice: SimulatorDevice?
+    private var selectedDevice: DeviceDescription?
     private let capture = FrameCapture()
     private let hid = HIDInjector()
     private let accessibility = AccessibilityService()
     private let probe = ProbeCoordinator()
     private let h264 = H264Encoder()
     private let metrics = Metrics()
+    private var androidClient: ADBClient?
+    private var androidCapture: AndroidFrameCapture?
+    private var androidController: AndroidController?
+    private var androidAccessibility: AndroidAccessibilityService?
+    private var androidAgent: AndroidAgentConnection?
+    private var androidAgentError: String?
+    private var androidAgentRestartAttempts = 0
+    private var androidAgentFrameSequence: UInt64 = 0
+    private var androidInputWidth = 0
+    private var androidInputHeight = 0
+    private var latestH264Configuration: Data?
     private var captureActive = false
+    private var captureDeviceID: String?
     private var frameID = "0"
     private var encodingFrame = false
     private var pendingH264Frame: PendingH264Frame?
@@ -186,14 +199,14 @@ final class SimViewServer: @unchecked Sendable {
     init(
         socketPath: String,
         token: String,
-        preferredUDID: String?,
+        preferredDeviceID: String?,
         instanceID: String?,
         parentPID: pid_t?,
         idleTimeout: TimeInterval
     ) {
         self.socketPath = socketPath
         self.token = token
-        self.preferredUDID = preferredUDID
+        self.preferredDeviceID = preferredDeviceID
         self.instanceID = instanceID
         self.parentPID = parentPID
         self.idleTimeout = idleTimeout
@@ -207,6 +220,7 @@ final class SimViewServer: @unchecked Sendable {
         source.resume()
         listener = source
         installLifecycleTimer()
+        installSignalHandlers()
         dispatchMain()
     }
 
@@ -221,12 +235,12 @@ final class SimViewServer: @unchecked Sendable {
         }
         do {
             let request = try Request(data: frame.payload)
-            guard request.protocolVersion == 1 else {
+            guard request.protocolVersion == SimViewVersion.protocolVersion else {
                 throw SimViewError(
                     "PROTOCOL_VERSION_UNSUPPORTED",
                     "Protocol version \(request.protocolVersion) is unsupported",
                     recoverable: false,
-                    details: ["supported": [1]]
+                    details: ["supported": [SimViewVersion.protocolVersion]]
                 )
             }
             if !connection.authenticated {
@@ -241,21 +255,34 @@ final class SimViewServer: @unchecked Sendable {
                     request.params["codecs"]?.arrayValue?.compactMap(\.stringValue)
                     ?? ["mjpeg"]
                 connection.authenticate(codec: preferredCodec(codecs))
+                let configuredForAndroid = preferredDeviceID?.hasPrefix("android:") == true
                 sendResult(
                     [
-                        "protocolVersion": 1,
+                        "protocolVersion": SimViewVersion.protocolVersion,
                         "codec": connection.codec,
                         "maxFrameRate": 60,
                         "server": "simview-core/\(SimViewVersion.current)",
                         "capabilities": [
                             "capture": true,
                             "input": true,
-                            "accessibility": accessibility.available,
-                            "probe": probe.bundled,
+                            "accessibility": configuredForAndroid ? true : accessibility.available,
+                            "probe": configuredForAndroid ? false : probe.bundled,
+                            "androidContext": configuredForAndroid,
                         ],
                     ], requestID: request.id, to: connection)
                 if captureActive, connection.codec == "h264" {
-                    Task { await h264.forceKeyframe() }
+                    if let latestH264Configuration {
+                        connection.send(WireFrame(kind: .h264Configuration, payload: latestH264Configuration))
+                    }
+                    if let androidAgent {
+                        try? androidAgent.requestKeyframe()
+                    } else {
+                        Task { await h264.forceKeyframe() }
+                    }
+                } else if captureActive, connection.codec == "mjpeg", androidAgent != nil,
+                    connections.filter({ $0.authenticated && $0.codec == "mjpeg" }).count == 1
+                {
+                    ensureAndroidMJPEGCapture(generation: captureGeneration)
                 }
                 return
             }
@@ -283,6 +310,12 @@ final class SimViewServer: @unchecked Sendable {
         let wasAuthenticated = connection.authenticated
         connections.remove(connection)
         connection.close()
+        if wasAuthenticated, connection.codec == "mjpeg",
+            !connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }),
+            androidAgent != nil
+        {
+            androidCapture?.stop()
+        }
         if wasAuthenticated, !connections.contains(where: \.authenticated) {
             lastDisconnect = Date()
             stopCapture()
@@ -306,23 +339,25 @@ final class SimViewServer: @unchecked Sendable {
     private func handle(_ request: Request, connection: ClientConnection) throws {
         switch request.method {
         case "devices.list":
-            sendResult(try SimulatorRuntime.devices().map(\.dictionary), requestID: request.id, to: connection)
+            sendResult(try DeviceRuntime.devices().map(\.dictionary), requestID: request.id, to: connection)
         case "device.describe":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
-            var value = device.dictionary
-            if capture.width > 0 {
-                value["pixelWidth"] = capture.width
-                value["pixelHeight"] = capture.height
+            let device = try selectDevice(request.deviceIdentifier)
+            var value = deviceResponseDictionary(device)
+            let captureWidth = device.platform == .ios ? capture.width : androidCapture?.width ?? 0
+            let captureHeight = device.platform == .ios ? capture.height : androidCapture?.height ?? 0
+            if captureWidth > 0 {
+                value["pixelWidth"] = captureWidth
+                value["pixelHeight"] = captureHeight
             }
             sendResult(value, requestID: request.id, to: connection)
         case "capture.start":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
+            let device = try selectDevice(request.deviceIdentifier)
             try startCapture(device)
             sendResult(
                 [
-                    "device": device.dictionary,
+                    "device": deviceResponseDictionary(device),
                     "codec": connection.codec,
-                    "frameRate": 60,
+                    "frameRate": device.platform == .android && androidAgent == nil ? 4 : 60,
                 ], requestID: request.id, to: connection)
         case "capture.stop":
             stopCapture()
@@ -331,22 +366,56 @@ final class SimViewServer: @unchecked Sendable {
             guard captureActive else {
                 throw SimViewError("CAPTURE_NOT_STARTED", "Start capture before requesting a keyframe")
             }
-            Task { await h264.forceKeyframe() }
+            if let androidAgent {
+                try androidAgent.requestKeyframe()
+            } else {
+                Task { await h264.forceKeyframe() }
+            }
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "capture.screenshot":
-            guard let frame = capture.latestFrame else {
-                throw SimViewError("CAPTURE_NOT_STARTED", "Start capture before requesting a screenshot")
+            if selectedDevice?.platform == .android, let androidCapture {
+                let png = try androidCapture.screenshot()
+                sendResult(
+                    [
+                        "frameId": frameID,
+                        "width": androidCapture.width,
+                        "height": androidCapture.height,
+                        "byteLength": png.count,
+                    ], requestID: request.id, to: connection)
+                connection.send(WireFrame(kind: .pngScreenshot, payload: png))
+            } else {
+                guard let frame = capture.latestFrame else {
+                    throw SimViewError("CAPTURE_NOT_STARTED", "Start capture before requesting a screenshot")
+                }
+                let png = try ImageEncoder.encode(frame, type: "public.png")
+                sendResult(
+                    [
+                        "frameId": frameID,
+                        "width": CVPixelBufferGetWidth(frame),
+                        "height": CVPixelBufferGetHeight(frame),
+                        "byteLength": png.count,
+                    ], requestID: request.id, to: connection)
+                connection.send(WireFrame(kind: .pngScreenshot, payload: png))
             }
-            let png = try ImageEncoder.encode(frame, type: "public.png")
-            sendResult(
-                [
-                    "frameId": frameID,
-                    "width": CVPixelBufferGetWidth(frame),
-                    "height": CVPixelBufferGetHeight(frame),
-                    "byteLength": png.count,
-                ], requestID: request.id, to: connection)
-            connection.send(WireFrame(kind: .pngScreenshot, payload: png))
         case "input.touch":
+            if selectedDevice?.platform == .android {
+                guard let androidAgent, let dimensions = androidInputDimensions()
+                else {
+                    throw SimViewError(
+                        "INPUT_RAW_TOUCH_UNAVAILABLE",
+                        "Continuous touch requires the SimView Android agent"
+                    )
+                }
+                try androidAgent.touch(
+                    phase: request.params.string("phase"),
+                    x: request.params.double("x"),
+                    y: request.params.double("y"),
+                    width: dimensions.width,
+                    height: dimensions.height
+                )
+                sendResult(["accepted": true], requestID: request.id, to: connection)
+                return
+            }
             try prepareHID()
             try hid.touch(
                 phase: request.params.string("phase"),
@@ -355,38 +424,53 @@ final class SimViewServer: @unchecked Sendable {
             )
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.tap":
-            try prepareHID()
-            try hid.tap(
-                x: request.params.double("x"),
-                y: request.params.double("y"),
-                duration: request.params.optionalDouble("durationMs").map { $0 / 1_000 } ?? 0.05
-            )
+            try performTap(params: request.params, defaultDuration: 0.05)
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.longPress":
-            try prepareHID()
-            try hid.tap(
-                x: request.params.double("x"),
-                y: request.params.double("y"),
-                duration: request.params.optionalDouble("durationMs").map { $0 / 1_000 } ?? 0.6
-            )
+            try performTap(params: request.params, defaultDuration: 0.6)
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.swipe":
-            try prepareHID()
             let from = try request.params.dictionary("from")
             let to = try request.params.dictionary("to")
-            try hid.swipe(
-                fromX: try from.double("x"),
-                fromY: try from.double("y"),
-                toX: try to.double("x"),
-                toY: try to.double("y"),
-                duration: max(0.05, request.params.double("durationMs") / 1_000)
-            )
+            if let androidAgent, let dimensions = androidInputDimensions() {
+                try androidAgent.swipe(
+                    fromX: try from.double("x"), fromY: try from.double("y"),
+                    toX: try to.double("x"), toY: try to.double("y"),
+                    duration: request.params.double("durationMs") / 1_000,
+                    width: dimensions.width, height: dimensions.height
+                )
+            } else if let controller = try androidInputIfSelected() {
+                try controller.swipe(
+                    fromX: try from.double("x"), fromY: try from.double("y"),
+                    toX: try to.double("x"), toY: try to.double("y"),
+                    duration: request.params.double("durationMs") / 1_000
+                )
+            } else {
+                try prepareHID()
+                try hid.swipe(
+                    fromX: try from.double("x"),
+                    fromY: try from.double("y"),
+                    toX: try to.double("x"),
+                    toY: try to.double("y"),
+                    duration: max(0.05, request.params.double("durationMs") / 1_000)
+                )
+            }
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.typeText":
-            try prepareHID()
-            let method = try hid.typeText(request.params.string("text"))
+            let method: String
+            if let androidAgent {
+                method = try androidAgent.typeText(request.params.string("text"))
+            } else if let controller = try androidInputIfSelected() {
+                method = try controller.typeText(request.params.string("text"))
+            } else {
+                try prepareHID()
+                method = try hid.typeText(request.params.string("text"))
+            }
             sendResult(["accepted": true, "inputMethod": method], requestID: request.id, to: connection)
         case "input.key":
+            if selectedDevice?.platform == .android {
+                throw SimViewError("INPUT_KEY_UNSUPPORTED", "Raw HID usages require the Android agent")
+            }
             try prepareHID()
             hid.key(
                 usage: UInt32(try request.params.int("usage")),
@@ -394,66 +478,105 @@ final class SimViewServer: @unchecked Sendable {
             )
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.button":
-            try prepareHID()
-            try hid.pressButton(request.params.string("button"))
+            if let androidAgent {
+                try androidAgent.pressButton(request.params.string("button"))
+            } else if let controller = try androidInputIfSelected() {
+                try controller.pressButton(request.params.string("button"))
+            } else {
+                try prepareHID()
+                try hid.pressButton(request.params.string("button"))
+            }
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "device.orientation.set":
-            try prepareHID()
-            try hid.setOrientation(request.params.string("orientation"))
-            Task { await h264.forceKeyframe() }
+            if let controller = try androidInputIfSelected() {
+                let orientation = try request.params.string("orientation")
+                try controller.setOrientation(orientation)
+                if let device = selectedDevice, let width = device.pixelWidth, let height = device.pixelHeight {
+                    let landscape =
+                        orientation == "landscape-left" || orientation == "landscape-right"
+                        || orientation == "landscapeLeft" || orientation == "landscapeRight"
+                    androidInputWidth = landscape ? max(width, height) : min(width, height)
+                    androidInputHeight = landscape ? min(width, height) : max(width, height)
+                    controller.updateDisplayDimensions(
+                        width: androidInputWidth,
+                        height: androidInputHeight
+                    )
+                    if let androidAgent {
+                        latestH264Configuration = nil
+                        try androidAgent.startCapture(width: androidInputWidth, height: androidInputHeight)
+                        try androidAgent.requestKeyframe()
+                    } else {
+                        Task { await h264.forceKeyframe() }
+                    }
+                }
+            } else {
+                try prepareHID()
+                try hid.setOrientation(request.params.string("orientation"))
+                Task { await h264.forceKeyframe() }
+            }
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "accessibility.snapshot":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
-            let result = try accessibility.snapshot(
-                udid: device.udid,
-                scope: request.params["scope"]?.stringValue ?? "interactive",
-                maxNodes: request.params["maxNodes"]?.intValue ?? 1_200
-            )
+            let device = try selectDevice(request.deviceIdentifier)
+            let result = try accessibilitySnapshot(device, params: request.params)
             sendResult(result, requestID: request.id, to: connection)
         case "accessibility.elementAtPoint":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
-            let result = try accessibility.elementAtPoint(
-                udid: device.udid,
-                x: request.params.double("x"),
-                y: request.params.double("y")
-            )
+            let device = try selectDevice(request.deviceIdentifier)
+            let result = try accessibilityElementAtPoint(device, params: request.params)
             sendResult(result, requestID: request.id, to: connection)
         case "accessibility.find":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
             let selector = try request.params.dictionary("selector")
-            let result = try accessibility.find(
-                udid: device.udid,
-                selector: selector.foundationDictionary,
-                scope: request.params["scope"]?.stringValue ?? "visible"
-            )
+            let device = try selectDevice(request.deviceIdentifier)
+            let result: [String: Any]
+            if device.platform == .android {
+                result = try requireAndroidAccessibility().find(
+                    selector: selector.foundationDictionary,
+                    scope: request.params["scope"]?.stringValue ?? "visible"
+                )
+            } else {
+                result = try accessibility.find(
+                    udid: device.nativeIdentifier,
+                    selector: selector.foundationDictionary,
+                    scope: request.params["scope"]?.stringValue ?? "visible"
+                )
+            }
             sendResult(result, requestID: request.id, to: connection)
         case "accessibility.wait":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
-            let result = try accessibility.wait(
-                udid: device.udid,
-                selector: try request.params.dictionary("selector").foundationDictionary,
-                state: request.params["state"]?.stringValue ?? "visible",
-                timeoutMs: request.params["timeoutMs"]?.intValue ?? 5_000
-            )
+            let device = try selectDevice(request.deviceIdentifier)
+            let selector = try request.params.dictionary("selector").foundationDictionary
+            let state = request.params["state"]?.stringValue ?? "visible"
+            let timeout = request.params["timeoutMs"]?.intValue ?? 5_000
+            let result =
+                device.platform == .android
+                ? try requireAndroidAccessibility().wait(selector: selector, state: state, timeoutMs: timeout)
+                : try accessibility.wait(
+                    udid: device.nativeIdentifier, selector: selector, state: state, timeoutMs: timeout)
             sendResult(result, requestID: request.id, to: connection)
+        case "device.context":
+            let device = try selectDevice(request.deviceIdentifier)
+            guard device.platform == .android else {
+                throw SimViewError("METHOD_UNSUPPORTED", "device.context is currently Android-only")
+            }
+            sendResult(try requireAndroidAccessibility().context(), requestID: request.id, to: connection)
         case "probe.status":
             sendResult(probe.status(), requestID: request.id, to: connection)
         case "probe.target":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
-            sendResult(probe.target(udid: device.udid), requestID: request.id, to: connection)
+            let device = try requireIOSDevice(request.deviceIdentifier)
+            sendResult(probe.target(udid: device.nativeIdentifier), requestID: request.id, to: connection)
         case "probe.enable":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
+            let device = try requireIOSDevice(request.deviceIdentifier)
             let result = try probe.enable(
-                udid: device.udid,
+                udid: device.nativeIdentifier,
                 bundleID: request.params.string("bundleId")
             )
             sendResult(result, requestID: request.id, to: connection)
         case "probe.disable":
-            let device = try selectDevice(request.params["udid"]?.stringValue)
-            sendResult(try probe.disable(udid: device.udid), requestID: request.id, to: connection)
+            let device = try requireIOSDevice(request.deviceIdentifier)
+            sendResult(try probe.disable(udid: device.nativeIdentifier), requestID: request.id, to: connection)
         case "probe.context":
+            _ = try requireIOSDevice(request.deviceIdentifier)
             sendResult(try probe.request("context"), requestID: request.id, to: connection)
         case "probe.inspectPoint":
+            _ = try requireIOSDevice(request.deviceIdentifier)
             sendResult(
                 try probe.request(
                     "inspectPoint",
@@ -462,12 +585,14 @@ final class SimViewServer: @unchecked Sendable {
                         "y": request.params.double("y"),
                     ]), requestID: request.id, to: connection)
         case "probe.findViews":
+            _ = try requireIOSDevice(request.deviceIdentifier)
             sendResult(
                 try probe.request("findViews", params: request.params.foundationDictionary),
                 requestID: request.id,
                 to: connection
             )
         case "probe.fullHierarchy":
+            _ = try requireIOSDevice(request.deviceIdentifier)
             sendResult(
                 try probe.request("fullHierarchy", params: request.params.foundationDictionary),
                 requestID: request.id,
@@ -479,29 +604,41 @@ final class SimViewServer: @unchecked Sendable {
                 authenticated.isEmpty
                 ? ISO8601DateFormatter().string(from: lastDisconnect.addingTimeInterval(idleTimeout))
                 : NSNull()
-            sendResult(
-                [
-                    "status": "ok",
-                    "pid": Int(getpid()),
-                    "instanceId": instanceID as Any? ?? NSNull(),
-                    "configuredUdid": preferredUDID as Any? ?? NSNull(),
-                    "device": selectedDevice.map { $0.dictionary as Any } ?? NSNull(),
-                    "captureActive": captureActive,
-                    "captureState": captureActive ? "active" : "idle",
-                    "idleDeadline": idleDeadline,
-                    "capabilities": [
-                        "capture": true,
-                        "input": true,
-                        "accessibility": accessibility.available,
-                        "probe": probe.status(),
-                    ],
-                    "clients": authenticated.count,
-                    "clientsByCodec": [
-                        "h264": authenticated.filter { $0.codec == "h264" }.count,
-                        "mjpeg": authenticated.filter { $0.codec == "mjpeg" }.count,
-                    ],
-                    "metrics": metrics.dictionary,
-                ], requestID: request.id, to: connection)
+            let configuredUdid: Any
+            if let preferredDeviceID, preferredDeviceID.hasPrefix("ios:") {
+                configuredUdid = String(preferredDeviceID.dropFirst(4))
+            } else if let preferredDeviceID, !preferredDeviceID.contains(":") {
+                configuredUdid = preferredDeviceID
+            } else {
+                configuredUdid = NSNull()
+            }
+            let health: [String: Any] = [
+                "status": "ok",
+                "pid": Int(getpid()),
+                "instanceId": instanceID as Any? ?? NSNull(),
+                "configuredDeviceId": preferredDeviceID as Any? ?? NSNull(),
+                "configuredUdid": configuredUdid,
+                "device": selectedDevice.map { self.deviceResponseDictionary($0) as Any } ?? NSNull(),
+                "captureActive": captureActive,
+                "captureState": captureActive ? "active" : "idle",
+                "idleDeadline": idleDeadline,
+                "capabilities": [
+                    "capture": true,
+                    "input": true,
+                    "accessibility": selectedDevice?.platform == .android ? true : accessibility.available,
+                    "probe": selectedDevice?.platform == .android ? false : probe.status(),
+                    "androidContext": selectedDevice?.platform == .android,
+                    "androidAgent": androidAgent != nil,
+                    "androidAgentError": androidAgentError as Any? ?? NSNull(),
+                ],
+                "clients": authenticated.count,
+                "clientsByCodec": [
+                    "h264": authenticated.filter { $0.codec == "h264" }.count,
+                    "mjpeg": authenticated.filter { $0.codec == "mjpeg" }.count,
+                ],
+                "metrics": metrics.dictionary,
+            ]
+            sendResult(health, requestID: request.id, to: connection)
         case "server.shutdown":
             sendResult(["shuttingDown": true], requestID: request.id, to: connection)
             queue.asyncAfter(deadline: .now() + .milliseconds(20)) { self.shutdown(exitCode: 0) }
@@ -510,13 +647,28 @@ final class SimViewServer: @unchecked Sendable {
         }
     }
 
-    private func startCapture(_ device: SimulatorDevice) throws {
-        if captureActive, selectedDevice?.udid == device.udid { return }
+    private func startCapture(_ device: DeviceDescription) throws {
+        if captureActive, captureDeviceID == device.id { return }
         capture.stop()
+        androidCapture?.stop()
+        androidAgent?.stop()
+        androidController?.stop()
+        androidCapture = nil
+        androidController = nil
+        androidAccessibility = nil
+        androidClient = nil
+        androidAgent = nil
+        androidAgentError = nil
+        androidAgentRestartAttempts = 0
+        androidAgentFrameSequence = 0
+        latestH264Configuration = nil
         selectedDevice = device
+        captureDeviceID = device.id
+        androidInputWidth = device.pixelWidth ?? 0
+        androidInputHeight = device.pixelHeight ?? 0
         captureGeneration &+= 1
         let generation = captureGeneration
-        try capture.start(udid: device.udid) { [weak self] frame, timestamp, frameID in
+        let handler: @Sendable (CVPixelBuffer, CMTime, String) -> Void = { [weak self] frame, timestamp, frameID in
             guard let self else { return }
             let pending = PendingH264Frame(
                 frame: frame,
@@ -530,12 +682,49 @@ final class SimViewServer: @unchecked Sendable {
             }
         }
         captureActive = true
+        do {
+            if device.platform == .ios {
+                try capture.start(udid: device.nativeIdentifier, callback: handler)
+            } else {
+                let client = try ADBClient()
+                let androidCapture = AndroidFrameCapture(client: client, serial: device.nativeIdentifier)
+                self.androidClient = client
+                self.androidCapture = androidCapture
+                androidController = AndroidController(client: client, device: device)
+                androidAccessibility = AndroidAccessibilityService(client: client, serial: device.nativeIdentifier)
+                let accelerated = tryStartAndroidAgent(client: client, device: device, generation: generation)
+                if accelerated {
+                    if connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }) {
+                        ensureAndroidMJPEGCapture(generation: generation)
+                    }
+                } else {
+                    androidCapture.start(handler: handler)
+                }
+            }
+        } catch {
+            stopCapture()
+            throw error
+        }
     }
 
     private func stopCapture() {
         captureGeneration &+= 1
         capture.stop()
+        androidCapture?.stop()
+        androidAgent?.stop()
+        androidController?.stop()
+        androidCapture = nil
+        androidController = nil
+        androidAccessibility = nil
+        androidClient = nil
+        androidAgent = nil
+        androidAgentRestartAttempts = 0
+        androidAgentFrameSequence = 0
+        androidInputWidth = 0
+        androidInputHeight = 0
+        latestH264Configuration = nil
         captureActive = false
+        captureDeviceID = nil
         frameID = "0"
         pendingH264Frame = nil
         pendingMJPEGFrame = nil
@@ -600,6 +789,7 @@ final class SimViewServer: @unchecked Sendable {
                         ) / 1_000_000
                     self.metrics.didEncode(latencyMS: elapsed)
                     if let configuration = encoded.configuration {
+                        self.latestH264Configuration = configuration
                         self.broadcast(
                             WireFrame(kind: .h264Configuration, payload: configuration),
                             codec: "h264"
@@ -631,18 +821,278 @@ final class SimViewServer: @unchecked Sendable {
         encode(pending)
     }
 
-    private func prepareHID() throws {
-        let device = try selectDevice(nil)
-        try hid.setup(udid: device.udid)
+    private func tryStartAndroidAgent(
+        client: ADBClient, device: DeviceDescription, generation: UInt64
+    ) -> Bool {
+        guard let agentURL = AndroidAgentLifecycle.packagedAgentURL(),
+            let width = device.pixelWidth, let height = device.pixelHeight
+        else {
+            androidAgentError = "Packaged Android agent or display dimensions are unavailable"
+            return false
+        }
+        let lifecycle = AndroidAgentLifecycle(client: client, serial: device.nativeIdentifier)
+        let token = UUID().uuidString + UUID().uuidString
+        do {
+            try lifecycle.prepare(agentURL: agentURL)
+            let port = try lifecycle.start(token: token)
+            let connection = AndroidAgentConnection(
+                lifecycle: lifecycle,
+                token: token,
+                onConfiguration: { [weak self] configuration in
+                    guard let server = self else { return }
+                    server.queue.async {
+                        guard server.captureActive, generation == server.captureGeneration else { return }
+                        server.latestH264Configuration = configuration
+                        server.broadcast(
+                            WireFrame(kind: .h264Configuration, payload: configuration), codec: "h264")
+                    }
+                },
+                onFrame: { [weak self] timestamp, keyframe, bytes in
+                    guard let server = self else { return }
+                    server.queue.async {
+                        guard server.captureActive, generation == server.captureGeneration else { return }
+                        server.androidAgentFrameSequence &+= 1
+                        server.frameID = "android-agent-\(server.androidAgentFrameSequence)"
+                        server.metrics.didCapture()
+                        var payload = Data()
+                        var micros = timestamp.bigEndian
+                        withUnsafeBytes(of: &micros) { payload.append(contentsOf: $0) }
+                        payload.append(keyframe ? 1 : 0)
+                        payload.append(bytes)
+                        server.broadcast(WireFrame(kind: .h264Frame, payload: payload), codec: "h264")
+                    }
+                },
+                onFailure: { [weak self] error in
+                    guard let server = self else { return }
+                    server.queue.async { server.handleAndroidAgentFailure(error, generation: generation) }
+                }
+            )
+            try connection.connect(port: port)
+            try connection.startCapture(width: width, height: height)
+            androidAgent = connection
+            androidAgentError = nil
+            return true
+        } catch {
+            lifecycle.stop()
+            androidAgentError =
+                lifecycle.lastDiagnostics
+                ?? (error as? SimViewError)?.message ?? error.localizedDescription
+            return false
+        }
     }
 
-    private func selectDevice(_ requested: String?) throws -> SimulatorDevice {
-        if let selectedDevice, requested == nil || requested == selectedDevice.udid {
+    private func acceptAndroidCompatibilityFrame(_ pending: PendingH264Frame) {
+        guard captureActive, pending.generation == captureGeneration else { return }
+        frameID = pending.frameID
+        if connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }) {
+            enqueueMJPEG(pending)
+        }
+    }
+
+    private func ensureAndroidMJPEGCapture(generation: UInt64) {
+        guard let androidCapture else { return }
+        androidCapture.start { [weak self] frame, timestamp, frameID in
+            guard let self else { return }
+            let pending = PendingH264Frame(
+                frame: frame,
+                timestamp: timestamp,
+                frameID: frameID,
+                capturedAt: DispatchTime.now(),
+                generation: generation
+            )
+            self.queue.async { self.acceptAndroidCompatibilityFrame(pending) }
+        }
+    }
+
+    private func handleAndroidAgentFailure(_ error: Error, generation: UInt64) {
+        guard captureActive, generation == captureGeneration, selectedDevice?.platform == .android else { return }
+        let failedAgent = androidAgent
+        failedAgent?.stop()
+        androidAgentError =
+            failedAgent?.diagnostics
+            ?? (error as? SimViewError)?.message ?? error.localizedDescription
+        androidAgent = nil
+        latestH264Configuration = nil
+        if androidAgentRestartAttempts < 1, let client = androidClient, let device = selectedDevice {
+            androidAgentRestartAttempts += 1
+            if tryStartAndroidAgent(client: client, device: device, generation: generation) {
+                if connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }) {
+                    ensureAndroidMJPEGCapture(generation: generation)
+                }
+                return
+            }
+        }
+        guard let androidCapture else { return }
+        androidCapture.start { [weak self] frame, timestamp, frameID in
+            guard let self else { return }
+            let pending = PendingH264Frame(
+                frame: frame,
+                timestamp: timestamp,
+                frameID: frameID,
+                capturedAt: DispatchTime.now(),
+                generation: generation
+            )
+            self.queue.async { self.acceptCapturedFrame(pending) }
+        }
+    }
+
+    private func prepareHID() throws {
+        let device = try selectDevice(nil)
+        guard device.platform == .ios else {
+            throw SimViewError("INPUT_UNAVAILABLE", "The selected Android device does not use iOS HID")
+        }
+        try hid.setup(udid: device.nativeIdentifier)
+    }
+
+    private func performTap(
+        params: [String: JSONValue], defaultDuration: TimeInterval
+    ) throws {
+        let x = try params.double("x")
+        let y = try params.double("y")
+        let duration = params.optionalDouble("durationMs").map { $0 / 1_000 } ?? defaultDuration
+        if let androidAgent, let dimensions = androidInputDimensions() {
+            try androidAgent.tap(
+                x: x,
+                y: y,
+                duration: duration,
+                width: dimensions.width,
+                height: dimensions.height
+            )
+        } else if let controller = try androidInputIfSelected() {
+            try controller.tap(x: x, y: y, duration: duration)
+        } else {
+            try prepareHID()
+            try hid.tap(x: x, y: y, duration: duration)
+        }
+    }
+
+    private func selectDevice(_ requested: String?) throws -> DeviceDescription {
+        let normalizedRequest = requested.map { $0.contains(":") ? $0 : "ios:\($0)" }
+        let normalizedPreferred = preferredDeviceID.map { $0.contains(":") ? $0 : "ios:\($0)" }
+        if let normalizedRequest, let normalizedPreferred, normalizedRequest != normalizedPreferred {
+            throw SimViewError(
+                "DEVICE_MISMATCH",
+                "This backend is configured for \(normalizedPreferred), not \(normalizedRequest)"
+            )
+        }
+        if let selectedDevice, normalizedRequest == nil || normalizedRequest == selectedDevice.id {
             return selectedDevice
         }
-        let device = try SimulatorRuntime.booted(preferredUDID: requested ?? preferredUDID)
+        let device = try DeviceRuntime.select(requested: requested, configured: preferredDeviceID)
+        if let selectedDevice, selectedDevice.id != device.id {
+            guard !captureActive else {
+                throw SimViewError(
+                    "DEVICE_MISMATCH",
+                    "Stop capture before selecting a different device on this backend"
+                )
+            }
+            androidController?.stop()
+            androidCapture?.stop()
+            androidAgent?.stop()
+            androidCapture = nil
+            androidController = nil
+            androidAccessibility = nil
+            androidClient = nil
+            androidAgent = nil
+            androidAgentError = nil
+            androidAgentRestartAttempts = 0
+            androidInputWidth = 0
+            androidInputHeight = 0
+        }
         selectedDevice = device
         return device
+    }
+
+    private func requireIOSDevice(_ requested: String?) throws -> DeviceDescription {
+        let device = try selectDevice(requested)
+        guard device.platform == .ios else {
+            throw SimViewError("METHOD_UNSUPPORTED", "UIKit probe methods are unavailable on Android")
+        }
+        return device
+    }
+
+    private func androidInputIfSelected() throws -> AndroidController? {
+        let device = try selectDevice(nil)
+        guard device.platform == .android else { return nil }
+        if let androidController { return androidController }
+        let client = try ADBClient()
+        androidClient = client
+        let controller = AndroidController(client: client, device: device)
+        androidController = controller
+        return controller
+    }
+
+    private func androidInputDimensions() -> (width: Int, height: Int)? {
+        guard androidInputWidth > 0, androidInputHeight > 0 else { return nil }
+        return (androidInputWidth, androidInputHeight)
+    }
+
+    private func requireAndroidAccessibility() throws -> AndroidAccessibilityService {
+        if let androidAccessibility { return androidAccessibility }
+        let device = try selectDevice(nil)
+        guard device.platform == .android else {
+            throw SimViewError("METHOD_UNSUPPORTED", "Android accessibility requires an Android device")
+        }
+        let client: ADBClient
+        if let androidClient {
+            client = androidClient
+        } else {
+            client = try ADBClient()
+        }
+        androidClient = client
+        let service = AndroidAccessibilityService(client: client, serial: device.nativeIdentifier)
+        androidAccessibility = service
+        return service
+    }
+
+    private func accessibilitySnapshot(
+        _ device: DeviceDescription, params: [String: JSONValue]
+    ) throws -> [String: Any] {
+        if device.platform == .android {
+            return try requireAndroidAccessibility().snapshot(
+                scope: params["scope"]?.stringValue ?? "interactive",
+                maxNodes: params["maxNodes"]?.intValue ?? 1_200
+            )
+        }
+        return try accessibility.snapshot(
+            udid: device.nativeIdentifier,
+            scope: params["scope"]?.stringValue ?? "interactive",
+            maxNodes: params["maxNodes"]?.intValue ?? 1_200
+        )
+    }
+
+    private func accessibilityElementAtPoint(
+        _ device: DeviceDescription, params: [String: JSONValue]
+    ) throws -> [String: Any] {
+        if device.platform == .android {
+            return try requireAndroidAccessibility().elementAtPoint(
+                x: params.double("x"), y: params.double("y")
+            )
+        }
+        return try accessibility.elementAtPoint(
+            udid: device.nativeIdentifier,
+            x: params.double("x"),
+            y: params.double("y")
+        )
+    }
+
+    private func deviceResponseDictionary(_ device: DeviceDescription) -> [String: Any] {
+        var result = device.dictionary
+        var metadata = result["metadata"] as? [String: Any] ?? [:]
+        if device.platform == .android {
+            let ownsActiveCapture = captureDeviceID == device.id
+            let agentAvailable = ownsActiveCapture && androidAgent != nil
+            metadata["captureTransport"] = agentAvailable ? "simview-agent" : "adb-screencap"
+            metadata["inputTransport"] = agentAvailable ? "simview-agent" : "adb-shell"
+            if ownsActiveCapture, let androidAgentError { metadata["agentError"] = androidAgentError }
+            var capabilities = result["capabilities"] as? [String: Any] ?? [:]
+            var input = capabilities["input"] as? [String: Any] ?? [:]
+            input["rawTouch"] = agentAvailable
+            capabilities["input"] = input
+            result["capabilities"] = capabilities
+        }
+        result["metadata"] = metadata
+        return result
     }
 
     private func broadcast(_ frame: WireFrame, codec: String) {
@@ -724,11 +1174,23 @@ final class SimViewServer: @unchecked Sendable {
         self.timer = timer
     }
 
+    private func installSignalHandlers() {
+        for value in [SIGTERM, SIGINT] {
+            Darwin.signal(value, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: value, queue: queue)
+            source.setEventHandler { [weak self] in self?.shutdown(exitCode: 0) }
+            source.resume()
+            signalSources.append(source)
+        }
+    }
+
     private func shutdown(exitCode: Int32) -> Never {
         probe.close()
         stopCapture()
         listener?.cancel()
         timer?.cancel()
+        for source in signalSources { source.cancel() }
+        signalSources.removeAll()
         for connection in connections { connection.close() }
         unlink(socketPath)
         let parent = URL(fileURLWithPath: socketPath).deletingLastPathComponent()

@@ -97,6 +97,12 @@ const compiledArtifacts = await Promise.all(
       ref: `pkg:generic/simview-probe@${rootManifest.version}`,
       path: join(root, "packages/core/bin/libSimViewProbe.dylib"),
     },
+    {
+      type: "application" as const,
+      name: "simview Android agent",
+      ref: `pkg:generic/simview-android-agent@${rootManifest.version}`,
+      path: join(root, "packages/core/bin/simview-android-agent.jar"),
+    },
   ].map(async (artifact) => ({
     type: artifact.type,
     "bom-ref": artifact.ref,

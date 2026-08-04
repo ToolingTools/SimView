@@ -7,12 +7,14 @@ import {
   type ElementTreeOutput,
   type ElementTreePage,
   elementTreePageSchema,
+  parseDeviceDescription,
 } from "@simview/contracts";
 import { assembleElementTreePages } from "../packages/app/src/helpers";
 import { createServer } from "../packages/mcp/src/server";
 import { SimViewSession } from "../packages/mcp/src/session";
 
 const appCalledTools = [
+  "app_connect_device",
   "app_connect_simulator",
   "app_enable_ui_probe",
   "app_get_accessibility_tree",
@@ -20,11 +22,13 @@ const appCalledTools = [
   "app_get_element_tree_page",
   "app_get_ui_context",
   "app_inspect_point",
+  "app_list_devices",
   "app_list_simulators",
   "app_take_screenshot",
   "save_review_images",
   "app_tap_element",
   "delete_annotation",
+  "device_input",
   "get_preview_packets",
   "simulator_input",
   "update_annotation",
@@ -32,12 +36,14 @@ const appCalledTools = [
 
 const modelOnlyTools = [
   "add_annotation",
+  "connect_device",
   "connect_simulator",
   "get_accessibility_tree",
   "get_simview_state",
   "get_ui_context",
   "enable_ui_probe",
   "inspect_point",
+  "list_devices",
   "list_simulators",
   "take_screenshot",
   "tap_element",
@@ -203,12 +209,12 @@ describe("MCP app tools", () => {
 
   test("pages one exact Fiber capture into host-safe bridge responses", async () => {
     const session = new SimViewSession();
-    session.device = {
+    session.device = parseDeviceDescription({
       udid: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
       name: "iPhone",
       state: "Booted",
       runtime: "iOS 26.0",
-    };
+    });
     const children = Array.from({ length: 653 }, (_, index) => ({
       ref: `rn:${index}`,
       kind: "host" as const,
@@ -292,17 +298,17 @@ describe("MCP app tools", () => {
     const second = new SimViewSession();
     expect(first.reviewId).not.toBe(second.reviewId);
 
-    first.device = { udid: "device-a", name: "A", state: "Booted", runtime: "iOS" };
-    second.device = { udid: "device-a", name: "A", state: "Booted", runtime: "iOS" };
+    first.device = iosDevice("device-a", "A");
+    second.device = iosDevice("device-a", "A");
     const annotation = first.addAnnotation({
       geometry: { kind: "point", x: 0.2, y: 0.4 },
       note: "First review only",
     });
     expect(second.state().annotations).toEqual([]);
 
-    first.device = { udid: "device-b", name: "B", state: "Booted", runtime: "iOS" };
+    first.device = iosDevice("device-b", "B");
     expect(first.state().annotations).toEqual([]);
-    first.device = { udid: "device-a", name: "A", state: "Booted", runtime: "iOS" };
+    first.device = iosDevice("device-a", "A");
     expect(first.state().annotations.map((item) => item.id)).toEqual([annotation.id]);
 
     const firstServer = createServer(first);
@@ -359,6 +365,40 @@ describe("MCP app tools", () => {
 
     await session.close();
     expect(await Bun.file(saved.screenshotPath).exists()).toBe(false);
+  });
+
+  test("returns the screenshot when semantic inspection fails", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.screenshot = async () => ({
+      bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+      frameId: "android-frame-1",
+      width: 1080,
+      height: 2400,
+    });
+    session.elementSnapshot = async () => {
+      throw new Error("UIAutomator timed out");
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "simview-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "observe_screen", arguments: {} });
+      expect((result.content as Array<Record<string, unknown>>)[0]).toMatchObject({
+        type: "image",
+        mimeType: "image/png",
+      });
+      expect(result.structuredContent).toMatchObject({
+        frameId: "android-frame-1",
+        semanticError: {
+          code: "semantic_inspection_failed",
+          message: "UIAutomator timed out",
+          recoverable: true,
+        },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
   });
 
   test("reuses React Native elements for selectors and reports the focused screen in state", async () => {
@@ -427,4 +467,8 @@ function resourceUri(tools: Awaited<ReturnType<Client["listTools"]>>): string {
   const meta = open?._meta as { ui?: { resourceUri?: string } } | undefined;
   if (!meta?.ui?.resourceUri) throw new Error("open_simview has no resource URI");
   return meta.ui.resourceUri;
+}
+
+function iosDevice(udid: string, name: string) {
+  return parseDeviceDescription({ udid, name, state: "Booted", runtime: "iOS" });
 }

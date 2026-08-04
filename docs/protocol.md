@@ -1,4 +1,4 @@
-# Native protocol version 1
+# Native protocol version 2
 
 The TypeScript source of truth for this protocol is
 `packages/contracts/src/protocol.ts`. It exports the `SimViewMethodMap`,
@@ -37,7 +37,7 @@ The first request must be:
 ```json
 {
   "id": "uuid",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "method": "hello",
   "params": {
     "token": "32-byte random session token",
@@ -58,7 +58,7 @@ After the handshake, each request has the following shape:
 ```json
 {
   "id": "uuid",
-  "protocolVersion": 1,
+  "protocolVersion": 2,
   "method": "devices.list",
   "params": {}
 }
@@ -100,9 +100,19 @@ method's result shape.
 - `health.get`
 - `server.shutdown`
 
+`devices.list` returns a normalized `DeviceDescription`. `id` is an opaque,
+namespaced identifier such as `ios:<uuid>` or `android:<adb-serial>`;
+`platform`, `kind`, `state`, and `available` are normalized independently of
+CoreSimulator and ADB spelling. `capabilities` declares capture, touch, text,
+buttons, orientation, accessibility, Android context, and UIKit probe support.
+`input.rawTouch` distinguishes continuous contact injection from discrete
+tap/swipe shell fallbacks when present.
+`udid` is present for iOS and `serial` for Android. Selected-device parameters
+use `deviceId`; `udid` remains an iOS compatibility alias for one release.
+
 Public coordinates are normalized from 0 to 1. `input.touch` carries
 `contactId`, `phase`, `x`, `y`, and may carry pressure and a monotonic timestamp.
-Version 1 injects the first contact; the stable shape reserves compatible
+Version 2 injects the first contact; the stable shape reserves compatible
 multi-touch expansion.
 
 Accessibility responses carry `schemaVersion: 1` and generation-scoped
@@ -119,15 +129,18 @@ bundle before requesting context or changing it.
 At the MCP layer, `get_element_tree` and its app-only alias return a versioned
 element snapshot plus frame-scoped screen context. The snapshot source is
 `react-native-fiber` when a matching local Metro/Hermes development target can
-be inspected, otherwise `core-simulator-ax`. React Native nodes use
+be inspected, otherwise `core-simulator-ax` on iOS or `android-uiautomator` on
+Android. React Native nodes use
 generation-scoped `rn:<ordinal>` references and may include component ancestry,
 host type, test ID, visible text, measured bounds, and a project-relative source
-location. AX results from this unified layer include a bounded Metro fallback
-reason. The native protocol, CLI `ax-tree`, and `get_accessibility_tree` remain
-AX-only.
+location. Native results from this unified layer include a bounded Metro
+fallback reason. The native protocol, CLI `ax-tree`, and
+`get_accessibility_tree` bypass Metro but retain their compatibility names.
+Screen context is platform-qualified; Android context may include the
+foreground package, activity, process, and task.
 
 `health.get` is a diagnostic response. It reports server status, native PID,
-instance ID, configured UDID, selected device, capture state, idle deadline,
+instance ID, configured device ID, selected device, capture state, idle deadline,
 capabilities, authenticated client counts (including counts by codec), and
 bounded capture metrics. It deliberately excludes socket paths and capability
 tokens.
@@ -135,14 +148,15 @@ tokens.
 The native server supports multiple authenticated clients and broadcasts one
 H.264 or MJPEG stream to clients that requested that codec. `capture.stop` is a
 process-global capture operation in the current protocol; callers should treat
-device selection, orientation, physical input, and probe state as Simulator-
-global rather than review-local. Protocol version 1 supports both the explicit
+device selection, orientation, physical input, and probe state as device-global
+rather than review-local. Protocol version 2 supports both the explicit
 ephemeral client path and the shared daemon client path; the latter is selected
-by `SimViewClient.acquire` and is keyed by Simulator UDID plus compatible
+by `SimViewClient.acquire` and is keyed by platform plus native identifier and compatible
 binary/protocol identity. Review isolation is provided above the native
 protocol by the MCP session's `reviewId` and per-review relay/annotation state.
 
-The optional probe is a bundled, read-only iOS Simulator dylib. `probe.enable`
+The optional probe is a bundled, read-only iOS Simulator dylib and is
+capability-gated off for Android. `probe.enable`
 requires an explicit non-Apple bundle identifier and terminates/relaunches that
 app with per-launch `SIMCTL_CHILD_*` environment. It reports UIKit view,
 controller, window, and scene context; accessibility remains available when the
@@ -154,8 +168,8 @@ Errors use:
 {
   "id": "uuid",
   "error": {
-    "code": "DEVICE_NOT_BOOTED",
-    "message": "Simulator is Shutdown, not Booted",
+    "code": "DEVICE_UNAVAILABLE",
+    "message": "Device is offline",
     "recoverable": true,
     "details": {}
   }

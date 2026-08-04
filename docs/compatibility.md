@@ -1,9 +1,12 @@
 # Compatibility boundary
 
+SimView has separate iOS and Android compatibility boundaries. A successful
+build is not support evidence for either platform.
+
 All private paths, class names, selectors, C symbols, and ABI declarations live
 under `native/SimViewCore/Sources/SimViewCore/Compatibility`.
 
-The core currently probes:
+The iOS backend currently probes:
 
 - `SimServiceContext`
 - `_TtC12SimulatorKit24SimDeviceLegacyHIDClient`
@@ -28,7 +31,28 @@ record a passing real-device-set run here.
 | previous stable minor | — | arm64 | — | — | — | not tested |
 | second previous minor | — | arm64 | — | — | — | not tested |
 
-## Required release smoke test
+### Android matrix
+
+Android support requires the official SDK Platform Tools and Android API 26 or
+later. The backend resolves ADB without changing the user's server, keys, or
+transport configuration. The transient agent uses `MediaCodec` and Android
+input services as the ADB shell user; `screencap` and shell `input` are reduced-
+capability fallbacks. Secure content remains blank and is never bypassed.
+
+| Target | Transport | Runtime | Capture | Input | Semantics | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| Android Emulator | local ADB | API 26 | — | — | — | not tested |
+| Android Emulator | local ADB | API 30 | — | — | — | not tested |
+| Android Emulator (Pixel 9 Pro XL AVD) | local ADB | Android 16 / API 36 | MediaCodec H.264, exact 1344x2992 PNG, requested keyframe, and rotation recovery pass | raw touch, swipe, long press, and Back/Overview pass | bounded UIAutomator tree, point lookup, and foreground context pass | combined local smoke passed; full soak pending |
+| Android Emulator | local ADB | latest stable other than API 36 | — | — | — | not tested |
+| Android Emulator | local ADB | preview | — | — | — | not tested |
+| Android device | authorized USB | API 26+ | — | — | — | not tested |
+| Android device | already-paired Wi-Fi | Android 11+ | — | — | — | not tested |
+
+The rows above deliberately make no Android performance, OEM, USB-device, or
+Wi-Fi-device compatibility claim until the complete smoke test is recorded.
+
+## Required iOS release smoke test
 
 For every supported row:
 
@@ -58,5 +82,28 @@ the default and requires Screen Recording permission.
 
 The passing row used development ad-hoc signatures for the arm64 core and
 probe dylib. Developer ID signing,
-notarization, the 60 fps soak, typing matrix, rotation, and multi-client checks
+notarization, the 60 fps soak, typing matrix, and multi-client checks
 remain release gates rather than claims made from this local spike.
+
+## Required Android release smoke test
+
+For every Android row:
+
+1. Confirm `simview doctor --json` reports the resolved ADB version, device
+   state, API level, agent compatibility, and actionable unauthorized/offline
+   diagnostics without exposing ADB keys or tokens.
+2. Verify H.264 preview, an exact PNG screenshot, keyframe recovery, rotation or
+   display-size recovery, and the declared MJPEG/PNG fallback.
+3. Verify tap, swipe, drag, long press, text at the declared capability level,
+   and every advertised navigation/button action.
+4. Retrieve a bounded UIAutomator tree, inspect a point, and verify foreground
+   package/activity context. UIAutomator failure must not stop screenshots or
+   coordinate input.
+5. Exercise unauthorized, offline, disconnect/reconnect, locked-screen, encoder
+   failure, OEM input denial, and `FLAG_SECURE` cases.
+6. Connect two viewers, verify daemon sharing and review isolation, then verify
+   capture stops after the last authenticated client disconnects and the agent,
+   temporary files, and only SimView-owned socket mappings are removed.
+7. Run a 60-second animated fixture and record delivered fps, first-frame time,
+   frame-to-canvas p50/p95, and input-to-visible-frame latency with host and
+   target details.

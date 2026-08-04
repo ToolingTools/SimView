@@ -3,6 +3,8 @@ import type {
   AccessibilityNode,
   AccessibilitySnapshot,
   Annotation,
+  DeviceCapabilities,
+  DeviceDescription,
   ElementTreeOutput,
   ElementTreePage,
   ReactNativeElementSnapshot,
@@ -18,7 +20,10 @@ import {
   claimFullscreenRequest,
   commentableNodeAtPoint,
   contextForNode,
+  createNativeScreenContext,
   createUIKitScreenContext,
+  deviceGroups,
+  deviceStatusLabel,
   elementPath,
   flattenTree,
   formatRuntime,
@@ -28,6 +33,7 @@ import {
   preferredInlineHeight,
   requireAnnotation,
   streamMessage,
+  supportsDeviceButton,
   visibleTree,
 } from "../packages/app/src/helpers";
 
@@ -276,7 +282,7 @@ describe("app helpers", () => {
       sourceLocation: { file: "src/InboxButton.tsx", line: 24, column: 7 },
     });
     expect(annotationMessageScreenContext(screen)).toEqual([
-      "Simulator: iPhone 17 Pro · iOS 26.0",
+      "Device: iPhone 17 Pro · iOS 26.0",
       "App: com.example.Inbox",
       "Route: Inbox",
       "Navigation: Tabs › Inbox",
@@ -346,7 +352,57 @@ describe("app helpers", () => {
 
   test("formats runtime names and frame messages", () => {
     expect(formatRuntime("com.apple.CoreSimulator.SimRuntime.iOS-26-0")).toBe("iOS 26.0");
+    expect(formatRuntime("15", "android")).toBe("Android 15");
     expect([...streamMessage(0x10, new Uint8Array([1, 2]))]).toEqual([0x10, 1, 2]);
+  });
+
+  test("groups devices and explains unavailable Android transports", () => {
+    const capture = { h264: true, mjpeg: true, screenshot: true };
+    const androidCapabilities: DeviceCapabilities = {
+      capture,
+      input: { touch: true, text: "unicode", buttons: ["home", "back"] },
+      orientation: true,
+      accessibility: true,
+      androidContext: true,
+      uikitProbe: false,
+    };
+    const emulator: DeviceDescription = {
+      id: "android:emulator-5554",
+      platform: "android" as const,
+      kind: "emulator" as const,
+      state: "ready" as const,
+      available: true,
+      name: "Pixel 9",
+      runtime: "15",
+      serial: "emulator-5554",
+      capabilities: androidCapabilities,
+    };
+    const phone: DeviceDescription = {
+      ...emulator,
+      id: "android:R3CN30",
+      kind: "physical" as const,
+      state: "unauthorized" as const,
+      available: false,
+      name: "Android device",
+      serial: "R3CN30",
+    };
+
+    expect(deviceGroups([phone, emulator]).map(({ label }) => label)).toEqual([
+      "Android Emulators",
+      "Android Devices",
+    ]);
+    expect(deviceStatusLabel(phone)).toContain("accept the ADB prompt");
+    expect(supportsDeviceButton(emulator, "back")).toBe(true);
+    expect(supportsDeviceButton(emulator, "overview")).toBe(false);
+    expect(
+      annotationMessageScreenContext(
+        createNativeScreenContext(
+          { device: emulator, frameId: "frame-android", route: "Inbox" },
+          undefined,
+          [],
+        ),
+      ),
+    ).toEqual(["Device: Pixel 9 · Android 15", "Route: Inbox", "Frame: frame-android"]);
   });
 
   test("builds an implementation-first annotation handoff", () => {
@@ -384,10 +440,26 @@ describe("app helpers", () => {
     const screenContextValue = createUIKitScreenContext(
       {
         device: {
+          id: "ios:device-1",
+          platform: "ios",
+          kind: "simulator",
           udid: "device-1",
           name: "iPhone 17 Pro",
-          state: "Booted",
+          state: "ready",
+          available: true,
           runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-0",
+          capabilities: {
+            capture: { h264: true, mjpeg: true, screenshot: true },
+            input: {
+              touch: true,
+              text: "unicode",
+              buttons: ["home", "lock", "volume-up", "volume-down", "action"],
+            },
+            orientation: true,
+            accessibility: true,
+            androidContext: false,
+            uikitProbe: true,
+          },
         },
         frameId: "frame-1",
         route: "/inbox",
@@ -443,7 +515,7 @@ describe("app helpers", () => {
       "View: UIButton",
     ]);
     expect(screenContext).toEqual([
-      "Simulator: iPhone 17 Pro · iOS 26.0",
+      "Device: iPhone 17 Pro · iOS 26.0",
       "App: com.example.Inbox",
       "Screen: UINavigationController › InboxViewController",
       "Route: /inbox",

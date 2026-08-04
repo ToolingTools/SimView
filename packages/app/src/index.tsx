@@ -34,18 +34,20 @@ import {
   compactIdentifier,
   contextForInspectedNode,
   contextForNode,
-  createUIKitScreenContext,
+  createNativeScreenContext,
+  deviceGroups,
+  deviceStatusLabel,
   elementName,
   flattenTree,
   formatFrame,
   formatProbeValue,
-  formatRuntime,
   inspectorTreeRows,
   PreviewBridgeGate,
   parseSessionState,
   preferredInlineHeight,
   requireAnnotation,
   streamMessage,
+  supportsDeviceButton,
   visibleTree,
 } from "./helpers";
 
@@ -145,7 +147,7 @@ function SimView() {
   const [sidebarWidth, setSidebarWidth] = useState(292);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
-  const [bootedDevices, setBootedDevices] = useState<Device[]>([]);
+  const [availableDevices, setAvailableDevices] = useState<Device[]>([]);
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [switchingDevice, setSwitchingDevice] = useState<string>();
   const [embedded, setEmbedded] = useState(false);
@@ -173,6 +175,11 @@ function SimView() {
   const previewReadyRef = useRef(false);
   const recordingRef = useRef<MediaRecorder>();
   const activePointer = useRef<number>();
+  const fallbackPointer = useRef<{
+    pointerId: number;
+    start: Point;
+    startedAt: number;
+  }>();
   const annotationDragRef = useRef<AnnotationDrag>();
   const pointerInputQueueRef = useRef<PointerInput[]>([]);
   const pointerInputRunningRef = useRef(false);
@@ -308,9 +315,12 @@ function SimView() {
   }, [uiContext?.target?.bundleId]);
 
   useEffect(() => {
-    if (!state.connected || (!embedded && !token)) return;
+    if (!state.connected || state.device?.platform !== "ios" || (!embedded && !token)) {
+      setUiContext(undefined);
+      return;
+    }
     void loadUiContext();
-  }, [state.connected, embedded, token]);
+  }, [state.connected, state.device?.platform, embedded, token]);
 
   useEffect(
     () => () => {
@@ -398,7 +408,7 @@ function SimView() {
         videoPaintRequestRef.current = undefined;
       }
     };
-  }, [embedded, state.connected, state.device?.udid, mode]);
+  }, [embedded, state.connected, state.device?.id, mode]);
 
   async function loadBrowserState() {
     const hashToken = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
@@ -460,13 +470,13 @@ function SimView() {
     return await assembleElementTreePages(pages);
   }
 
-  async function loadBootedDevices() {
+  async function loadAvailableDevices() {
     setDevicesLoading(true);
     try {
       const devices = embedded
         ? await bridge
             .callServerTool({
-              name: "app_list_simulators",
+              name: "app_list_devices",
               arguments: {},
             })
             .then((result) => {
@@ -474,22 +484,21 @@ function SimView() {
             })
         : await relayFetch("/devices")
             .then(async (response) => {
-              if (!response.ok) throw new Error(`Simulator list failed (${response.status})`);
+              if (!response.ok) throw new Error(`Device list failed (${response.status})`);
               return simulatorListSchema.parse(await response.json());
             })
             .then((result) => result.devices);
-      const booted = devices.filter((device) => device.state === "Booted");
-      setBootedDevices((current) => {
-        if (!current.length) return booted;
-        const byUdid = new Map(booted.map((device) => [device.udid, device]));
+      setAvailableDevices((current) => {
+        if (!current.length) return devices;
+        const byId = new Map(devices.map((device) => [device.id, device]));
         const retained = current
-          .map((device) => byUdid.get(device.udid))
+          .map((device) => byId.get(device.id))
           .filter((device): device is Device => Boolean(device));
-        const retainedIds = new Set(retained.map((device) => device.udid));
-        return [...retained, ...booted.filter((device) => !retainedIds.has(device.udid))];
+        const retainedIds = new Set(retained.map((device) => device.id));
+        return [...retained, ...devices.filter((device) => !retainedIds.has(device.id))];
       });
     } catch (error) {
-      show(`Unable to list simulators: ${error instanceof Error ? error.message : String(error)}`);
+      show(`Unable to list devices: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setDevicesLoading(false);
     }
@@ -502,17 +511,18 @@ function SimView() {
     }
     setToolsOpen(false);
     setDeviceMenuOpen(true);
-    await loadBootedDevices();
+    await loadAvailableDevices();
   }
 
-  async function selectSimulator(device: Device) {
-    if (device.udid === state.device?.udid) {
+  async function selectDevice(device: Device) {
+    if (!device.available) return;
+    if (device.id === state.device?.id) {
       setDeviceMenuOpen(false);
       return;
     }
     setStartupError("");
     setStartupPhase("connecting");
-    setSwitchingDevice(device.udid);
+    setSwitchingDevice(device.id);
     elementTreeAbortRef.current?.abort();
     elementTreeAbortRef.current = undefined;
     accessibilityRequestPending.current = false;
@@ -520,18 +530,18 @@ function SimView() {
       const nextState = embedded
         ? await bridge
             .callServerTool({
-              name: "app_connect_simulator",
-              arguments: { udid: device.udid },
+              name: "app_connect_device",
+              arguments: { deviceId: device.id },
             })
             .then((result) => sessionStateSchema.parse(result.structuredContent))
         : await relayFetch("/device", {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ udid: device.udid }),
+            body: JSON.stringify({ deviceId: device.id }),
           }).then(async (response) => {
             if (!response.ok)
               throw new Error(
-                (await response.text()) || `Simulator switch failed (${response.status})`,
+                (await response.text()) || `Device switch failed (${response.status})`,
               );
             return sessionStateSchema.parse(await response.json());
           });
@@ -559,7 +569,7 @@ function SimView() {
       const message = error instanceof Error ? error.message : String(error);
       setStartupError(message);
       setStartupPhase("error");
-      show(`Unable to switch simulator: ${message}`);
+      show(`Unable to switch device: ${message}`);
     } finally {
       setSwitchingDevice(undefined);
     }
@@ -668,7 +678,7 @@ function SimView() {
   async function relayInput(method: string, params: unknown) {
     if (embedded) {
       await bridge.callServerTool({
-        name: "simulator_input",
+        name: "device_input",
         arguments: {
           method,
           params: params as Record<string, unknown>,
@@ -682,7 +692,27 @@ function SimView() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ method, params }),
     });
-    if (!response.ok) throw new Error(`Simulator input failed (${response.status})`);
+    if (!response.ok) throw new Error(`Device input failed (${response.status})`);
+  }
+
+  async function refreshSelectedDeviceState() {
+    const deviceId = state.device?.id;
+    if (!deviceId) return;
+    const nextState = embedded
+      ? await bridge
+          .callServerTool({
+            name: "app_connect_device",
+            arguments: { deviceId },
+          })
+          .then((result) => sessionStateSchema.parse(result.structuredContent))
+      : await relayFetch("/state").then(async (response) => {
+          if (!response.ok) throw new Error(`Device state refresh failed (${response.status})`);
+          return sessionStateSchema.parse(await response.json());
+        });
+    setState((current) => ({
+      ...nextState,
+      ...(current.relayOrigin ? { relayOrigin: current.relayOrigin } : {}),
+    }));
   }
 
   async function submitTypedText(event: SubmitEvent) {
@@ -703,7 +733,7 @@ function SimView() {
 
   function coordinate(event: PointerEvent): Point {
     const screen = screenRef.current;
-    if (!screen) throw new Error("Simulator stage is unavailable");
+    if (!screen) throw new Error("Device stage is unavailable");
     const rect = screen.getBoundingClientRect();
     return {
       kind: "point",
@@ -758,7 +788,10 @@ function SimView() {
       }
     } catch (error) {
       pointerInputQueueRef.current = [];
-      show(`Simulator input failed: ${error instanceof Error ? error.message : String(error)}`);
+      if (state.device?.platform === "android" && state.device.capabilities.input.rawTouch) {
+        await refreshSelectedDeviceState().catch(() => {});
+      }
+      show(`Device input failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       pointerInputRunningRef.current = false;
       if (pointerInputQueueRef.current.length) void drainPointerInput();
@@ -784,6 +817,14 @@ function SimView() {
     }
     activePointer.current = event.pointerId;
     screenRef.current?.setPointerCapture(event.pointerId);
+    if (state.device?.capabilities.input.rawTouch === false) {
+      fallbackPointer.current = {
+        pointerId: event.pointerId,
+        start: point,
+        startedAt: performance.now(),
+      };
+      return;
+    }
     enqueuePointerInput({
       contactId: event.pointerId,
       phase: "down",
@@ -835,6 +876,9 @@ function SimView() {
       return;
     }
     if (activePointer.current !== event.pointerId) return;
+    if (fallbackPointer.current?.pointerId === event.pointerId) {
+      return;
+    }
     enqueuePointerInput({
       contactId: event.pointerId,
       phase: "move",
@@ -932,6 +976,31 @@ function SimView() {
     if (activePointer.current !== event.pointerId) return;
     activePointer.current = undefined;
     const point = coordinate(event);
+    const fallback = fallbackPointer.current;
+    if (fallback?.pointerId === event.pointerId) {
+      fallbackPointer.current = undefined;
+      screenRef.current?.releasePointerCapture(event.pointerId);
+      const distance = Math.hypot(point.x - fallback.start.x, point.y - fallback.start.y);
+      const durationMs = Math.max(1, performance.now() - fallback.startedAt);
+      const input =
+        distance >= 0.01
+          ? relayInput("input.swipe", {
+              from: { x: fallback.start.x, y: fallback.start.y },
+              to: { x: point.x, y: point.y },
+              durationMs,
+            })
+          : durationMs >= 450
+            ? relayInput("input.longPress", {
+                x: point.x,
+                y: point.y,
+                durationMs,
+              })
+            : relayInput("input.tap", { x: point.x, y: point.y });
+      void input.catch((error) => {
+        show(`Device input failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      return;
+    }
     enqueuePointerInput({
       contactId: event.pointerId,
       phase: "up",
@@ -944,6 +1013,11 @@ function SimView() {
     if (mode === "annotate" && annotationDragRef.current?.pointerId === event.pointerId) {
       annotationDragRef.current = undefined;
       setDraftSelection(undefined);
+      return;
+    }
+    if (fallbackPointer.current?.pointerId === event.pointerId) {
+      fallbackPointer.current = undefined;
+      activePointer.current = undefined;
       return;
     }
     onPointerUp(event);
@@ -1030,7 +1104,7 @@ function SimView() {
   async function sendToChat() {
     if (!embedded) return show("Send to Chat is available inside an MCP host");
     const canvas = canvasRef.current;
-    if (!canvas?.width || !canvas.height) return show("No simulator frame to send");
+    if (!canvas?.width || !canvas.height) return show("No device frame to send");
     const imageData = canvas.toDataURL("image/png").split(",", 2)[1];
     if (!imageData) return show("Screenshot capture failed");
     const annotations = visibleAnnotations.map((annotation) => ({
@@ -1042,7 +1116,11 @@ function SimView() {
     const capturedScreenContext =
       frozenScreenContext ??
       screenContext ??
-      createUIKitScreenContext({ ...state, frameId: activeFrameId }, uiContext, visibleAnnotations);
+      createNativeScreenContext(
+        { ...state, frameId: activeFrameId },
+        uiContext,
+        visibleAnnotations,
+      );
     try {
       const savedImages = saveReviewImagesOutputSchema.parse(
         (
@@ -1132,7 +1210,7 @@ function SimView() {
     setFrozenScreenContext(
       screenContext
         ? { ...screenContext, frameId }
-        : createUIKitScreenContext({ ...state, frameId }, uiContext, visibleAnnotations),
+        : createNativeScreenContext({ ...state, frameId }, uiContext, visibleAnnotations),
     );
     setMode("annotate");
     setEditor(undefined);
@@ -1288,6 +1366,10 @@ function SimView() {
   }
 
   async function loadUiContext() {
+    if (state.device?.platform !== "ios") {
+      setUiContext(undefined);
+      return;
+    }
     try {
       if (embedded) {
         const result = await bridge
@@ -1323,6 +1405,10 @@ function SimView() {
 
   async function enableUiProbe(event: SubmitEvent) {
     event.preventDefault();
+    if (state.device?.platform !== "ios") {
+      setProbeError("The UIKit probe is available only for iOS Simulators.");
+      return;
+    }
     const bundleId = probeBundleId.trim();
     if (bundleId.length < 3) {
       setProbeError("Enter the app bundle identifier.");
@@ -1427,7 +1513,7 @@ function SimView() {
     setFrozenScreenContext(
       screenContext
         ? { ...screenContext, frameId: currentFrameId }
-        : createUIKitScreenContext(
+        : createNativeScreenContext(
             { ...state, frameId: currentFrameId },
             uiContext,
             visibleAnnotations,
@@ -1517,6 +1603,8 @@ function SimView() {
   const visibleController = keyWindow?.visibleControllerPath?.at(-1);
   const displayedScreenContext = frozenScreenContext ?? screenContext;
   const inlineHeight = embedded ? preferredInlineHeight(hostContext) : undefined;
+  const groupedDevices = deviceGroups(availableDevices);
+  const selectedPlatform = state.device?.platform;
 
   return (
     <main
@@ -1532,7 +1620,7 @@ function SimView() {
             <button
               type="button"
               class="tool-button tools-trigger"
-              aria-label="Simulator tools"
+              aria-label="Device tools"
               aria-expanded={toolsOpen}
               onClick={() => {
                 setDeviceMenuOpen(false);
@@ -1542,38 +1630,68 @@ function SimView() {
               <Icon name="menu" />
             </button>
             {toolsOpen && (
-              <nav class="tools-menu" aria-label="Simulator tools">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setToolsOpen(false);
-                    void relayInput("input.button", { button: "home" });
-                  }}
-                >
-                  <Icon name="home" />
-                  <span>Home</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setToolsOpen(false);
-                    setTypeText("");
-                    setTypeTextOpen(true);
-                  }}
-                >
-                  <Icon name="type" />
-                  <span>Type text…</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setToolsOpen(false);
-                    void captureOnly();
-                  }}
-                >
-                  <Icon name="capture" />
-                  <span>Capture</span>
-                </button>
+              <nav class="tools-menu" aria-label="Device tools">
+                {supportsDeviceButton(state.device, "home") && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToolsOpen(false);
+                      void relayInput("input.button", { button: "home" });
+                    }}
+                  >
+                    <Icon name="home" />
+                    <span>Home</span>
+                  </button>
+                )}
+                {supportsDeviceButton(state.device, "back") && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToolsOpen(false);
+                      void relayInput("input.button", { button: "back" });
+                    }}
+                  >
+                    <Icon name="chevron-left" />
+                    <span>Back</span>
+                  </button>
+                )}
+                {supportsDeviceButton(state.device, "overview") && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToolsOpen(false);
+                      void relayInput("input.button", { button: "overview" });
+                    }}
+                  >
+                    <Icon name="layers" />
+                    <span>Overview</span>
+                  </button>
+                )}
+                {state.device && state.device.capabilities.input.text !== "none" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToolsOpen(false);
+                      setTypeText("");
+                      setTypeTextOpen(true);
+                    }}
+                  >
+                    <Icon name="type" />
+                    <span>Type text…</span>
+                  </button>
+                )}
+                {state.device?.capabilities.capture.screenshot && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setToolsOpen(false);
+                      void captureOnly();
+                    }}
+                  >
+                    <Icon name="capture" />
+                    <span>Capture</span>
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => {
@@ -1593,53 +1711,59 @@ function SimView() {
             <button
               type="button"
               class="tool-button device-trigger"
-              aria-label="Choose simulator"
+              aria-label="Choose device"
               aria-expanded={deviceMenuOpen}
               onClick={() => void toggleDeviceMenu()}
             >
               <Icon name="phone" />
             </button>
             {deviceMenuOpen && (
-              <div class="device-menu" role="menu" aria-label="Booted simulators">
+              <div class="device-menu" role="menu" aria-label="Available devices">
                 <div class="device-menu-heading">
-                  <strong>Booted Simulators</strong>
+                  <strong>Devices</strong>
                   <button
                     type="button"
                     class="icon-action"
-                    aria-label="Refresh simulators"
+                    aria-label="Refresh devices"
                     disabled={devicesLoading}
-                    onClick={() => void loadBootedDevices()}
+                    onClick={() => void loadAvailableDevices()}
                   >
                     <Icon name="refresh" />
                   </button>
                 </div>
-                {devicesLoading && !bootedDevices.length ? (
-                  <p>Looking for booted devices…</p>
-                ) : bootedDevices.length ? (
-                  bootedDevices.map((device) => {
-                    const selected = device.udid === state.device?.udid;
-                    return (
-                      <button
-                        key={device.udid}
-                        type="button"
-                        role="menuitem"
-                        class="device-option"
-                        disabled={Boolean(switchingDevice)}
-                        onClick={() => void selectSimulator(device)}
-                      >
-                        <span class="device-check">{selected && <Icon name="check" />}</span>
-                        <span>
-                          <strong>{device.name}</strong>
-                          <small>{formatRuntime(device.runtime)}</small>
-                        </span>
-                        {switchingDevice === device.udid && (
-                          <span class="device-switching">Switching…</span>
-                        )}
-                      </button>
-                    );
-                  })
+                {devicesLoading && !availableDevices.length ? (
+                  <p>Looking for devices…</p>
+                ) : groupedDevices.length ? (
+                  groupedDevices.map((group) => (
+                    <section class="device-group" key={group.key}>
+                      <strong class="device-group-label">{group.label}</strong>
+                      {group.devices.map((device) => {
+                        const selected = device.id === state.device?.id;
+                        return (
+                          <button
+                            key={device.id}
+                            type="button"
+                            role="menuitem"
+                            class="device-option"
+                            disabled={!device.available || Boolean(switchingDevice)}
+                            title={!device.available ? deviceStatusLabel(device) : undefined}
+                            onClick={() => void selectDevice(device)}
+                          >
+                            <span class="device-check">{selected && <Icon name="check" />}</span>
+                            <span>
+                              <strong>{device.name}</strong>
+                              <small>{deviceStatusLabel(device)}</small>
+                            </span>
+                            {switchingDevice === device.id && (
+                              <span class="device-switching">Switching…</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                    </section>
+                  ))
                 ) : (
-                  <p>No booted simulators found.</p>
+                  <p>No iOS Simulators or Android devices found.</p>
                 )}
               </div>
             )}
@@ -1712,17 +1836,17 @@ function SimView() {
                 {startupPhase !== "error" && <span class="startup-spinner" aria-hidden="true" />}
                 <strong>
                   {startupPhase === "error"
-                    ? "Simulator unavailable"
+                    ? "Device unavailable"
                     : startupPhase === "waiting-for-frame"
                       ? "Starting live preview"
-                      : "Connecting to Simulator"}
+                      : "Connecting to device"}
                 </strong>
                 <span>
                   {startupPhase === "error"
-                    ? `${startupError} Choose a booted Simulator from the device menu.`
+                    ? `${startupError} Choose an available device from the device menu.`
                     : startupPhase === "waiting-for-frame"
                       ? `Waiting for the first frame${state.device?.name ? ` from ${state.device.name}` : ""}…`
-                      : "Finding a booted device and starting capture…"}
+                      : "Finding an available device and starting capture…"}
                 </span>
               </div>
             )}
@@ -1822,7 +1946,7 @@ function SimView() {
             )}
           </div>
         </section>
-        <aside class="inspector" aria-label="Simulator inspector">
+        <aside class="inspector" aria-label="Device inspector">
           <div
             class="sidebar-resizer"
             onPointerDown={(event) => {
@@ -1854,9 +1978,13 @@ function SimView() {
                     >
                       {accessibility.source === "react-native-fiber"
                         ? "React Native · "
-                        : elementFallback
-                          ? "AX fallback · "
-                          : "AX · "}
+                        : accessibility.source === "android-uiautomator"
+                          ? elementFallback
+                            ? "UIAutomator fallback · "
+                            : "UIAutomator · "
+                          : elementFallback
+                            ? "AX fallback · "
+                            : "AX · "}
                       {accessibility.source === "react-native-fiber"
                         ? `${visibleElementCount} visible`
                         : accessibility.stats.nodeCount}
@@ -2074,6 +2202,8 @@ function SimView() {
               </button>
               {displayedScreenContext?.kind === "react-native" ? (
                 <span class="probe-live">React Native</span>
+              ) : selectedPlatform === "android" ? (
+                <span class="probe-live">UIAutomator</span>
               ) : (
                 uiContext?.status.connected && <span class="probe-live">UIKit</span>
               )}
@@ -2095,6 +2225,20 @@ function SimView() {
                     <dt>Screen</dt>
                     <dd>{displayedScreenContext.screenComponent ?? "—"}</dd>
                   </div>
+                  {(displayedScreenContext.packageName ?? displayedScreenContext.bundleId) && (
+                    <div>
+                      <dt>App</dt>
+                      <dd>
+                        {displayedScreenContext.packageName ?? displayedScreenContext.bundleId}
+                      </dd>
+                    </div>
+                  )}
+                  {displayedScreenContext.activityName && (
+                    <div>
+                      <dt>Activity</dt>
+                      <dd>{displayedScreenContext.activityName}</dd>
+                    </div>
+                  )}
                   <div>
                     <dt>Renderer</dt>
                     <dd>{formatProbeValue(displayedScreenContext.renderer)}</dd>
@@ -2112,6 +2256,35 @@ function SimView() {
                           ? `:${displayedScreenContext.sourceLocation.line}`
                           : ""}
                       </dd>
+                    </div>
+                  )}
+                </dl>
+              ) : displayedScreenContext?.kind === "android" ? (
+                <dl>
+                  <div>
+                    <dt>App</dt>
+                    <dd>{displayedScreenContext.packageName ?? "—"}</dd>
+                  </div>
+                  <div>
+                    <dt>Activity</dt>
+                    <dd>{displayedScreenContext.activityName ?? "—"}</dd>
+                  </div>
+                  {displayedScreenContext.route && (
+                    <div>
+                      <dt>Route</dt>
+                      <dd>{displayedScreenContext.route}</dd>
+                    </div>
+                  )}
+                  {displayedScreenContext.processId && (
+                    <div>
+                      <dt>Process</dt>
+                      <dd>{displayedScreenContext.processId}</dd>
+                    </div>
+                  )}
+                  {displayedScreenContext.taskId && (
+                    <div>
+                      <dt>Task</dt>
+                      <dd>{displayedScreenContext.taskId}</dd>
                     </div>
                   )}
                 </dl>
@@ -2143,6 +2316,11 @@ function SimView() {
                     </div>
                   )}
                 </dl>
+              ) : selectedPlatform === "android" ? (
+                <div class="probe-empty">
+                  <Icon name="layers" />
+                  <span>Refresh Elements to inspect the foreground Android activity.</span>
+                </div>
               ) : !uiContext ? (
                 <div class="probe-empty">
                   <Icon name="layers" />
@@ -2260,7 +2438,7 @@ function SimView() {
                 <Icon name="type" />
               </span>
               <div>
-                <strong id="type-text-title">Type text in Simulator</strong>
+                <strong id="type-text-title">Type text on device</strong>
                 <p>Enter the text to send to the currently focused control.</p>
               </div>
             </div>
@@ -2533,6 +2711,8 @@ function iconPaths(name: string): ComponentChildren {
       );
     case "chevron-down":
       return <path d="m7 9 5 5 5-5" />;
+    case "chevron-left":
+      return <path d="m15 7-5 5 5 5" />;
     case "chevron-right":
       return <path d="m9 7 5 5-5 5" />;
     case "collapse-tree":

@@ -6,6 +6,7 @@ import {
   type AnnotationContext,
   type AnnotationGeometry,
   annotationSchema,
+  type DeviceDescription,
   type ElementSnapshot,
   type ElementTreeOutput,
   type ElementTreePage,
@@ -28,6 +29,49 @@ export type AnnotationMessageItem = {
 };
 
 export const PREFERRED_INLINE_HEIGHT = 600;
+
+export type DeviceGroup = {
+  key: "ios-simulators" | "android-emulators" | "android-devices";
+  label: string;
+  devices: DeviceDescription[];
+};
+
+export function deviceGroups(devices: readonly DeviceDescription[]): DeviceGroup[] {
+  const groups: DeviceGroup[] = [
+    { key: "ios-simulators", label: "iOS Simulators", devices: [] },
+    { key: "android-emulators", label: "Android Emulators", devices: [] },
+    { key: "android-devices", label: "Android Devices", devices: [] },
+  ];
+  for (const device of devices) {
+    const group =
+      device.platform === "ios" ? groups[0] : device.kind === "physical" ? groups[2] : groups[1];
+    group?.devices.push(device);
+  }
+  return groups.filter((group) => group.devices.length > 0);
+}
+
+export function deviceStatusLabel(device: DeviceDescription): string {
+  if (device.available) return formatRuntime(device.runtime, device.platform);
+  switch (device.state) {
+    case "unauthorized":
+      return "Authorization required — accept the ADB prompt on the device";
+    case "offline":
+      return "Offline — reconnect the device or restart the emulator";
+    case "booting":
+      return "Starting…";
+    case "shutdown":
+      return "Shut down";
+    default:
+      return "Unavailable";
+  }
+}
+
+export function supportsDeviceButton(
+  device: DeviceDescription | undefined,
+  button: DeviceDescription["capabilities"]["input"]["buttons"][number],
+): boolean {
+  return device?.capabilities.input.buttons.includes(button) ?? false;
+}
 
 export class PreviewBridgeGate {
   #priorityRequests = 0;
@@ -169,8 +213,10 @@ export function createUIKitScreenContext(
   return {
     schemaVersion: 1,
     kind: "uikit",
+    platform: "ios",
     capturedAt: new Date().toISOString(),
     frameId: state.frameId ?? "current",
+    deviceName: state.device?.name,
     simulatorName: state.device?.name,
     runtime: state.device?.runtime,
     bundleId,
@@ -185,13 +231,38 @@ export function createUIKitScreenContext(
   };
 }
 
+export function createNativeScreenContext(
+  state: Pick<SessionState, "device" | "frameId" | "route" | "component">,
+  uiContext: UiContext | undefined,
+  annotations: readonly Annotation[],
+): ScreenContext {
+  if (state.device?.platform === "android") {
+    return {
+      schemaVersion: 1,
+      kind: "android",
+      platform: "android",
+      capturedAt: new Date().toISOString(),
+      frameId: state.frameId ?? "current",
+      deviceName: state.device.name,
+      runtime: state.device.runtime,
+      route: state.route,
+      component: state.component?.label,
+      testID: state.component?.testID,
+      source: state.component?.source,
+    };
+  }
+  return createUIKitScreenContext(state, uiContext, annotations);
+}
+
 export function annotationMessageScreenContext(context: ScreenContext | undefined): string[] {
   if (!context) return [];
   if (context.kind === "react-native") {
     return [
-      context.simulatorName &&
-        `Simulator: ${context.simulatorName}${context.runtime ? ` · ${formatRuntime(context.runtime)}` : ""}`,
-      context.bundleId && `App: ${context.bundleId}`,
+      (context.deviceName ?? context.simulatorName) &&
+        `Device: ${context.deviceName ?? context.simulatorName}${context.runtime ? ` · ${formatRuntime(context.runtime, context.platform)}` : ""}`,
+      (context.packageName ?? context.bundleId) &&
+        `App: ${context.packageName ?? context.bundleId}`,
+      context.activityName && `Activity: ${context.activityName}`,
       context.route && `Route: ${context.route}`,
       context.navigationPath?.length && `Navigation: ${context.navigationPath.join(" › ")}`,
       context.screenComponent && `Screen component: ${context.screenComponent}`,
@@ -205,9 +276,24 @@ export function annotationMessageScreenContext(context: ScreenContext | undefine
       `Frame: ${context.frameId}`,
     ].filter((value): value is string => Boolean(value));
   }
+  if (context.kind === "android") {
+    return [
+      context.deviceName &&
+        `Device: ${context.deviceName}${context.runtime ? ` · ${formatRuntime(context.runtime, "android")}` : ""}`,
+      context.packageName && `App: ${context.packageName}`,
+      context.activityName && `Activity: ${context.activityName}`,
+      context.route && `Route: ${context.route}`,
+      context.component && `Component: ${context.component}`,
+      context.testID && `Test ID: ${context.testID}`,
+      context.source && `Source: ${context.source}`,
+      context.processId && `Process: ${context.processId}`,
+      context.taskId && `Task: ${context.taskId}`,
+      `Frame: ${context.frameId}`,
+    ].filter((value): value is string => Boolean(value));
+  }
   return [
-    context.simulatorName &&
-      `Simulator: ${context.simulatorName}${context.runtime ? ` · ${formatRuntime(context.runtime)}` : ""}`,
+    (context.deviceName ?? context.simulatorName) &&
+      `Device: ${context.deviceName ?? context.simulatorName}${context.runtime ? ` · ${formatRuntime(context.runtime, "ios")}` : ""}`,
     context.bundleId && `App: ${context.bundleId}`,
     context.controllerPath?.length && `Screen: ${context.controllerPath.join(" › ")}`,
     context.route && `Route: ${context.route}`,
@@ -467,8 +553,9 @@ export function formatProbeValue(value: string): string {
     .replace(/^./, (character) => character.toUpperCase());
 }
 
-export function formatRuntime(runtime?: string): string {
-  if (!runtime) return "iOS Simulator";
+export function formatRuntime(runtime?: string, platform: "ios" | "android" = "ios"): string {
+  if (!runtime) return platform === "android" ? "Android" : "iOS Simulator";
+  if (platform === "android") return /^Android\b/i.test(runtime) ? runtime : `Android ${runtime}`;
   const version = runtime.match(/iOS-([0-9-]+)$/)?.[1]?.replaceAll("-", ".");
   return version ? `iOS ${version}` : runtime;
 }

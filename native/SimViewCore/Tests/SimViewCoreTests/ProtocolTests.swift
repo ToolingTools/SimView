@@ -1,9 +1,21 @@
 import CoreVideo
+import Darwin
 import XCTest
 
 @testable import SimViewCore
 
 final class ProtocolTests: XCTestCase {
+    private func temporaryExecutable(_ body: String) throws -> URL {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("simview-adb-tests-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let executable = directory.appendingPathComponent("adb")
+        try Data(("#!/bin/sh\n" + body).utf8).write(to: executable)
+        XCTAssertEqual(chmod(executable.path, 0o700), 0)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return executable
+    }
+
     func testCanonicalHelloFixtureDecodes() throws {
         let fixture = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent()
@@ -97,6 +109,258 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(preferredCodec(["mjpeg", "h264"]), "mjpeg")
         XCTAssertEqual(preferredCodec(["av1", "mjpeg"]), "mjpeg")
         XCTAssertEqual(preferredCodec([]), "mjpeg")
+    }
+
+    func testADBDeviceParserRetainsTransportStatesAndAttributes() {
+        let records = ADBClient.parseDevices(
+            """
+            List of devices attached
+            emulator-5554 device product:sdk_gphone64_arm64 model:sdk_gphone64_arm64 transport_id:1
+            R58M1234 unauthorized usb:1-2 transport_id:2
+            192.168.1.2:37123 offline transport_id:3
+
+            """)
+        XCTAssertEqual(records.count, 3)
+        XCTAssertEqual(records[0].serial, "emulator-5554")
+        XCTAssertEqual(records[0].attributes["model"], "sdk_gphone64_arm64")
+        XCTAssertEqual(records[1].state, "unauthorized")
+        XCTAssertEqual(records[2].serial, "192.168.1.2:37123")
+    }
+
+    func testADBPropertyParserReadsOneCompleteGetpropSnapshot() {
+        let properties = AndroidDeviceProvider.parseProperties(
+            """
+            [ro.build.version.release]: [16]
+            [ro.build.version.sdk]: [36]
+            [ro.product.model]: [Pixel 9 Pro XL]
+            [sys.boot_completed]: [1]
+            """)
+        XCTAssertEqual(properties["ro.build.version.release"], "16")
+        XCTAssertEqual(properties["ro.product.model"], "Pixel 9 Pro XL")
+        XCTAssertEqual(properties["sys.boot_completed"], "1")
+    }
+
+    func testAndroidDisplayDimensionsFollowCurrentRotation() {
+        let portrait = AndroidDeviceProvider.orientedSize(width: 1_344, height: 2_992, rotation: 0)
+        XCTAssertEqual(portrait.width, 1_344)
+        XCTAssertEqual(portrait.height, 2_992)
+        let landscape = AndroidDeviceProvider.orientedSize(width: 1_344, height: 2_992, rotation: 1)
+        XCTAssertEqual(landscape.width, 2_992)
+        XCTAssertEqual(landscape.height, 1_344)
+    }
+
+    func testAndroidDisplayDensityPrefersOverride() {
+        XCTAssertEqual(
+            AndroidDeviceProvider.parseDisplayDensity(
+                "Physical density: 480\nOverride density: 420\n"
+            ),
+            420
+        )
+        XCTAssertEqual(AndroidDeviceProvider.parseDisplayDensity("Physical density: 480\n"), 480)
+    }
+
+    func testADBResolverHonorsExplicitPathBeforeSDKAndPATH() throws {
+        let explicit = try temporaryExecutable("exit 0\n")
+        let environment = [
+            "SIMVIEW_ADB_PATH": explicit.path,
+            "ANDROID_SDK_ROOT": "/not/the/selected/sdk",
+            "PATH": "/not/the/selected/path",
+        ]
+        XCTAssertEqual(ADBResolver.resolve(environment: environment), explicit.path)
+    }
+
+    func testADBClientPassesSerialAndArgumentsWithoutAShell() throws {
+        let executable = try temporaryExecutable("printf '%s\\n' \"$@\"\n")
+        let result = try ADBClient(executable: executable.path).require(
+            ["shell", "input", "text", "hello;touch /tmp/not-run"],
+            serial: "emulator-5554;also-not-run"
+        )
+        XCTAssertEqual(
+            result.text.split(whereSeparator: \.isNewline).map(String.init),
+            ["-s", "emulator-5554;also-not-run", "shell", "input", "text", "hello;touch /tmp/not-run"]
+        )
+    }
+
+    func testADBClientBoundsOutputAndEnforcesDeadline() throws {
+        let verbose = try temporaryExecutable("printf 123456789\n")
+        XCTAssertThrowsError(
+            try ADBClient(executable: verbose.path).execute([], maximumOutput: 4)
+        ) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "ADB_OUTPUT_TOO_LARGE")
+        }
+
+        let slow = try temporaryExecutable("exec sleep 5\n")
+        XCTAssertThrowsError(
+            try ADBClient(executable: slow.path).execute([], timeout: 0.05)
+        ) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "ADB_COMMAND_TIMEOUT")
+        }
+    }
+
+    func testAndroidHierarchyParserMapsSemanticsAndBounds() throws {
+        let xml = Data(
+            """
+            <?xml version='1.0' encoding='UTF-8' standalone='yes' ?>
+            <hierarchy rotation="0">
+              <node index="0" text="" resource-id="" class="android.widget.FrameLayout" package="dev.simview.fixture" content-desc="" clickable="false" enabled="true" bounds="[0,0][1080,2400]">
+                <node index="0" text="Continue" resource-id="dev.simview.fixture:id/continue" class="android.widget.Button" package="dev.simview.fixture" content-desc="Continue action" clickable="true" enabled="true" bounds="[100,200][500,320]" />
+              </node>
+            </hierarchy>
+            """.utf8
+        )
+        let parser = AndroidHierarchyParser(maxNodes: 10)
+        let root = try parser.parse(xml)
+        XCTAssertEqual(parser.nodeCount, 2)
+        let children = try XCTUnwrap(root["children"] as? [[String: Any]])
+        XCTAssertEqual(children[0]["identifier"] as? String, "dev.simview.fixture:id/continue")
+        XCTAssertEqual(children[0]["label"] as? String, "Continue action")
+        XCTAssertEqual((children[0]["bounds"] as? [String: Int])?["width"], 400)
+        XCTAssertEqual(children[0]["actions"] as? [String], ["click"])
+    }
+
+    func testAndroidPointInspectionReturnsANodeAndSnapshotScopedReference() throws {
+        let executable = try temporaryExecutable(
+            """
+            if [ "$3" = "exec-out" ]; then
+              printf '%s' "<hierarchy rotation='0'><node class='android.widget.Button' package='dev.simview.fixture' content-desc='Continue' clickable='true' enabled='true' bounds='[0,0][1080,2400]' /></hierarchy>"
+            fi
+            exit 0
+            """
+        )
+        let service = AndroidAccessibilityService(
+            client: try ADBClient(executable: executable.path),
+            serial: "emulator-5554"
+        )
+        let element = try service.elementAtPoint(x: 0.5, y: 0.5)
+        XCTAssertNotNil(element["ref"] as? String)
+        XCTAssertTrue((element["ref"] as? String)?.hasPrefix("android:") == true)
+        XCTAssertNil(element["element"])
+    }
+
+    func testAndroidInteractiveSnapshotRetainsTextOnlyNodes() throws {
+        let executable = try temporaryExecutable(
+            """
+            if [ "$3" = "exec-out" ]; then
+              printf '%s' "<hierarchy rotation='0'><node class='android.widget.FrameLayout' bounds='[0,0][1080,2400]'><node text='Welcome back' class='android.widget.TextView' bounds='[40,80][500,160]' /></node></hierarchy>"
+            fi
+            exit 0
+            """
+        )
+        let service = AndroidAccessibilityService(
+            client: try ADBClient(executable: executable.path),
+            serial: "emulator-5554"
+        )
+        let snapshot = try service.snapshot(scope: "interactive")
+        let root = try XCTUnwrap(snapshot["root"] as? [String: Any])
+        let children = try XCTUnwrap(root["children"] as? [[String: Any]])
+        XCTAssertEqual(children.first?["value"] as? String, "Welcome back")
+    }
+
+    func testAndroidScreenshotRejectsUndecodablePNGPayload() throws {
+        let executable = try temporaryExecutable("printf '\\211PNGnot-an-image'\n")
+        let capture = AndroidFrameCapture(
+            client: try ADBClient(executable: executable.path),
+            serial: "emulator-5554"
+        )
+        XCTAssertThrowsError(try capture.screenshot()) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "ANDROID_SCREENSHOT_INVALID")
+        }
+    }
+
+    func testAndroidShellTextFallbackQuotesRemoteMetacharacters() throws {
+        let executable = try temporaryExecutable(
+            """
+            [ "$4" = "input text 'hello;touch%s/tmp/pwn'" ] || exit 9
+            exit 0
+            """
+        )
+        let device = DeviceDescription(
+            id: "android:emulator-5554",
+            platform: .android,
+            kind: .emulator,
+            nativeIdentifier: "emulator-5554",
+            name: "Android",
+            state: "ready",
+            runtime: "Android",
+            available: true,
+            pixelWidth: 1080,
+            pixelHeight: 2400,
+            metadata: [:]
+        )
+        let controller = AndroidController(
+            client: try ADBClient(executable: executable.path),
+            device: device
+        )
+        XCTAssertEqual(try controller.typeText("hello;touch /tmp/pwn"), "adb-input-text")
+    }
+
+    func testAndroidForegroundComponentParsesCurrentActivityFormats() throws {
+        let current = try XCTUnwrap(
+            AndroidAccessibilityService.foregroundComponent(
+                in: "topResumedActivity=ActivityRecord{42 u0 dev.simview.fixture/.MainActivity t7}"
+            )
+        )
+        XCTAssertEqual(current.package, "dev.simview.fixture")
+        XCTAssertEqual(current.activity, ".MainActivity")
+
+        let legacy = try XCTUnwrap(
+            AndroidAccessibilityService.foregroundComponent(
+                in: "mCurrentFocus=Window{42 u0 dev.simview.fixture/dev.simview.fixture.LegacyActivity}"
+            )
+        )
+        XCTAssertEqual(legacy.package, "dev.simview.fixture")
+        XCTAssertEqual(legacy.activity, "dev.simview.fixture.LegacyActivity")
+    }
+
+    func testAndroidRotationParserAcceptsLegacyAndCurrentDumpsysFormats() {
+        XCTAssertEqual(AndroidController.parseRotation("SurfaceOrientation: 3"), 3)
+        XCTAssertEqual(AndroidController.parseRotation("mDisplayRotation=ROTATION_90"), 1)
+        XCTAssertEqual(AndroidController.parseRotation("mCurrentRotation=ROTATION_270"), 3)
+        XCTAssertEqual(AndroidController.parseRotation("header\n  mRotation=2\nfooter"), 2)
+        XCTAssertNil(AndroidController.parseRotation("mCurrentRotation=ROTATION_UNKNOWN"))
+    }
+
+    func testAndroidRotationParserIgnoresCaptureVirtualDisplay() {
+        let output = """
+            mDisplayRotation=ROTATION_0
+              displayId=23
+              mCurrentRotation=ROTATION_0
+            mDisplayRotation=ROTATION_90
+              displayId=0
+              mCurrentRotation=ROTATION_90
+            """
+        XCTAssertEqual(AndroidController.parseRotation(output), 0)
+        XCTAssertEqual(AndroidController.parseDefaultDisplayRotation(output), 1)
+    }
+
+    func testAndroidH264NormalizerBuildsAVCCConfigurationAndFrames() throws {
+        let sps = Data([0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1E, 0xAA])
+        let pps = Data([0, 0, 1, 0x68, 0xCE, 0x3C, 0x80])
+        let configuration = try H264Normalizer.configuration(csd0: sps, csd1: pps)
+        XCTAssertEqual(configuration.prefix(6), Data([1, 0x42, 0, 0x1E, 0xFF, 0xE1]))
+
+        let annexB = Data([0, 0, 0, 1, 0x65, 1, 2, 0, 0, 1, 0x06, 3])
+        XCTAssertEqual(
+            try H264Normalizer.accessUnit(annexB),
+            Data([0, 0, 0, 3, 0x65, 1, 2, 0, 0, 0, 2, 0x06, 3])
+        )
+        let avcc = Data([0, 0, 0, 2, 0x61, 7, 0, 0, 0, 2, 0x06, 8])
+        XCTAssertEqual(try H264Normalizer.accessUnit(avcc), avcc)
+        var ambiguousAVCC = Data([0, 0, 1, 44])
+        ambiguousAVCC.append(Data(repeating: 0x61, count: 300))
+        XCTAssertEqual(try H264Normalizer.accessUnit(ambiguousAVCC), ambiguousAVCC)
+    }
+
+    func testAndroidAgentHandshakeRejectsVersionOrAuthenticationFailure() throws {
+        XCTAssertNoThrow(
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 2, 0, 0, 0, 0]))
+        )
+        XCTAssertThrowsError(
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 1, 0, 0, 0, 0]))
+        )
+        XCTAssertThrowsError(
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 2, 0, 0, 0, 1]))
+        )
     }
 
     func testH264EncoderAcceptsABGRAPixelBuffer() async throws {

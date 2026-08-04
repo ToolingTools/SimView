@@ -4,6 +4,7 @@ import {
   encodeFrame,
   FrameDecoder,
   FrameKind,
+  PROTOCOL_VERSION,
   type ProtocolRequest,
 } from "../../packages/client/src";
 
@@ -18,6 +19,8 @@ if (process.argv[2] !== "serve") process.exit(2);
 const socketPath = argumentsMap.get("--socket");
 const instanceId = argumentsMap.get("--instance-id") ?? null;
 const configuredUdid = argumentsMap.get("--udid") ?? null;
+const configuredDeviceId =
+  argumentsMap.get("--device-id") ?? (configuredUdid ? `ios:${configuredUdid}` : null);
 const token = await Bun.stdin.text();
 if (!socketPath || token.length < 32) process.exit(2);
 const boundSocketPath = socketPath;
@@ -50,7 +53,7 @@ const listener = Bun.listen({
           state.authenticated = true;
           state.codec = params.codecs[0] ?? "h264";
           respond(socket, request.id, {
-            protocolVersion: 1,
+            protocolVersion: PROTOCOL_VERSION,
             codec: state.codec,
             maxFrameRate: 60,
             server: "simview-core/fake",
@@ -63,6 +66,7 @@ const listener = Bun.listen({
             pid: process.pid,
             instanceId,
             configuredUdid,
+            configuredDeviceId,
             device: null,
             captureActive: false,
             captureState: "idle",

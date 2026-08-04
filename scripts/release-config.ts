@@ -16,7 +16,8 @@ export function createNpmPackageManifest(
   return {
     name,
     version,
-    description: "Control and review a local iOS Simulator from the command line or an MCP host.",
+    description:
+      "Control and review local iOS Simulators and Android devices from the command line or an MCP host.",
     license: "Apache-2.0",
     author: {
       name: "SimView contributors",
@@ -30,7 +31,17 @@ export function createNpmPackageManifest(
     bugs: {
       url: `${repositoryUrl}/issues`,
     },
-    keywords: ["ios", "simulator", "cli", "mcp", "codex", "claude-code"],
+    keywords: [
+      "ios",
+      "android",
+      "simulator",
+      "emulator",
+      "adb",
+      "cli",
+      "mcp",
+      "codex",
+      "claude-code",
+    ],
     os: ["darwin"],
     cpu: ["arm64"],
     bin: {

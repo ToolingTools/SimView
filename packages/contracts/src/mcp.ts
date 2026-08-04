@@ -21,6 +21,14 @@ export const sessionStateSchema = z.object({
 });
 
 export const simulatorListSchema = z.object({ devices: z.array(deviceDescriptionSchema) });
+export const deviceListSchema = simulatorListSchema;
+
+export const semanticErrorSchema = z.object({
+  code: z.string().min(1),
+  message: z.string().min(1),
+  recoverable: z.boolean(),
+});
+export type SemanticError = z.output<typeof semanticErrorSchema>;
 
 export const previewPacketBatchSchema = z.object({
   reset: z.boolean(),
@@ -97,7 +105,7 @@ export const inspectPointOutputSchema = z.object({
     })
     .passthrough()
     .optional(),
-  probe: probeStatusSchema,
+  probe: probeStatusSchema.optional(),
 });
 
 export type SessionState = z.output<typeof sessionStateSchema>;

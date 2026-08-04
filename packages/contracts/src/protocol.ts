@@ -23,9 +23,101 @@ export const normalizedPointSchema = z.object({
   y: z.number().finite().min(0).max(1),
 });
 
+export const devicePlatformSchema = z.enum(["ios", "android"]);
+export type DevicePlatform = z.infer<typeof devicePlatformSchema>;
+
+export const deviceKindSchema = z.enum(["simulator", "emulator", "physical"]);
+export type DeviceKind = z.infer<typeof deviceKindSchema>;
+
+export const deviceStateSchema = z.enum([
+  "ready",
+  "booting",
+  "offline",
+  "unauthorized",
+  "shutdown",
+  "unknown",
+]);
+export type DeviceState = z.infer<typeof deviceStateSchema>;
+
+export const deviceButtonSchema = z.enum([
+  "home",
+  "back",
+  "overview",
+  "lock",
+  "volume-up",
+  "volume-down",
+  "action",
+]);
+export type DeviceButton = z.infer<typeof deviceButtonSchema>;
+
+export const deviceCapabilitiesSchema = z.object({
+  capture: z.object({
+    h264: z.boolean(),
+    mjpeg: z.boolean(),
+    screenshot: z.boolean(),
+  }),
+  input: z.object({
+    touch: z.boolean(),
+    rawTouch: z.boolean().optional(),
+    text: z.enum(["none", "ascii", "unicode"]),
+    buttons: z.array(deviceButtonSchema),
+  }),
+  orientation: z.boolean(),
+  accessibility: z.boolean(),
+  androidContext: z.boolean(),
+  uikitProbe: z.boolean(),
+});
+export type DeviceCapabilities = z.infer<typeof deviceCapabilitiesSchema>;
+
+const iosCapabilities: DeviceCapabilities = {
+  capture: { h264: true, mjpeg: true, screenshot: true },
+  input: {
+    touch: true,
+    rawTouch: true,
+    text: "unicode",
+    buttons: ["home", "lock", "volume-up", "volume-down", "action"],
+  },
+  orientation: true,
+  accessibility: true,
+  androidContext: false,
+  uikitProbe: true,
+};
+
 export const deviceDescriptionSchema = z
   .object({
-    udid: z.string(),
+    id: z.string().min(1),
+    platform: devicePlatformSchema,
+    kind: deviceKindSchema,
+    state: deviceStateSchema,
+    available: z.boolean(),
+    name: z.string(),
+    runtime: z.string(),
+    capabilities: deviceCapabilitiesSchema,
+    udid: z.string().min(1).optional(),
+    serial: z.string().min(1).optional(),
+    pointWidth: z.number().finite().positive().optional(),
+    pointHeight: z.number().finite().positive().optional(),
+    pixelWidth: z.number().int().positive().optional(),
+    pixelHeight: z.number().int().positive().optional(),
+    metadata: jsonObjectSchema.optional(),
+  })
+  .passthrough()
+  .superRefine((device, context) => {
+    if (device.platform === "ios" && !device.udid) {
+      context.addIssue({ code: "custom", path: ["udid"], message: "iOS devices require udid" });
+    }
+    if (device.platform === "android" && !device.serial) {
+      context.addIssue({
+        code: "custom",
+        path: ["serial"],
+        message: "Android devices require serial",
+      });
+    }
+  });
+
+const legacyIosDeviceDescriptionSchema = z
+  .object({
+    udid: z.string().min(1),
     name: z.string(),
     state: z.string(),
     runtime: z.string(),
@@ -35,10 +127,46 @@ export const deviceDescriptionSchema = z
     pixelHeight: z.number().int().positive().optional(),
   })
   .passthrough();
+
+function normalizeLegacyIosDevice(
+  device: z.output<typeof legacyIosDeviceDescriptionSchema>,
+): z.input<typeof deviceDescriptionSchema> {
+  const state = device.state.toLocaleLowerCase();
+  const normalizedState: DeviceState =
+    state === "booted"
+      ? "ready"
+      : state === "shutdown" || state === "shut down"
+        ? "shutdown"
+        : state.includes("boot")
+          ? "booting"
+          : "unknown";
+  return {
+    ...device,
+    id: `ios:${device.udid}`,
+    platform: "ios",
+    kind: "simulator",
+    state: normalizedState,
+    available: normalizedState === "ready",
+    capabilities: iosCapabilities,
+    metadata: { legacyState: device.state },
+  };
+}
+
 export type DeviceDescription = z.infer<typeof deviceDescriptionSchema>;
 
+export function parseDeviceDescription(value: unknown): DeviceDescription {
+  const current = deviceDescriptionSchema.safeParse(value);
+  if (current.success) return current.data;
+  return deviceDescriptionSchema.parse(
+    normalizeLegacyIosDevice(legacyIosDeviceDescriptionSchema.parse(value)),
+  );
+}
+
 const emptyParamsSchema = z.object({}).strict();
-const selectedDeviceParamsSchema = z.object({ udid: z.string().optional() });
+const selectedDeviceParamsSchema = z.object({
+  deviceId: z.string().min(1).optional(),
+  udid: z.string().min(1).optional(),
+});
 const acceptedResultSchema = z.object({ accepted: z.literal(true) }).passthrough();
 
 const findResultSchema = z
@@ -86,6 +214,7 @@ export const daemonHealthSchema = z.object({
   pid: z.number().int().positive(),
   instanceId: z.string().nullable(),
   configuredUdid: z.string().nullable(),
+  configuredDeviceId: z.string().nullable().optional(),
   device: deviceDescriptionSchema.nullable(),
   captureActive: z.boolean(),
   captureState: z.enum(["active", "idle"]),
@@ -119,6 +248,7 @@ export const methodSchemas = {
         input: z.boolean(),
         accessibility: z.boolean(),
         probe: z.boolean(),
+        androidContext: z.boolean().optional(),
       }),
     }),
   },
@@ -181,7 +311,7 @@ export const methodSchemas = {
   },
   "input.button": {
     params: z.object({
-      button: z.enum(["home", "lock", "volume-up", "volume-down", "action"]),
+      button: deviceButtonSchema,
     }),
     result: acceptedResultSchema,
   },
@@ -189,6 +319,7 @@ export const methodSchemas = {
     params: z.object({ orientation: orientationSchema }),
     result: acceptedResultSchema,
   },
+  "device.context": { params: emptyParamsSchema, result: jsonObjectSchema },
   "accessibility.snapshot": {
     params: selectedDeviceParamsSchema.extend({
       scope: z.enum(["interactive", "visible", "full"]).optional(),

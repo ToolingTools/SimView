@@ -56,6 +56,8 @@ const screenContextCommonSchema = z.object({
   schemaVersion: z.literal(1),
   capturedAt: z.string(),
   frameId: z.string(),
+  platform: z.enum(["ios", "android"]).optional(),
+  deviceName: z.string().optional(),
   simulatorName: z.string().optional(),
   runtime: z.string().optional(),
   bundleId: z.string().optional(),
@@ -74,6 +76,8 @@ export const reactNativeScreenContextSchema = screenContextCommonSchema.extend({
   testID: z.string().optional(),
   sourceLocation: sourceLocationSchema.optional(),
   confidence: z.enum(["exact", "inferred", "none"]),
+  packageName: z.string().optional(),
+  activityName: z.string().optional(),
 });
 
 export const uiKitScreenContextSchema = screenContextCommonSchema.extend({
@@ -88,9 +92,22 @@ export const uiKitScreenContextSchema = screenContextCommonSchema.extend({
   sceneConfiguration: z.string().optional(),
 });
 
+export const androidScreenContextSchema = screenContextCommonSchema.extend({
+  kind: z.literal("android"),
+  packageName: z.string().optional(),
+  activityName: z.string().optional(),
+  processId: z.number().int().positive().optional(),
+  taskId: z.number().int().nonnegative().optional(),
+  route: z.string().optional(),
+  component: z.string().optional(),
+  testID: z.string().optional(),
+  source: z.string().optional(),
+});
+
 export const screenContextSchema = z.discriminatedUnion("kind", [
   reactNativeScreenContextSchema,
   uiKitScreenContextSchema,
+  androidScreenContextSchema,
 ]);
 
 export const elementFallbackReasonSchema = z.enum([
@@ -138,6 +155,7 @@ export type ReactNativeElementSnapshot = z.infer<typeof reactNativeElementSnapsh
 export type ElementSnapshot = z.infer<typeof elementSnapshotSchema>;
 export type ReactNativeScreenContext = z.infer<typeof reactNativeScreenContextSchema>;
 export type UiKitScreenContext = z.infer<typeof uiKitScreenContextSchema>;
+export type AndroidScreenContext = z.infer<typeof androidScreenContextSchema>;
 export type ScreenContext = z.infer<typeof screenContextSchema>;
 export type ElementFallbackReason = z.infer<typeof elementFallbackReasonSchema>;
 export type ElementTreeOutput = z.infer<typeof elementTreeOutputSchema>;

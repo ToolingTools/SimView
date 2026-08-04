@@ -1,9 +1,9 @@
 # Architecture
 
 SimView is a local-only bridge between an MCP host (or the CLI), an embedded
-browser preview, and a booted iOS Simulator. The TypeScript side owns public
-contracts and orchestration; the Swift side owns private Simulator APIs and
-the high-throughput capture/input path.
+browser preview, and an available iOS Simulator or Android ADB target. The
+TypeScript side owns public contracts and orchestration; the Swift side owns
+platform backends and the high-throughput capture/input path.
 
 ## Components and ownership
 
@@ -13,22 +13,26 @@ the high-throughput capture/input path.
 - `packages/client` owns the length-prefixed Unix-socket framing, method-keyed
   requests, request correlation, deadlines/cancellation, inbound/outbound
   validation, partial-write handling, ephemeral process lifecycle, and the
-  shared per-Simulator daemon registry.
+  shared per-device daemon registry.
 - `packages/core` resolves the packaged `simview-core` binary before local
   SwiftPM build output. Release scripts verify that the packaged binary is
   fresh and arm64-native.
 - `packages/mcp` owns MCP tool registration and output schemas, one MCP stdio
   session, per-review resource metadata, in-memory annotations, preview
   buffering, and the authenticated loopback relay. It does not persist
-  Simulator UI contents or own native compatibility code.
+  device UI contents or own native compatibility code.
 - `packages/app` owns the embedded/browser preview, H.264/MJPEG fallback,
   pointer/keyboard interaction, annotations UI, and bridge result routing. It
   does not start native processes or write review state to disk.
 - `packages/cli` owns strict command parsing, human/JSON output, and short-lived
   client commands. `preview` keeps one session open until an explicit signal.
-- `native/SimViewCore` owns Simulator discovery, capture/encoding, physical HID,
-  accessibility, probe coordination, diagnostics, and the authenticated Unix
-  socket server.
+- `native/SimViewCore` owns provider selection, iOS SimulatorKit/CoreSimulator,
+  Android ADB orchestration, capture/encoding, input, accessibility, diagnostics,
+  and the authenticated Unix socket server. Platform assumptions stay behind
+  `DeviceProvider` and `DeviceBackend` boundaries.
+- `native/SimViewAndroid` owns the transient API-26+ Android agent. It is pushed
+  under `/data/local/tmp`, started with `app_process`, authenticated before use,
+  and removed when the backend shuts down.
 
 ## Process and trust flow
 
@@ -37,6 +41,7 @@ flowchart LR
   Host["MCP host or CLI"] -->|"typed, Zod-validated requests"| Client["SimView client"]
   Client -->|"authenticated Unix socket"| Core["simview-core"]
   Core -->|"SimulatorKit and CoreSimulator"| Simulator["iOS Simulator"]
+  Core -->|"ADB"| Android["Android Emulator or device"]
   Host -->|"MCP App tools"| App["Preview app"]
   App -->|"Bearer HTTP or authenticated WebSocket"| Relay["127.0.0.1 relay"]
   Relay --> Client
@@ -63,7 +68,8 @@ The process model has two layers:
   instantiate or replace the preview. The mounted app uses resource-scoped,
   app-only aliases for its internal device and inspection calls.
 - Embedded video uses bounded, sequenced `get_preview_packets` responses over
-  the host bridge. Full React Native or AX element output is validated and
+  the host bridge. Full React Native or native accessibility output is
+  validated and
   serialized once, split into bounded UTF-8 byte chunks, and reassembled and
   validated in the app. Tree capture runs only when Inspector or Annotate is
   opened or Inspector is explicitly refreshed. Inspector transfers temporarily
@@ -73,16 +79,17 @@ The process model has two layers:
   Codex cannot open insecure localhost HTTP/WebSocket origins and a local TLS
   certificate would impose user setup. A second MCP resource would still use
   the same host bridge rather than creating a separate network lane.
-- Element inspection first captures the native AX snapshot as a safe fallback,
+- Element inspection first captures the native accessibility snapshot as a
+  safe fallback,
   then optionally discovers loopback Metro targets through `metro-bridge`. A
-  target must match the selected Simulator by logical device ID, device name,
+  target must match the selected device by logical device ID, device name,
   or be the sole unambiguous target. React Native inspection returns only a
   bounded visual Fiber projection and whitelisted semantic fields; component
   props, route params, raw Fiber objects, external paths, and dependencies are
   not returned. If Metro MCP owns the older single-client Hermes connection,
   SimView validates and reuses its loopback CDP multiplexer record; newer
   multi-debugger targets connect directly. Any discovery, CDP, measurement, or
-  validation failure returns the complete AX snapshot with a bounded fallback
+  validation failure returns the complete native snapshot with a bounded fallback
   reason instead of a partially merged tree. Every CDP evaluation is
   deadline-bounded so a stale Hermes session cannot leave the preview request
   pending indefinitely. Source paths are reduced relative to an explicit
@@ -93,8 +100,10 @@ The process model has two layers:
   files use mode 0600, only generated filenames are accepted, and the handoff
   exposes their absolute paths as text. The session tracks and removes every
   directory it creates when its MCP bridge closes.
-- `SimViewClient.acquire({ udid, codec })` shares one detached native backend
-  per Simulator UDID and compatible protocol/version/binary identity. The
+- `SimViewClient.acquire({ deviceId, codec })` shares one detached native backend
+  per platform-qualified native identifier and compatible
+  protocol/version/binary identity. `udid` remains an iOS compatibility alias.
+  The
   backend record lives under `${tmpdir()}/simview-daemons/<uid>/<instanceId>`;
   directories are mode 0700, records and sockets are mode 0600, and the token
   is never returned by status or logged. Atomic startup locks ensure concurrent
@@ -109,13 +118,13 @@ backend. `SimViewClient.start()` remains the explicit ephemeral/test path, and
 
 The client package exports registry status, stop, and prune helpers for
 diagnostics. The top-level CLI exposes them as `simview daemon status`,
-`simview daemon stop --udid <uuid>` (or `--all`), and `simview daemon prune`.
+`simview daemon stop --device-id <id>` (or `--all`), and `simview daemon prune`.
 These commands operate only on trusted registry records and never print backend
 capability tokens.
 
 ## Contract and validation boundary
 
-Every native method is represented in the `SimViewMethodMap` in
+Every native method is represented in the protocol-v2 `SimViewMethodMap` in
 `packages/contracts/src/protocol.ts`. The client validates parameters before
 encoding a request and validates the selected result schema after decoding a
 response. MCP tools expose `outputSchema` and parse structured results before
@@ -129,6 +138,11 @@ are the compatibility anchor for Bun and XCTest. Unknown methods, malformed
 frames, unsupported protocol versions, oversized payloads, empty accessibility
 selectors, and invalid normalized coordinates are rejected at the boundary.
 
+Public device descriptors use opaque namespaced IDs, normalized
+platform/kind/state fields, availability, and explicit per-device capabilities.
+iOS UDIDs and Android ADB serials remain diagnostic and compatibility fields,
+not cross-platform identity keys.
+
 ## Native lifecycle and backpressure
 
 The native server authenticates clients before accepting requests, times out
@@ -138,7 +152,7 @@ serialized on their respective queues. H.264 encoding runs asynchronously;
 MJPEG work runs off the server queue. Each connection prioritizes control
 responses and coalesces preview frames so a slow viewer cannot accumulate an
 unbounded video backlog. `health.get` reports the sanitized PID, instance ID,
-configured UDID, codec client counts, capture state, and idle deadline.
+configured device identity, codec client counts, capture state, and idle deadline.
 The TypeScript client likewise keeps a bounded request-write queue and handles
 fragmented/coalesced frames without copying a complete receive buffer for every
 chunk.
@@ -162,6 +176,15 @@ explicitly enabled for one non-Apple bundle, and accessibility remains usable
 without it. Do not move private symbols into TypeScript contracts or public
 documentation.
 
+Android discovery shares the user's existing loopback ADB server. SimView never
+kills it, changes authorization keys, pairs devices, or enables legacy TCP mode.
+Every target operation passes `-s <serial>` as a process argument without a
+shell. Agent socket mappings and temporary files are random, authenticated, and
+cleaned up only when SimView created them. If the agent cannot start, the backend
+falls back to throttled ADB PNG capture, host-side H.264 encoding, and discrete
+shell input. Continuous raw touch remains agent-only, and Android text support
+is currently declared as ASCII rather than Unicode.
+
 ## Packaged binary resolution and release safety
 
 `@simview/core` resolves `packages/core/bin/simview-core` before local SwiftPM
@@ -170,5 +193,5 @@ before packaging or plugin testing so the compiled artifacts cannot be stale.
 The release build produces arm64 binaries, permission-safe
 archives, SHA-256 checksums, `release-manifest.json`, and a CycloneDX SBOM.
 Binary publication remains blocked until the licensing, Developer ID signing,
-notarization, and real-Simulator gates in `docs/binary-redistribution.md` and
+notarization, and real-target gates in `docs/binary-redistribution.md` and
 `docs/compatibility.md` have been reviewed.

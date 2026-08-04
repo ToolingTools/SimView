@@ -32,6 +32,9 @@ describe("shared backend registry contracts", () => {
     const status = daemonStatusSchema.parse({
       instanceId: record.instanceId,
       pid: record.pid,
+      deviceId: `ios:${record.udid}`,
+      platform: "ios",
+      nativeId: record.udid,
       udid: record.udid,
       protocolVersion: record.protocolVersion,
       simviewVersion: record.simviewVersion,

@@ -1,4 +1,4 @@
 enum SimViewVersion {
-    static let current = "0.1.13"
-    static let protocolVersion = 1
+    static let current = "0.2.0"
+    static let protocolVersion = 2
 }

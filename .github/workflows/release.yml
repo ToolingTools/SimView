@@ -20,6 +20,10 @@ jobs:
         with:
           node-version: 24
           package-manager-cache: false
+      - name: Select Android agent toolchain
+        run: |
+          echo "JAVA_HOME=$(/usr/libexec/java_home -v 17)" >> "${GITHUB_ENV}"
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
       - run: bun install --frozen-lockfile
       - name: Check tag version
         run: |
@@ -54,6 +58,10 @@ jobs:
           node-version: 24
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
+      - name: Select Android agent toolchain
+        run: |
+          echo "JAVA_HOME=$(/usr/libexec/java_home -v 17)" >> "${GITHUB_ENV}"
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0" "platform-tools"
       - run: bun install --frozen-lockfile
       - name: Check tag and release gates
         env:

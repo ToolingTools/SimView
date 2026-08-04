@@ -3,10 +3,15 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runInNewContext } from "node:vm";
-import type { AccessibilitySnapshot, DeviceDescription } from "@simview/contracts";
+import {
+  type AccessibilitySnapshot,
+  type DeviceDescription,
+  parseDeviceDescription,
+} from "@simview/contracts";
 import {
   fiberInspectionExpression,
   MetroInspector,
+  metroMeasurementViewport,
   normalizeProjectSource,
   selectMetroTarget,
 } from "../packages/mcp/src/metro";
@@ -14,12 +19,12 @@ import {
 type MetroServerInfo = Parameters<typeof selectMetroTarget>[0][number];
 type MetroTarget = MetroServerInfo["targets"][number] & { appId?: string };
 
-const device: DeviceDescription = {
+const device: DeviceDescription = parseDeviceDescription({
   udid: "SIM-123",
   name: "iPhone 17 Pro",
   state: "Booted",
   runtime: "com.apple.CoreSimulator.SimRuntime.iOS-26-0",
-};
+});
 
 function target(overrides: Partial<MetroTarget> = {}): MetroTarget {
   return {
@@ -40,7 +45,7 @@ function server(...targets: MetroTarget[]): MetroServerInfo {
 describe("Metro React Native target selection", () => {
   test("prefers an exact logical Simulator identifier", () => {
     const other = target({ id: "other", reactNative: { logicalDeviceId: "OTHER" } });
-    const exact = target({ id: "exact", reactNative: { logicalDeviceId: device.udid } });
+    const exact = target({ id: "exact", reactNative: { logicalDeviceId: "SIM-123" } });
 
     expect(selectMetroTarget([server(other, exact)], device)?.target.id).toBe("exact");
   });
@@ -56,6 +61,26 @@ describe("Metro React Native target selection", () => {
     expect(
       selectMetroTarget([server(target({ id: "one" }), target({ id: "two" }))], device),
     ).toBeUndefined();
+  });
+
+  test("does not attach an iOS Fiber target to an Android preview", () => {
+    const android = androidDevice();
+    const iosTarget = target({
+      title: "com.example.app (iPhone 17 Pro)",
+      deviceName: "iPhone 17 Pro",
+    });
+
+    expect(selectMetroTarget([server(iosTarget)], android)).toBeUndefined();
+  });
+
+  test("accepts a compatible Android Fiber target", () => {
+    const android = androidDevice();
+    const pixelTarget = target({
+      title: "com.example.app (Pixel 9 Pro XL)",
+      deviceName: "Pixel 9 Pro XL",
+    });
+
+    expect(selectMetroTarget([server(pixelTarget)], android)?.target.id).toBe("target-1");
   });
 
   test("returns no Fiber result when Metro is unavailable", async () => {
@@ -157,6 +182,55 @@ describe("Metro React Native target selection", () => {
     expect(inspector.fallbackReason).toBe("metro-inspection-failed");
   });
 });
+
+describe("Metro React Native viewport scaling", () => {
+  test("normalizes Android density-independent measurements against capture pixels", () => {
+    const android = androidDevice();
+
+    expect(metroMeasurementViewport(android, { x: 0, y: 0, width: 1_344, height: 2_992 })).toEqual({
+      width: 448,
+      height: 2_992 / 3,
+      scaleX: 3,
+      scaleY: 3,
+    });
+  });
+
+  test("keeps iOS measurements in the accessibility viewport coordinate space", () => {
+    expect(metroMeasurementViewport(device, { x: 0, y: 0, width: 430, height: 932 })).toEqual({
+      width: 430,
+      height: 932,
+      scaleX: 1,
+      scaleY: 1,
+    });
+  });
+});
+
+function androidDevice(): DeviceDescription {
+  return parseDeviceDescription({
+    id: "android:emulator-5554",
+    platform: "android",
+    kind: "emulator",
+    state: "ready",
+    available: true,
+    name: "Pixel 9 Pro XL",
+    runtime: "Android 16 (API 36)",
+    serial: "emulator-5554",
+    capabilities: {
+      capture: { h264: true, mjpeg: true, screenshot: true },
+      input: {
+        touch: true,
+        rawTouch: true,
+        text: "ascii",
+        buttons: ["back", "home", "overview"],
+      },
+      orientation: true,
+      accessibility: true,
+      androidContext: true,
+      uikitProbe: false,
+    },
+    metadata: { densityDpi: "480" },
+  });
+}
 
 describe("Metro source normalization", () => {
   const root = "/work/app";

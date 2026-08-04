@@ -22,25 +22,35 @@ const RECORD_SCHEMA_VERSION = 1;
 const STARTUP_TIMEOUT_MS = 10_000;
 const LOCK_STALE_MS = 15_000;
 
-export const daemonRecordSchema = z.object({
-  schemaVersion: z.literal(RECORD_SCHEMA_VERSION),
-  pid: z.number().int().positive(),
-  udid: z.string().min(1),
-  socketPath: z.string().min(1),
-  token: z.string().length(64),
-  protocolVersion: z.number().int().positive(),
-  simviewVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
-  binarySha256: z.string().regex(/^[a-f0-9]{64}$/),
-  instanceId: z.string().regex(/^[a-f0-9]{20}$/),
-  startedAt: z.string().datetime(),
-});
+export const daemonRecordSchema = z
+  .object({
+    schemaVersion: z.literal(RECORD_SCHEMA_VERSION),
+    pid: z.number().int().positive(),
+    deviceId: z.string().min(1).optional(),
+    platform: z.enum(["ios", "android"]).optional(),
+    nativeId: z.string().min(1).optional(),
+    udid: z.string().min(1).optional(),
+    socketPath: z.string().min(1),
+    token: z.string().length(64),
+    protocolVersion: z.number().int().positive(),
+    simviewVersion: z.string().regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/),
+    binarySha256: z.string().regex(/^[a-f0-9]{64}$/),
+    instanceId: z.string().regex(/^[a-f0-9]{20}$/),
+    startedAt: z.string().datetime(),
+  })
+  .refine((record) => Boolean(record.deviceId || record.udid), {
+    message: "A daemon record requires deviceId or legacy udid",
+  });
 
 export type DaemonRecord = z.output<typeof daemonRecordSchema>;
 
 export const daemonStatusSchema = z.object({
   instanceId: z.string(),
   pid: z.number().int().positive(),
-  udid: z.string(),
+  deviceId: z.string(),
+  platform: z.enum(["ios", "android"]),
+  nativeId: z.string(),
+  udid: z.string().optional(),
   protocolVersion: z.number().int().positive(),
   simviewVersion: z.string(),
   binarySha256: z.string(),
@@ -70,9 +80,9 @@ async function binarySha256(binary: string): Promise<string> {
     .digest("hex");
 }
 
-function instanceIdFor(udid: string, binaryHash: string): string {
+function instanceIdFor(deviceId: string, binaryHash: string): string {
   return createHash("sha256")
-    .update(`${udid}\0${PROTOCOL_VERSION}\0${SIMVIEW_VERSION}\0${binaryHash}`)
+    .update(`${deviceId}\0${PROTOCOL_VERSION}\0${SIMVIEW_VERSION}\0${binaryHash}`)
     .digest("hex")
     .slice(0, 20);
 }
@@ -192,7 +202,7 @@ async function acquireLock(instanceDirectory: string): Promise<() => Promise<voi
 
 async function validatedRecord(
   instanceDirectory: string,
-  expected: { udid: string; binarySha256: string; instanceId: string },
+  expected: { deviceId: string; binarySha256: string; instanceId: string },
 ): Promise<DaemonRecord | undefined> {
   const record = await readRecord(instanceDirectory);
   if (!record) return undefined;
@@ -201,7 +211,7 @@ async function validatedRecord(
     return undefined;
   }
   if (
-    record.udid !== expected.udid ||
+    recordDeviceId(record) !== expected.deviceId ||
     record.protocolVersion !== PROTOCOL_VERSION ||
     record.simviewVersion !== SIMVIEW_VERSION ||
     record.binarySha256 !== expected.binarySha256 ||
@@ -223,7 +233,11 @@ async function attachAndVerify(
   const client = await adapter.attach(record.socketPath, record.token, codec);
   try {
     const health = await client.request("health.get", {}, { timeoutMs: 2_000 });
-    assertHealthIdentity(health, record);
+    assertHealthIdentity(health, {
+      pid: record.pid,
+      instanceId: record.instanceId,
+      deviceId: recordDeviceId(record),
+    });
     return client;
   } catch (error) {
     await client.close().catch(() => {});
@@ -232,14 +246,21 @@ async function attachAndVerify(
 }
 
 function assertHealthIdentity(
-  health: { status: string; pid: number; instanceId: string | null; configuredUdid: string | null },
-  expected: { pid: number; instanceId: string; udid: string },
+  health: {
+    status: string;
+    pid: number;
+    instanceId: string | null;
+    configuredUdid: string | null;
+    configuredDeviceId?: string | null | undefined;
+  },
+  expected: { pid: number; instanceId: string; deviceId: string },
 ): void {
   if (
     health.status !== "ok" ||
     health.pid !== expected.pid ||
     health.instanceId !== expected.instanceId ||
-    health.configuredUdid !== expected.udid
+    (health.configuredDeviceId ??
+      (health.configuredUdid ? `ios:${health.configuredUdid}` : null)) !== expected.deviceId
   ) {
     throw new Error("Shared SimView backend identity does not match its protected record");
   }
@@ -264,13 +285,14 @@ export async function acquireDaemon(
 ): Promise<SimViewClient> {
   const binary = resolve(options.binary ?? resolveBinary());
   const hash = await binarySha256(binary);
-  const instanceId = instanceIdFor(options.udid, hash);
+  const identity = resolveDeviceIdentity(options);
+  const instanceId = instanceIdFor(identity.deviceId, hash);
   const root = registryRoot();
   const instanceDirectory = join(root, instanceId);
   await ensurePrivateDirectory(registryBase());
   await ensurePrivateDirectory(root);
   await ensurePrivateDirectory(instanceDirectory);
-  const expected = { udid: options.udid, binarySha256: hash, instanceId };
+  const expected = { deviceId: identity.deviceId, binarySha256: hash, instanceId };
   const existing = await validatedRecord(instanceDirectory, expected);
   if (existing) return attachAndVerify(adapter, existing, options.codec ?? "h264");
   await ensurePrivateDirectory(instanceDirectory);
@@ -297,8 +319,9 @@ export async function acquireDaemon(
         "0",
         "--idle-timeout",
         "300",
-        "--udid",
-        options.udid,
+        "--device-id",
+        identity.deviceId,
+        ...(identity.platform === "ios" ? ["--udid", identity.nativeId] : []),
         "--instance-id",
         instanceId,
       ],
@@ -318,7 +341,7 @@ export async function acquireDaemon(
         await assertPrivateSocket(socketPath);
         client = await adapter.attach(socketPath, token, options.codec ?? "h264");
         const health = await client.request("health.get", {}, { timeoutMs: 2_000 });
-        assertHealthIdentity(health, { pid: child.pid, instanceId, udid: options.udid });
+        assertHealthIdentity(health, { pid: child.pid, instanceId, deviceId: identity.deviceId });
         break;
       } catch (error) {
         lastError = error;
@@ -334,7 +357,10 @@ export async function acquireDaemon(
     const record: DaemonRecord = {
       schemaVersion: RECORD_SCHEMA_VERSION,
       pid: child.pid,
-      udid: options.udid,
+      deviceId: identity.deviceId,
+      platform: identity.platform,
+      nativeId: identity.nativeId,
+      ...(identity.platform === "ios" ? { udid: identity.nativeId } : {}),
       socketPath,
       token,
       protocolVersion: PROTOCOL_VERSION,
@@ -371,23 +397,25 @@ export async function daemonStatuses(adapter: DaemonRegistryAdapter): Promise<Da
   for (const directory of await instanceDirectories()) {
     const record = await readRecord(directory);
     if (!record || !isAlive(record.pid)) continue;
+    if (record.protocolVersion !== PROTOCOL_VERSION) {
+      statuses.push(
+        statusFromRecord(record, {
+          status: "incompatible",
+          reason: `Protocol ${record.protocolVersion} cannot be inspected by protocol ${PROTOCOL_VERSION}`,
+        }),
+      );
+      continue;
+    }
     await assertPrivateSocket(record.socketPath);
     const client = await adapter.attach(record.socketPath, record.token);
     try {
       const health = await client.request("health.get", {}, { timeoutMs: 2_000 });
-      assertHealthIdentity(health, record);
-      statuses.push(
-        daemonStatusSchema.parse({
-          instanceId: record.instanceId,
-          pid: record.pid,
-          udid: record.udid,
-          protocolVersion: record.protocolVersion,
-          simviewVersion: record.simviewVersion,
-          binarySha256: record.binarySha256,
-          startedAt: record.startedAt,
-          health,
-        }),
-      );
+      assertHealthIdentity(health, {
+        pid: record.pid,
+        instanceId: record.instanceId,
+        deviceId: recordDeviceId(record),
+      });
+      statuses.push(statusFromRecord(record, health));
     } finally {
       await client.close();
     }
@@ -397,17 +425,31 @@ export async function daemonStatuses(adapter: DaemonRegistryAdapter): Promise<Da
 
 export async function stopDaemons(
   adapter: DaemonRegistryAdapter,
-  target: { udid?: string | undefined; all?: boolean | undefined },
+  target: {
+    deviceId?: string | undefined;
+    udid?: string | undefined;
+    all?: boolean | undefined;
+  },
 ): Promise<number> {
   let stopped = 0;
   for (const directory of await instanceDirectories()) {
     const record = await readRecord(directory);
     if (!record || !isAlive(record.pid)) continue;
-    if (!target.all && record.udid !== target.udid) continue;
+    const targetId = target.deviceId ?? (target.udid ? `ios:${target.udid}` : undefined);
+    if (!target.all && recordDeviceId(record) !== targetId) continue;
+    if (record.protocolVersion !== PROTOCOL_VERSION) {
+      throw new Error(
+        `Cannot safely stop SimView backend ${record.instanceId}: protocol ${record.protocolVersion} is incompatible with protocol ${PROTOCOL_VERSION}`,
+      );
+    }
     await assertPrivateSocket(record.socketPath);
     const client = await adapter.attach(record.socketPath, record.token);
     try {
-      assertHealthIdentity(await client.request("health.get", {}, { timeoutMs: 2_000 }), record);
+      assertHealthIdentity(await client.request("health.get", {}, { timeoutMs: 2_000 }), {
+        pid: record.pid,
+        instanceId: record.instanceId,
+        deviceId: recordDeviceId(record),
+      });
       await client.request("server.shutdown", {}, { timeoutMs: 2_000 });
       stopped += 1;
     } finally {
@@ -417,11 +459,16 @@ export async function stopDaemons(
   return stopped;
 }
 
-export async function pruneDaemons(udid?: string): Promise<number> {
+export async function pruneDaemons(deviceIdOrUdid?: string): Promise<number> {
   let pruned = 0;
   for (const directory of await instanceDirectories()) {
     const record = await readRecord(directory);
-    if (udid && record?.udid !== udid) continue;
+    const targetId = deviceIdOrUdid
+      ? deviceIdOrUdid.includes(":")
+        ? deviceIdOrUdid
+        : `ios:${deviceIdOrUdid}`
+      : undefined;
+    if (targetId && record && recordDeviceId(record) !== targetId) continue;
     if (record && (await removeDeadInstance(directory, record))) pruned += 1;
   }
   return pruned;
@@ -430,4 +477,42 @@ export async function pruneDaemons(udid?: string): Promise<number> {
 export function isPathInside(parent: string, child: string): boolean {
   const prefix = resolve(parent) + sep;
   return resolve(child).startsWith(prefix);
+}
+
+function resolveDeviceIdentity(options: Pick<AcquireOptions, "deviceId" | "udid">): {
+  deviceId: string;
+  platform: "ios" | "android";
+  nativeId: string;
+} {
+  const deviceId = options.deviceId ?? (options.udid ? `ios:${options.udid}` : undefined);
+  if (!deviceId) throw new Error("Acquiring a SimView backend requires deviceId or udid");
+  const separator = deviceId.indexOf(":");
+  const platform = deviceId.slice(0, separator);
+  const nativeId = deviceId.slice(separator + 1);
+  if ((platform !== "ios" && platform !== "android") || separator < 1 || !nativeId) {
+    throw new Error(`Invalid SimView device ID: ${deviceId}`);
+  }
+  return { deviceId, platform, nativeId };
+}
+
+function recordDeviceId(record: DaemonRecord): string {
+  if (record.deviceId) return record.deviceId;
+  if (record.udid) return `ios:${record.udid}`;
+  throw new Error("Daemon record has no device identity");
+}
+
+function statusFromRecord(record: DaemonRecord, health: Record<string, unknown>): DaemonStatus {
+  return daemonStatusSchema.parse({
+    instanceId: record.instanceId,
+    pid: record.pid,
+    deviceId: recordDeviceId(record),
+    platform: record.platform ?? "ios",
+    nativeId: record.nativeId ?? record.udid ?? "",
+    ...(record.udid ? { udid: record.udid } : {}),
+    protocolVersion: record.protocolVersion,
+    simviewVersion: record.simviewVersion,
+    binarySha256: record.binarySha256,
+    startedAt: record.startedAt,
+    health,
+  });
 }

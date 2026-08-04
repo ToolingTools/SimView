@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import {
   accessibilitySelectorSchema,
   annotationGeometrySchema,
+  deviceDescriptionSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   elementTreeOutputSchema,
   elementTreePageSchema,
   inspectPointOutputSchema,
   methodSchemas,
+  parseDeviceDescription,
   parseMethodParams,
   parseMethodResult,
   protocolResponseSchema,
@@ -25,7 +27,7 @@ describe("shared protocol contracts", () => {
 
     expect(params.codecs).toEqual(["h264", "mjpeg"]);
     expect(result.codec).toBe("h264");
-    expect(result.protocolVersion).toBe(1);
+    expect(result.protocolVersion).toBe(2);
   });
 
   test("rejects empty accessibility selectors", () => {
@@ -54,6 +56,49 @@ describe("shared protocol contracts", () => {
 
   test("rejects out-of-range input at the protocol boundary", () => {
     expect(methodSchemas["input.tap"].params.safeParse({ x: 1.1, y: 0.5 }).success).toBe(false);
+  });
+
+  test("normalizes legacy iOS descriptions and validates Android device capabilities", () => {
+    expect(
+      parseDeviceDescription({
+        udid: "SIM-123",
+        name: "iPhone",
+        state: "Booted",
+        runtime: "iOS 26.0",
+      }),
+    ).toMatchObject({
+      id: "ios:SIM-123",
+      platform: "ios",
+      kind: "simulator",
+      state: "ready",
+      available: true,
+      udid: "SIM-123",
+    });
+
+    expect(
+      deviceDescriptionSchema.parse({
+        id: "android:emulator-5554",
+        platform: "android",
+        kind: "emulator",
+        state: "ready",
+        available: true,
+        serial: "emulator-5554",
+        name: "Pixel 9",
+        runtime: "Android 15 (API 35)",
+        capabilities: {
+          capture: { h264: true, mjpeg: true, screenshot: true },
+          input: {
+            touch: true,
+            text: "unicode",
+            buttons: ["home", "back", "overview", "lock"],
+          },
+          orientation: true,
+          accessibility: true,
+          androidContext: true,
+          uikitProbe: false,
+        },
+      }),
+    ).toMatchObject({ id: "android:emulator-5554", serial: "emulator-5554" });
   });
 
   test("accepts bounded rectangular annotations", () => {

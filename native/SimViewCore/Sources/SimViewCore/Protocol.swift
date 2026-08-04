@@ -188,6 +188,12 @@ struct Request: Decodable, Sendable {
     }
 }
 
+extension Request {
+    var deviceIdentifier: String? {
+        params["deviceId"]?.stringValue ?? params["udid"]?.stringValue
+    }
+}
+
 func jsonData(_ object: Any) throws -> Data {
     try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
 }

@@ -29,8 +29,7 @@ Before setting `SIMVIEW_BINARY_LICENSE_REVIEWED`:
    reviewed by qualified counsel.
 
 Before setting the other gates, complete Developer ID signing/notarization and
-the complete real-Simulator matrix in `docs/compatibility.md`.
+the complete real-target matrix in `docs/compatibility.md`.
 
 The repository intentionally provides no bypass or default value for these
 variables. Local unsigned builds remain available for development.
-

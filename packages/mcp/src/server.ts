@@ -16,6 +16,7 @@ import {
   annotationContextSchema,
   annotationGeometrySchema,
   annotationSchema,
+  deviceListSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   ELEMENT_TREE_TRANSFER_MAX_BYTES,
   type ElementTreeOutput,
@@ -34,6 +35,7 @@ import {
   saveReviewImagesInputSchema,
   saveReviewImagesOutputSchema,
   screenContextSchema,
+  semanticErrorSchema,
   sessionStateSchema,
   simulatorListSchema,
   uiContextSchema,
@@ -69,7 +71,7 @@ function resourceMetadata(reviewId: string) {
 type ResourceMetadata = ReturnType<typeof resourceMetadata>;
 type ElementTreePageCache = {
   transferId: string;
-  deviceUdid: string | undefined;
+  deviceId: string | undefined;
   connectionGeneration: number;
   expiresAt: number;
   bytes: Buffer;
@@ -98,7 +100,7 @@ function compactElementTree(result: ElementTreeOutput): string {
         ]
           .filter(Boolean)
           .join(" ")
-      : `source=core-simulator-ax${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
+      : `source=${result.snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
   const fallback = result.fallback ? fallbackMessages[result.fallback.reason] : undefined;
   return [summary, fallback, compactAccessibilityTree(result.snapshot)].filter(Boolean).join("\n");
 }
@@ -149,27 +151,36 @@ const screenshotOutputSchema = z.object({
 const observeOutputSchema = z.object({
   frameId: z.string(),
   frameCapturedAt: z.string(),
-  snapshot: accessibilitySnapshotSchema,
-  elements: elementSnapshotSchema,
-  screenContext: screenContextSchema,
-  accessibilityCapturedAt: z.string(),
-  elementsCapturedAt: z.string(),
-  captureDeltaMs: z.number().nonnegative(),
-  fallback: elementTreeOutputSchema.shape.fallback,
+  snapshot: accessibilitySnapshotSchema.optional(),
+  elements: elementSnapshotSchema.optional(),
+  screenContext: screenContextSchema.optional(),
+  accessibilityCapturedAt: z.string().optional(),
+  elementsCapturedAt: z.string().optional(),
+  captureDeltaMs: z.number().nonnegative().optional(),
+  fallback: elementTreeOutputSchema.shape.fallback.optional(),
+  semanticError: semanticErrorSchema.optional(),
 });
 
 export function createServer(session = new SimViewSession()): McpServer {
   const server = new McpServer({ name: "simview", version: VERSION });
   const metadata = resourceMetadata(session.reviewId);
-  const connectSimulator = async (udid?: string) => {
-    const state = await session.open(udid);
+  const connectDevice = async (deviceId?: string) => {
+    const state = await session.open(deviceId);
     return toolResult(`SimView is connected to ${state.device?.name}.`, state);
+  };
+  const listDevices = async () => {
+    const devices = await import("@simview/client").then(({ SimViewClient }) =>
+      SimViewClient.listDevices(),
+    );
+    return toolResult("Local devices.", { devices });
   };
   const listSimulators = async () => {
     const devices = await import("@simview/client").then(({ SimViewClient }) =>
       SimViewClient.listDevices(),
     );
-    return toolResult("Local simulator devices.", { devices });
+    return toolResult("Local simulator and emulator devices.", {
+      devices: devices.filter((device) => device.kind !== "physical"),
+    });
   };
   const takeScreenshot = async () => {
     const screenshot = await session.screenshot();
@@ -199,13 +210,40 @@ export function createServer(session = new SimViewSession()): McpServer {
     {
       title: "Open SimView",
       description:
-        "Open the interactive preview for an already-connected simulator session. " +
-        "Call connect_simulator first and continue only when it succeeds.",
-      inputSchema: { udid: z.string().uuid().optional() },
+        "Open the interactive preview for an already-connected device session. " +
+        "Call connect_device first and continue only when it succeeds.",
+      inputSchema: {
+        deviceId: z.string().min(1).optional(),
+        udid: z.string().min(1).optional(),
+      },
       outputSchema: sessionStateSchema,
       _meta: metadata.openPreview,
     },
-    ({ udid }) => connectSimulator(udid),
+    ({ deviceId, udid }) => connectDevice(deviceId ?? udid),
+  );
+
+  server.registerTool(
+    "connect_device",
+    {
+      title: "Connect device",
+      description: "Start or select a device session without opening the interactive preview.",
+      inputSchema: { deviceId: z.string().min(1).optional() },
+      outputSchema: sessionStateSchema,
+      _meta: metadata.modelOnly,
+    },
+    ({ deviceId }) => connectDevice(deviceId),
+  );
+
+  server.registerTool(
+    "app_connect_device",
+    {
+      title: "Switch device",
+      description: "Switch the device used by the open SimView preview.",
+      inputSchema: { deviceId: z.string().min(1).optional() },
+      outputSchema: sessionStateSchema,
+      _meta: metadata.appOnly,
+    },
+    ({ deviceId }) => connectDevice(deviceId),
   );
 
   server.registerTool(
@@ -213,11 +251,11 @@ export function createServer(session = new SimViewSession()): McpServer {
     {
       title: "Connect simulator",
       description: "Start or select a simulator session without opening the interactive preview.",
-      inputSchema: { udid: z.string().uuid().optional() },
+      inputSchema: { udid: z.string().min(1).optional() },
       outputSchema: sessionStateSchema,
       _meta: metadata.modelOnly,
     },
-    ({ udid }) => connectSimulator(udid),
+    ({ udid }) => connectDevice(udid),
   );
 
   server.registerTool(
@@ -225,18 +263,42 @@ export function createServer(session = new SimViewSession()): McpServer {
     {
       title: "Switch simulator",
       description: "Switch the Simulator used by the open SimView preview.",
-      inputSchema: { udid: z.string().uuid().optional() },
+      inputSchema: { udid: z.string().min(1).optional() },
       outputSchema: sessionStateSchema,
       _meta: metadata.appOnly,
     },
-    ({ udid }) => connectSimulator(udid),
+    ({ udid }) => connectDevice(udid),
+  );
+
+  server.registerTool(
+    "list_devices",
+    {
+      title: "List devices",
+      description: "List local iOS Simulators, Android emulators, and Android devices.",
+      inputSchema: {},
+      outputSchema: deviceListSchema,
+      _meta: metadata.modelOnly,
+    },
+    listDevices,
+  );
+
+  server.registerTool(
+    "app_list_devices",
+    {
+      title: "List devices",
+      description: "List devices available to the open SimView preview.",
+      inputSchema: {},
+      outputSchema: deviceListSchema,
+      _meta: metadata.appOnly,
+    },
+    listDevices,
   );
 
   server.registerTool(
     "list_simulators",
     {
       title: "List simulators",
-      description: "List local iOS Simulators and their current state.",
+      description: "Compatibility tool listing local iOS Simulators and Android emulators.",
       inputSchema: {},
       outputSchema: simulatorListSchema,
       _meta: metadata.modelOnly,
@@ -248,7 +310,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     "app_list_simulators",
     {
       title: "List simulators",
-      description: "List local iOS Simulators for the open SimView preview.",
+      description: "Compatibility tool listing iOS Simulators and Android emulators.",
       inputSchema: {},
       outputSchema: simulatorListSchema,
       _meta: metadata.appOnly,
@@ -266,7 +328,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     {
       title: "Take screenshot",
       description:
-        "Observe the selected simulator as a PNG. Use its pixel positions to choose normalized coordinates for tap, swipe, or long_press, then observe again.",
+        "Observe the selected device as a PNG. Use its pixel positions to choose normalized coordinates for tap, swipe, or long_press, then observe again.",
       inputSchema: {},
       outputSchema: screenshotOutputSchema,
       _meta: metadata.modelOnly,
@@ -302,7 +364,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     "set_orientation",
     {
       title: "Set orientation",
-      description: "Rotate the selected simulator to a named orientation.",
+      description: "Rotate the selected device when its capabilities allow orientation changes.",
       inputSchema: {
         orientation: z.enum([
           "portrait",
@@ -314,8 +376,9 @@ export function createServer(session = new SimViewSession()): McpServer {
       outputSchema: acceptedOutputSchema,
     },
     ({ orientation }) => {
+      session.requireCapability("orientation", "Orientation changes");
       const result = session.requireClient().request("device.orientation.set", { orientation });
-      return result.then((value) => toolResult("Simulator orientation accepted.", value));
+      return result.then((value) => toolResult("Device orientation accepted.", value));
     },
   );
 
@@ -348,7 +411,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     "SimView preview",
     metadata.resourceUri,
     {
-      description: "Interactive local iOS Simulator preview and review surface.",
+      description: "Interactive local iOS Simulator or Android device preview and review surface.",
     },
     readPreviewResource,
   );
@@ -359,7 +422,7 @@ export function createServer(session = new SimViewSession()): McpServer {
       list: undefined,
     }),
     {
-      description: "Interactive local iOS Simulator preview and review surface.",
+      description: "Interactive local iOS Simulator or Android device preview and review surface.",
       mimeType: RESOURCE_MIME_TYPE,
     },
     async (uri, variables) => {
@@ -422,7 +485,7 @@ function registerAccessibilityTools(
         if (
           !pageCache ||
           Date.now() >= pageCache.expiresAt ||
-          pageCache.deviceUdid !== session.device?.udid ||
+          pageCache.deviceId !== session.device?.id ||
           pageCache.connectionGeneration !== session.connectionGeneration
         ) {
           pageCache = undefined;
@@ -448,7 +511,7 @@ function registerAccessibilityTools(
         const pageCount = Math.ceil(bytes.byteLength / ELEMENT_TREE_PAGE_RAW_BYTES);
         pageCache = {
           transferId: randomUUID(),
-          deviceUdid: session.device?.udid,
+          deviceId: session.device?.id,
           connectionGeneration: session.connectionGeneration,
           expiresAt: Date.now() + ELEMENT_TREE_TRANSFER_TTL_MS,
           bytes,
@@ -481,6 +544,9 @@ function registerAccessibilityTools(
       throw new Error("The selected element has no visible frame");
     }
     const point = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+    if (!session.device?.capabilities.input.touch) {
+      throw new Error("Tap is not supported by the selected device");
+    }
     const receipt = await session.requireClient().request("input.tap", point);
     return toolResult("Physical element tap accepted; observe the screen to verify the outcome.", {
       selector: parsedSelector,
@@ -491,8 +557,10 @@ function registerAccessibilityTools(
   };
   const inspectPoint = async (x: number, y: number) => {
     const accessibility = await session.inspectPoint(x, y);
-    const status = await session.probeStatus();
-    const native = status.connected ? await session.probeInspectPoint(x, y) : undefined;
+    const status = session.device?.capabilities.uikitProbe
+      ? await session.probeStatus()
+      : undefined;
+    const native = status?.connected ? await session.probeInspectPoint(x, y) : undefined;
     return toolResult("Element context at the requested point.", {
       element: accessibility,
       native,
@@ -500,6 +568,7 @@ function registerAccessibilityTools(
     });
   };
   const getUiContext = async () => {
+    session.requireCapability("uikitProbe", "UIKit probe");
     const status = await session.probeStatus();
     const target = status.connected ? undefined : await session.probeTarget();
     const context = status.connected ? await session.probeContext() : undefined;
@@ -521,7 +590,7 @@ function registerAccessibilityTools(
     {
       title: "Observe screen",
       description:
-        "Capture the simulator as a PNG and return the React Native Fiber tree when available, otherwise the accessibility tree. Use element selectors for navigation when possible.",
+        "Capture the selected device as a PNG and return semantic context when available. The screenshot is still returned when semantic inspection fails.",
       inputSchema: {},
       outputSchema: observeOutputSchema,
     },
@@ -529,34 +598,57 @@ function registerAccessibilityTools(
       const frameStarted = new Date();
       const screenshot = await session.screenshot();
       const frameCapturedAt = new Date();
-      const result = await session.elementSnapshot("interactive");
-      const snapshot = session.lastAccessibility;
-      if (!snapshot) throw new Error("Accessibility fallback was not captured");
-      const accessibilityCapturedAt = new Date(snapshot.capturedAt);
-      return {
-        content: [
-          {
-            type: "image" as const,
-            data: Buffer.from(screenshot.bytes).toString("base64"),
-            mimeType: "image/png",
+      try {
+        const result = await session.elementSnapshot("interactive");
+        const snapshot = session.lastAccessibility;
+        if (!snapshot) throw new Error("Semantic fallback was not captured");
+        const accessibilityCapturedAt = new Date(snapshot.capturedAt);
+        return {
+          content: [
+            {
+              type: "image" as const,
+              data: Buffer.from(screenshot.bytes).toString("base64"),
+              mimeType: "image/png",
+            },
+            { type: "text" as const, text: compactElementTree(result) },
+          ],
+          structuredContent: {
+            frameId: screenshot.frameId,
+            frameCapturedAt: frameCapturedAt.toISOString(),
+            snapshot,
+            elements: result.snapshot,
+            screenContext: result.screenContext,
+            accessibilityCapturedAt: snapshot.capturedAt,
+            elementsCapturedAt: result.snapshot.capturedAt,
+            captureDeltaMs: Math.max(0, accessibilityCapturedAt.getTime() - frameStarted.getTime()),
+            fallback: result.fallback,
           },
-          {
-            type: "text" as const,
-            text: compactElementTree(result),
+        };
+      } catch (error) {
+        const semanticError = {
+          code: "semantic_inspection_failed",
+          message: error instanceof Error ? error.message : String(error),
+          recoverable: true,
+        };
+        return {
+          content: [
+            {
+              type: "image" as const,
+              data: Buffer.from(screenshot.bytes).toString("base64"),
+              mimeType: "image/png",
+            },
+            {
+              type: "text" as const,
+              text: `Semantic inspection unavailable: ${semanticError.message}`,
+            },
+          ],
+          structuredContent: {
+            frameId: screenshot.frameId,
+            frameCapturedAt: frameCapturedAt.toISOString(),
+            semanticError,
           },
-        ],
-        structuredContent: {
-          frameId: screenshot.frameId,
-          frameCapturedAt: frameCapturedAt.toISOString(),
-          snapshot,
-          elements: result.snapshot,
-          screenContext: result.screenContext,
-          accessibilityCapturedAt: snapshot.capturedAt,
-          elementsCapturedAt: result.snapshot.capturedAt,
-          captureDeltaMs: Math.max(0, accessibilityCapturedAt.getTime() - frameStarted.getTime()),
-          fallback: result.fallback,
-        },
-      };
+        };
+      }
     },
   );
 
@@ -565,7 +657,7 @@ function registerAccessibilityTools(
     {
       title: "Get element tree",
       description:
-        "Read the React Native visual Fiber tree when a matching Metro target is available, otherwise return the Simulator accessibility tree.",
+        "Read the React Native visual Fiber tree when a matching Metro target is available, otherwise return the native device accessibility tree.",
       inputSchema: {
         scope: z.enum(["interactive", "visible", "full"]).default("interactive"),
         maxNodes: z.number().int().min(1).max(1_200).default(1_200),
@@ -597,7 +689,7 @@ function registerAccessibilityTools(
     {
       title: "Get accessibility tree",
       description:
-        "Read the frontmost Simulator accessibility hierarchy without taking another screenshot.",
+        "Read the selected device accessibility hierarchy without taking another screenshot.",
       inputSchema: {
         scope: z.enum(["interactive", "visible", "full"]).default("interactive"),
         maxNodes: z.number().int().min(1).max(1_200).default(1_200),
@@ -643,7 +735,7 @@ function registerAccessibilityTools(
     {
       title: "Tap element",
       description:
-        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through simulator HID.",
+        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through device input.",
       inputSchema: selectorSchema,
       outputSchema: z.object({
         selector: accessibilitySelectorSchema,
@@ -677,7 +769,7 @@ function registerAccessibilityTools(
     "inspect_point",
     {
       title: "Inspect point",
-      description: "Return the deepest accessible element at a normalized simulator coordinate.",
+      description: "Return the deepest accessible element at a normalized device coordinate.",
       inputSchema: {
         x: z.number().min(0).max(1),
         y: z.number().min(0).max(1),
@@ -785,6 +877,7 @@ function registerAccessibilityTools(
       const started = performance.now();
       const parsedSelector = accessibilitySelectorSchema.parse(selector);
       const result = await session.requireClient().request("accessibility.wait", {
+        deviceId: session.device?.id,
         udid: session.device?.udid,
         selector: parsedSelector,
         state,
@@ -802,13 +895,13 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
   const input = async (value: unknown) => {
     const parsed = relayInputSchema.parse(value);
     const result = await session.dispatchInput(parsed);
-    return toolResult("Simulator input accepted.", result);
+    return toolResult("Device input accepted.", result);
   };
   server.registerTool(
     "tap",
     {
       title: "Tap",
-      description: "Tap a normalized simulator coordinate.",
+      description: "Tap a normalized device coordinate.",
       inputSchema: { x: z.number().min(0).max(1), y: z.number().min(0).max(1) },
       outputSchema: acceptedOutputSchema,
     },
@@ -818,7 +911,7 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "swipe",
     {
       title: "Swipe",
-      description: "Swipe between normalized simulator coordinates.",
+      description: "Swipe between normalized device coordinates.",
       inputSchema: {
         from: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
         to: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
@@ -833,7 +926,7 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "long_press",
     {
       title: "Long press",
-      description: "Hold a normalized simulator coordinate.",
+      description: "Hold a normalized device coordinate.",
       inputSchema: {
         x: z.number().min(0).max(1),
         y: z.number().min(0).max(1),
@@ -847,7 +940,7 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "type_text",
     {
       title: "Type text",
-      description: "Type UTF-8 text using HID keys or the controlled Unicode paste fallback.",
+      description: "Type text at the selected device's declared ASCII or Unicode capability level.",
       inputSchema: { text: z.string().max(10_000) },
       outputSchema: acceptedOutputSchema,
     },
@@ -857,8 +950,10 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "press_button",
     {
       title: "Press button",
-      description: "Press a supported simulator hardware button.",
-      inputSchema: { button: z.enum(["home", "lock", "volume-up", "volume-down", "action"]) },
+      description: "Press a supported device hardware or navigation button.",
+      inputSchema: {
+        button: z.enum(["home", "back", "overview", "lock", "volume-up", "volume-down", "action"]),
+      },
       outputSchema: acceptedOutputSchema,
     },
     ({ button }) => input({ method: "input.button", params: { button } }),
@@ -919,28 +1014,39 @@ function registerAppBridgeTools(
     },
   );
 
-  server.registerTool(
-    "simulator_input",
-    {
-      title: "Send simulator input",
-      description:
-        "Forward an input event from the embedded SimView app to the selected Simulator.",
-      inputSchema: {
-        method: z.enum(["input.touch", "input.tap", "input.button", "input.typeText"]),
-        params: z.record(z.string(), z.unknown()),
+  const registerDeviceInput = (name: "device_input" | "simulator_input", legacy: boolean) =>
+    server.registerTool(
+      name,
+      {
+        title: legacy ? "Send simulator input" : "Send device input",
+        description: legacy
+          ? "Compatibility alias for device_input."
+          : "Forward an input event from the embedded SimView app to the selected device.",
+        inputSchema: {
+          method: z.enum([
+            "input.touch",
+            "input.tap",
+            "input.longPress",
+            "input.swipe",
+            "input.button",
+            "input.typeText",
+          ]),
+          params: z.record(z.string(), z.unknown()),
+        },
+        outputSchema: acceptedOutputSchema,
+        _meta: metadata.appOnly,
       },
-      outputSchema: acceptedOutputSchema,
-      _meta: metadata.appOnly,
-    },
-    async ({ method, params }) => {
-      const parsed = relayInputSchema.parse({ method, params });
-      const result = await session.dispatchInput(parsed);
-      return {
-        content: [],
-        structuredContent: result,
-      };
-    },
-  );
+      async ({ method, params }) => {
+        const parsed = relayInputSchema.parse({ method, params });
+        const result = await session.dispatchInput(parsed);
+        return {
+          content: [],
+          structuredContent: result,
+        };
+      },
+    );
+  registerDeviceInput("device_input", false);
+  registerDeviceInput("simulator_input", true);
 }
 
 function registerAnnotationTools(

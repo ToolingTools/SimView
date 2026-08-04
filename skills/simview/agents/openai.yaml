@@ -1,10 +1,9 @@
 interface:
   display_name: SimView
-  short_description: Review a live iOS Simulator
-  default_prompt: Use $simview to open the booted iOS Simulator and review the current screen.
+  short_description: Review a live mobile device
+  default_prompt: Use $simview to open an available iOS Simulator or Android device and review the current screen.
 dependencies:
   tools:
     - type: mcp
       value: simview
-      description: SimView local simulator preview and controls
-
+      description: SimView local mobile-device preview and controls

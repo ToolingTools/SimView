@@ -1,7 +1,7 @@
 {
   "request": {
     "id": "8e969a52-6515-4ae6-af1a-94e7a31a5f4a",
-    "protocolVersion": 1,
+    "protocolVersion": 2,
     "method": "hello",
     "params": {
       "token": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -12,7 +12,7 @@
   "response": {
     "id": "8e969a52-6515-4ae6-af1a-94e7a31a5f4a",
     "result": {
-      "protocolVersion": 1,
+      "protocolVersion": 2,
       "codec": "h264",
       "maxFrameRate": 60,
       "server": "simview-core/0.1.5",
