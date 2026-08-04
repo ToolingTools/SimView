@@ -1,13 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import {
-  RESOURCE_MIME_TYPE,
-  registerAppResource,
-  registerAppTool,
-} from "@modelcontextprotocol/ext-apps/server";
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { compactAccessibilityTree } from "@simview/client";
 import {
   accessibilityNodeSchema,
@@ -47,6 +42,7 @@ import { SimViewSession } from "./session";
 
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? SIMVIEW_VERSION;
 const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
+const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 
 function resourceMetadata(reviewId: string) {
   const resourceUri = `ui://simview/${VERSION}/reviews/${reviewId}/preview.html`;
@@ -54,6 +50,7 @@ function resourceMetadata(reviewId: string) {
     resourceUri,
     openPreview: {
       ui: { resourceUri, visibility: ["model"] as const },
+      "ui/resourceUri": resourceUri,
       "openai/outputTemplate": resourceUri,
       "openai/widgetAccessible": true,
     },
@@ -204,8 +201,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     };
   };
 
-  registerAppTool(
-    server,
+  server.registerTool(
     "open_simview",
     {
       title: "Open SimView",
@@ -219,7 +215,21 @@ export function createServer(session = new SimViewSession()): McpServer {
       outputSchema: sessionStateSchema,
       _meta: metadata.openPreview,
     },
-    ({ deviceId, udid }) => connectDevice(deviceId ?? udid),
+    async ({ deviceId, udid }, context) => {
+      const appCapable = supportsMcpApps(server, context);
+      const state = await session.open(deviceId ?? udid, {
+        startRelay: !appCapable,
+      });
+      if (appCapable) {
+        return toolResult(`SimView is connected to ${state.device?.name}.`, state);
+      }
+      session.startRelay();
+      session.openBrowser();
+      return toolResult(
+        "SimView opened in your default browser. Add annotations, select Send to Chat, then paste the copied review into chat.",
+        state,
+      );
+    },
   );
 
   server.registerTool(
@@ -406,8 +416,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     };
   };
 
-  registerAppResource(
-    server,
+  server.registerResource(
     "SimView preview",
     metadata.resourceUri,
     {
@@ -1133,23 +1142,25 @@ function toolResult(text: string, structuredContent: unknown) {
   };
 }
 
-export async function runServer(session = new SimViewSession()): Promise<void> {
-  const server = createServer(session);
-  const transport = new StdioServerTransport();
+export async function runServer(): Promise<void> {
   const parentPID = process.ppid;
+  const sessions = new Set<SimViewSession>();
+  let handle: ReturnType<typeof serveStdio> | undefined;
   let shutdownPromise: Promise<void> | undefined;
+  const terminate = () => {
+    void shutdown().then(() => process.exit(0));
+  };
   const shutdown = (): Promise<void> => {
     if (shutdownPromise) return shutdownPromise;
     shutdownPromise = (async () => {
       clearInterval(parentWatchdog);
       process.stdin.off("end", shutdown);
       process.stdin.off("close", shutdown);
-      process.off("SIGINT", shutdown);
-      process.off("SIGTERM", shutdown);
-      process.off("disconnect", shutdown);
-      await session.close().catch(() => {});
-      await server.close().catch(() => {});
-      await transport.close().catch(() => {});
+      process.off("SIGINT", terminate);
+      process.off("SIGTERM", terminate);
+      process.off("disconnect", terminate);
+      await Promise.all([...sessions].map((session) => session.close().catch(() => {})));
+      await handle?.close().catch(() => {});
     })();
     return shutdownPromise;
   };
@@ -1165,16 +1176,38 @@ export async function runServer(session = new SimViewSession()): Promise<void> {
     }
   }, 2_000);
   parentWatchdog.unref();
-  transport.onclose = () => void shutdown();
   process.stdin.once("end", shutdown);
   process.stdin.once("close", shutdown);
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
-  process.once("disconnect", shutdown);
-  try {
-    await server.connect(transport);
-  } catch (error) {
-    await shutdown();
-    throw error;
-  }
+  process.once("SIGINT", terminate);
+  process.once("SIGTERM", terminate);
+  process.once("disconnect", terminate);
+  handle = serveStdio(
+    () => {
+      const session = new SimViewSession();
+      sessions.add(session);
+      const server = createServer(session);
+      server.server.onclose = () => {
+        sessions.delete(session);
+        void session.close();
+      };
+      return server;
+    },
+    {
+      onerror: () => void shutdown(),
+    },
+  );
+}
+
+function supportsMcpApps(server: McpServer, context: { mcpReq: { envelope?: unknown } }): boolean {
+  const modernCapabilities = (
+    context.mcpReq.envelope as { clientCapabilities?: unknown } | undefined
+  )?.clientCapabilities;
+  const capabilities = modernCapabilities ?? server.server.getClientCapabilities();
+  if (!capabilities || typeof capabilities !== "object") return false;
+  const record = capabilities as Record<string, unknown>;
+  return Boolean(
+    record["io.modelcontextprotocol/ui"] ??
+      (record.extensions as Record<string, unknown> | undefined)?.["io.modelcontextprotocol/ui"] ??
+      (record.experimental as Record<string, unknown> | undefined)?.["io.modelcontextprotocol/ui"],
+  );
 }

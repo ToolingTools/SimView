@@ -50,6 +50,22 @@ const modelOnlyTools = [
 ];
 
 describe("MCP app tools", () => {
+  test("opens the browser only for hosts without the MCP App capability", async () => {
+    const noAppSession = previewSession();
+    const appSession = previewSession();
+    const noApp = await callOpenSimView(noAppSession);
+    const app = await callOpenSimView(appSession, {
+      extensions: { "io.modelcontextprotocol/ui": {} },
+    });
+
+    expect(noAppSession.browserOpened).toBe(1);
+    expect(noAppSession.relayStarted).toBe(1);
+    expect((noApp.content as Array<{ text: string }>)[0]?.text).toContain("Send to Chat");
+    expect(appSession.browserOpened).toBe(0);
+    expect(appSession.relayStarted).toBe(0);
+    expect((app.content as Array<{ text: string }>)[0]?.text).toContain("connected");
+  });
+
   test("authorizes app calls and persists annotation mutations", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const session = new SimViewSession();
@@ -461,6 +477,38 @@ describe("MCP app tools", () => {
     });
   });
 });
+
+function previewSession(): SimViewSession & { browserOpened: number; relayStarted: number } {
+  const session = new SimViewSession() as SimViewSession & {
+    browserOpened: number;
+    relayStarted: number;
+  };
+  session.browserOpened = 0;
+  session.relayStarted = 0;
+  session.open = async () => session.state();
+  session.startRelay = () => {
+    session.relayStarted += 1;
+  };
+  session.openBrowser = () => {
+    session.browserOpened += 1;
+  };
+  return session;
+}
+
+async function callOpenSimView(
+  session: SimViewSession,
+  capabilities: Record<string, unknown> = {},
+) {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const server = createServer(session);
+  const client = new Client({ name: "simview-test", version: "1.0.0" }, { capabilities } as never);
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  try {
+    return await client.callTool({ name: "open_simview", arguments: {} });
+  } finally {
+    await Promise.all([client.close(), server.close(), session.close()]);
+  }
+}
 
 function resourceUri(tools: Awaited<ReturnType<Client["listTools"]>>): string {
   const open = tools.tools.find((tool) => tool.name === "open_simview");

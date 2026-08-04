@@ -237,6 +237,12 @@ export class SimViewSession {
     return `http://${this.relay.hostname}:${this.relay.port}/#token=${this.relayToken}`;
   }
 
+  openBrowser(): void {
+    const url = this.browserUrl();
+    if (!url) throw new Error("The browser relay is not running");
+    Bun.spawn(["/usr/bin/open", url], { stdout: "ignore", stderr: "ignore" });
+  }
+
   async screenshot(): Promise<Screenshot> {
     if (this.#screenshotOperation) return this.#screenshotOperation;
     const operation = this.#captureScreenshot();
@@ -597,6 +603,25 @@ export class SimViewSession {
                 note: body.note,
                 context: body.context,
               }),
+            );
+          }
+          if (url.pathname === "/review-images" && request.method === "POST") {
+            return Response.json(
+              await session.saveReviewImages(
+                z
+                  .object({
+                    screenshot: z.string().min(1).max(20_000_000),
+                    annotations: z
+                      .array(
+                        z.object({
+                          id: z.string().uuid(),
+                          screenshot: z.string().min(1).max(20_000_000),
+                        }),
+                      )
+                      .max(100),
+                  })
+                  .parse(await request.json()),
+              ),
             );
           }
           if (url.pathname === "/accessibility") {
