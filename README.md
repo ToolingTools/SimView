@@ -48,6 +48,26 @@ bunx --package @toolingtools/simview simview preview
 SimView command they launch is a standalone arm64 executable. GitHub
 release archives and agent plugins do not require either runtime.
 
+### Try it with Android
+
+Start an Android Emulator or connect an already-authorized Android device, then
+list the platform-qualified device IDs SimView can use:
+
+```sh
+npx --yes --package @toolingtools/simview -- simview devices --json
+npx --yes --package @toolingtools/simview -- simview doctor --json
+```
+
+Open a device by passing its returned `android:<adb-serial>` ID. For example:
+
+```sh
+npx --yes --package @toolingtools/simview -- simview preview --device-id android:emulator-5554
+```
+
+SimView works with ready Android Emulators, authorized USB devices, and devices
+that are already paired over Wi-Fi. It reports unauthorized or offline targets
+without trying to change their ADB transport or pairing state.
+
 ### Codex plugin
 
 Install the [ToolingTools plugin marketplace](https://github.com/ToolingTools/Plugins),
