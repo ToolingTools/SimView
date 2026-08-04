@@ -21,6 +21,9 @@ const instanceId = argumentsMap.get("--instance-id") ?? null;
 const configuredUdid = argumentsMap.get("--udid") ?? null;
 const configuredDeviceId =
   argumentsMap.get("--device-id") ?? (configuredUdid ? `ios:${configuredUdid}` : null);
+const parsedIdleTimeout = Number(argumentsMap.get("--idle-timeout"));
+const idleTimeoutSeconds = Number.isFinite(parsedIdleTimeout) ? parsedIdleTimeout : 60;
+const idleTimeoutMilliseconds = idleTimeoutSeconds * 1_000;
 const token = await Bun.stdin.text();
 if (!socketPath || token.length < 32) process.exit(2);
 const boundSocketPath = socketPath;
@@ -29,6 +32,8 @@ type ConnectionState = { authenticated: boolean; codec: "h264" | "mjpeg" };
 const states = new Map<object, ConnectionState>();
 const decoders = new WeakMap<object, FrameDecoder>();
 let lastDisconnect = new Date();
+let idleTimer: ReturnType<typeof setTimeout> | undefined;
+let shuttingDown = false;
 
 const listener = Bun.listen({
   unix: socketPath,
@@ -52,6 +57,7 @@ const listener = Bun.listen({
           if (params.token !== token) process.exit(3);
           state.authenticated = true;
           state.codec = params.codecs[0] ?? "h264";
+          cancelIdleShutdown();
           respond(socket, request.id, {
             protocolVersion: PROTOCOL_VERSION,
             codec: state.codec,
@@ -72,7 +78,7 @@ const listener = Bun.listen({
             captureState: "idle",
             idleDeadline: clients.length
               ? null
-              : new Date(lastDisconnect.getTime() + 300_000).toISOString(),
+              : new Date(lastDisconnect.getTime() + idleTimeoutMilliseconds).toISOString(),
             capabilities: { capture: true, input: true, accessibility: true, probe: false },
             clients: clients.length,
             clientsByCodec: {
@@ -92,11 +98,34 @@ const listener = Bun.listen({
       states.delete(socket);
       if (state?.authenticated && ![...states.values()].some((item) => item.authenticated)) {
         lastDisconnect = new Date();
+        scheduleIdleShutdown();
       }
     },
   },
 });
 await chmod(boundSocketPath, 0o600);
+scheduleIdleShutdown();
+
+function cancelIdleShutdown(): void {
+  if (idleTimer) clearTimeout(idleTimer);
+  idleTimer = undefined;
+}
+
+function scheduleIdleShutdown(): void {
+  cancelIdleShutdown();
+  if ([...states.values()].some((item) => item.authenticated)) return;
+  const remaining = Math.max(0, lastDisconnect.getTime() + idleTimeoutMilliseconds - Date.now());
+  idleTimer = setTimeout(() => {
+    idleTimer = undefined;
+    if ([...states.values()].some((item) => item.authenticated)) return;
+    const deadline = lastDisconnect.getTime() + idleTimeoutMilliseconds;
+    if (Date.now() < deadline) {
+      scheduleIdleShutdown();
+      return;
+    }
+    shutdown(0);
+  }, remaining);
+}
 
 function respond(socket: { write(data: Uint8Array): number }, id: string, result: unknown): void {
   socket.write(
@@ -105,6 +134,9 @@ function respond(socket: { write(data: Uint8Array): number }, id: string, result
 }
 
 function shutdown(exitCode: number): void {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  cancelIdleShutdown();
   listener.stop(true);
   void unlink(boundSocketPath)
     .catch(() => {})
