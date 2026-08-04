@@ -6,6 +6,7 @@ import { deviceDescriptionSchema, probeStatusSchema, probeTargetSchema } from ".
 export const sessionStateSchema = z.object({
   reviewId: z.string().uuid(),
   device: deviceDescriptionSchema.optional(),
+  appBundleId: z.string().min(1).optional(),
   frameId: z.string().optional(),
   route: z.string().optional(),
   component: z

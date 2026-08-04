@@ -35,6 +35,10 @@ export const deviceStateSchema = z.enum([
   "offline",
   "unauthorized",
   "shutdown",
+  "locked",
+  "unpaired",
+  "developer-mode-disabled",
+  "unsupported-transport",
   "unknown",
 ]);
 export type DeviceState = z.infer<typeof deviceStateSchema>;
@@ -163,11 +167,41 @@ export function parseDeviceDescription(value: unknown): DeviceDescription {
 }
 
 const emptyParamsSchema = z.object({}).strict();
-const selectedDeviceParamsSchema = z.object({
+export const selectedDeviceParamsSchema = z.object({
   deviceId: z.string().min(1).optional(),
   udid: z.string().min(1).optional(),
+  appBundleId: z.string().min(1).optional(),
 });
 const acceptedResultSchema = z.object({ accepted: z.literal(true) }).passthrough();
+
+export const installedAppSchema = z
+  .object({
+    bundleId: z.string().min(1),
+    name: z.string().min(1),
+    version: z.string().optional(),
+    build: z.string().optional(),
+    system: z.boolean(),
+    launchable: z.boolean(),
+  })
+  .passthrough();
+export type InstalledApp = z.output<typeof installedAppSchema>;
+
+export const installedAppListSchema = z.object({
+  deviceId: z.string().min(1),
+  apps: z.array(installedAppSchema),
+});
+export type InstalledAppList = z.output<typeof installedAppListSchema>;
+
+export const devicePreparationSchema = z
+  .object({
+    device: deviceDescriptionSchema,
+    ready: z.boolean(),
+    status: z.string().min(1),
+    message: z.string().optional(),
+    team: z.string().min(1).optional(),
+  })
+  .passthrough();
+export type DevicePreparation = z.output<typeof devicePreparationSchema>;
 
 const findResultSchema = z
   .object({
@@ -254,6 +288,15 @@ export const methodSchemas = {
   },
   "devices.list": { params: emptyParamsSchema, result: z.array(deviceDescriptionSchema) },
   "device.describe": { params: selectedDeviceParamsSchema, result: deviceDescriptionSchema },
+  "device.prepare": {
+    params: selectedDeviceParamsSchema.extend({ team: z.string().min(1).optional() }),
+    result: devicePreparationSchema,
+  },
+  "apps.list": { params: selectedDeviceParamsSchema, result: installedAppListSchema },
+  "app.target": {
+    params: selectedDeviceParamsSchema.required({ appBundleId: true }),
+    result: acceptedResultSchema.extend({ appBundleId: z.string().min(1) }),
+  },
   "capture.start": {
     params: selectedDeviceParamsSchema,
     result: z.object({

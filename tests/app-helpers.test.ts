@@ -405,6 +405,41 @@ describe("app helpers", () => {
     ).toEqual(["Device: Pixel 9 · Android 15", "Route: Inbox", "Frame: frame-android"]);
   });
 
+  test("groups physical iOS separately and reports Apple authorization steps", () => {
+    const phone: DeviceDescription = {
+      id: "ios:DEVICE-123",
+      platform: "ios",
+      kind: "physical",
+      state: "unauthorized",
+      available: false,
+      name: "iPhone",
+      runtime: "iOS 26.0",
+      udid: "DEVICE-123",
+      capabilities: {
+        capture: { h264: true, mjpeg: true, screenshot: true },
+        input: {
+          touch: true,
+          rawTouch: false,
+          text: "unicode",
+          buttons: ["home"],
+        },
+        orientation: true,
+        accessibility: true,
+        androidContext: false,
+        uikitProbe: false,
+      },
+    };
+    expect(deviceGroups([phone])).toMatchObject([
+      { key: "ios-devices", label: "iOS Devices", devices: [phone] },
+    ]);
+    expect(deviceStatusLabel(phone)).toContain("trust this Mac");
+    expect(phone.capabilities.input.rawTouch).toBe(false);
+    expect(deviceStatusLabel({ ...phone, state: "locked" })).toContain("unlock the iPhone");
+    expect(deviceStatusLabel({ ...phone, state: "unsupported-transport" })).toContain(
+      "USB required",
+    );
+  });
+
   test("builds an implementation-first annotation handoff", () => {
     const annotation: Annotation = {
       id: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",

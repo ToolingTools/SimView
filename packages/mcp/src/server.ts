@@ -17,6 +17,7 @@ import {
   annotationGeometrySchema,
   annotationSchema,
   deviceListSchema,
+  devicePreparationSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   ELEMENT_TREE_TRANSFER_MAX_BYTES,
   type ElementTreeOutput,
@@ -25,6 +26,7 @@ import {
   elementTreeOutputSchema,
   elementTreePageSchema,
   inspectPointOutputSchema,
+  installedAppListSchema,
   jsonObjectSchema,
   jsonValueSchema,
   normalizedPointSchema,
@@ -164,8 +166,10 @@ const observeOutputSchema = z.object({
 export function createServer(session = new SimViewSession()): McpServer {
   const server = new McpServer({ name: "simview", version: VERSION });
   const metadata = resourceMetadata(session.reviewId);
-  const connectDevice = async (deviceId?: string) => {
-    const state = await session.open(deviceId);
+  const connectDevice = async (deviceId?: string, appBundleId?: string) => {
+    const state = await session.open(deviceId, {
+      ...(appBundleId ? { appBundleId } : {}),
+    });
     return toolResult(`SimView is connected to ${state.device?.name}.`, state);
   };
   const listDevices = async () => {
@@ -215,11 +219,12 @@ export function createServer(session = new SimViewSession()): McpServer {
       inputSchema: {
         deviceId: z.string().min(1).optional(),
         udid: z.string().min(1).optional(),
+        appBundleId: z.string().min(1).optional(),
       },
       outputSchema: sessionStateSchema,
       _meta: metadata.openPreview,
     },
-    ({ deviceId, udid }) => connectDevice(deviceId ?? udid),
+    ({ deviceId, udid, appBundleId }) => connectDevice(deviceId ?? udid, appBundleId),
   );
 
   server.registerTool(
@@ -227,11 +232,14 @@ export function createServer(session = new SimViewSession()): McpServer {
     {
       title: "Connect device",
       description: "Start or select a device session without opening the interactive preview.",
-      inputSchema: { deviceId: z.string().min(1).optional() },
+      inputSchema: {
+        deviceId: z.string().min(1).optional(),
+        appBundleId: z.string().min(1).optional(),
+      },
       outputSchema: sessionStateSchema,
       _meta: metadata.modelOnly,
     },
-    ({ deviceId }) => connectDevice(deviceId),
+    ({ deviceId, appBundleId }) => connectDevice(deviceId, appBundleId),
   );
 
   server.registerTool(
@@ -239,11 +247,14 @@ export function createServer(session = new SimViewSession()): McpServer {
     {
       title: "Switch device",
       description: "Switch the device used by the open SimView preview.",
-      inputSchema: { deviceId: z.string().min(1).optional() },
+      inputSchema: {
+        deviceId: z.string().min(1).optional(),
+        appBundleId: z.string().min(1).optional(),
+      },
       outputSchema: sessionStateSchema,
       _meta: metadata.appOnly,
     },
-    ({ deviceId }) => connectDevice(deviceId),
+    ({ deviceId, appBundleId }) => connectDevice(deviceId, appBundleId),
   );
 
   server.registerTool(
@@ -274,7 +285,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     "list_devices",
     {
       title: "List devices",
-      description: "List local iOS Simulators, Android emulators, and Android devices.",
+      description: "List local iOS Simulators, physical iOS devices, and Android devices.",
       inputSchema: {},
       outputSchema: deviceListSchema,
       _meta: metadata.modelOnly,
@@ -316,6 +327,84 @@ export function createServer(session = new SimViewSession()): McpServer {
       _meta: metadata.appOnly,
     },
     listSimulators,
+  );
+
+  server.registerTool(
+    "prepare_device",
+    {
+      title: "Prepare physical iOS device",
+      description:
+        "Build, sign, install, and verify SimView's owned XCTest runner for a physical iOS device.",
+      inputSchema: {
+        deviceId: z.string().min(1),
+        team: z.string().min(1).optional(),
+      },
+      outputSchema: devicePreparationSchema,
+      _meta: metadata.modelOnly,
+    },
+    async ({ deviceId, team }) => {
+      const result = await session.prepareDevice(deviceId, team);
+      return toolResult(
+        result.ready
+          ? "Physical iOS device is ready."
+          : (result.message ?? "Physical iOS device requires preparation."),
+        result,
+      );
+    },
+  );
+
+  const listApps = async (deviceId?: string) => {
+    const result = await session.installedApps(deviceId);
+    return toolResult(`Installed apps on ${result.deviceId}.`, result);
+  };
+  server.registerTool(
+    "list_apps",
+    {
+      title: "List installed apps",
+      description: "List launchable apps available for SimView to target on a physical iOS device.",
+      inputSchema: { deviceId: z.string().min(1).optional() },
+      outputSchema: installedAppListSchema,
+      _meta: metadata.modelOnly,
+    },
+    ({ deviceId }) => listApps(deviceId),
+  );
+  server.registerTool(
+    "app_list_apps",
+    {
+      title: "List installed apps",
+      description: "List target apps for the selected physical iOS device.",
+      inputSchema: {},
+      outputSchema: installedAppListSchema,
+      _meta: metadata.appOnly,
+    },
+    () => listApps(),
+  );
+
+  const selectApp = async (appBundleId: string) => {
+    const state = await session.selectApp(appBundleId);
+    return toolResult(`SimView now targets ${appBundleId}.`, state);
+  };
+  server.registerTool(
+    "select_app",
+    {
+      title: "Select target app",
+      description: "Select the app controlled and inspected on the connected physical iOS device.",
+      inputSchema: { appBundleId: z.string().min(1) },
+      outputSchema: sessionStateSchema,
+      _meta: metadata.modelOnly,
+    },
+    ({ appBundleId }) => selectApp(appBundleId),
+  );
+  server.registerTool(
+    "app_select_app",
+    {
+      title: "Select target app",
+      description: "Switch the app targeted by the open physical iOS preview.",
+      inputSchema: { appBundleId: z.string().min(1) },
+      outputSchema: sessionStateSchema,
+      _meta: metadata.appOnly,
+    },
+    ({ appBundleId }) => selectApp(appBundleId),
   );
 
   registerInputTools(server, session);
@@ -411,7 +500,7 @@ export function createServer(session = new SimViewSession()): McpServer {
     "SimView preview",
     metadata.resourceUri,
     {
-      description: "Interactive local iOS Simulator or Android device preview and review surface.",
+      description: "Interactive local iOS or Android device preview and review surface.",
     },
     readPreviewResource,
   );
@@ -422,7 +511,7 @@ export function createServer(session = new SimViewSession()): McpServer {
       list: undefined,
     }),
     {
-      description: "Interactive local iOS Simulator or Android device preview and review surface.",
+      description: "Interactive local iOS or Android device preview and review surface.",
       mimeType: RESOURCE_MIME_TYPE,
     },
     async (uri, variables) => {

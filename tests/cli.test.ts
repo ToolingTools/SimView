@@ -67,6 +67,21 @@ describe("CLI device list filtering", () => {
       runtime: "Android 15",
       capabilities: androidCapabilities,
     }),
+    parseDeviceDescription({
+      id: "ios:DEVICE-123",
+      platform: "ios",
+      kind: "physical",
+      state: "ready",
+      available: true,
+      udid: "DEVICE-123",
+      name: "iPhone",
+      runtime: "iOS 26",
+      capabilities: {
+        ...iosCapabilities,
+        input: { ...iosCapabilities.input, rawTouch: false },
+        uikitProbe: false,
+      },
+    }),
   ];
 
   test("keeps the complete inventory by default", () => {

@@ -2,6 +2,7 @@ import { cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 import { ANDROID_AGENT_PROTOCOL_VERSION } from "./android-agent-config";
+import { copyIOSRunnerSources, hashIOSRunnerSources } from "./ios-runner-source";
 
 const root = resolve(import.meta.dir, "..");
 const artifacts = join(root, "artifacts", "release");
@@ -35,6 +36,7 @@ const packagedAndroidAgent = join(root, "packages/core/bin/simview-android-agent
 const androidAgentSha256 = new Bun.CryptoHasher("sha256")
   .update(await Bun.file(packagedAndroidAgent).arrayBuffer())
   .digest("hex");
+const iosRunnerSourceSha256 = await hashIOSRunnerSources(root);
 const releaseBinaries = [
   { path: cliBinary, identifier: "com.simview.cli" },
   { path: packagedCore, identifier: "com.simview.core" },
@@ -69,7 +71,6 @@ await Promise.all([
   cp(join(root, "artifacts/simview-plugin.zip"), join(artifacts, "simview-plugin.zip")),
   cp(join(root, "artifacts/simview.mcpb"), join(artifacts, "simview.mcpb")),
 ]);
-
 const archiveStage = join(archiveRoot, `simview-${version}`);
 await mkdir(join(archiveStage, "bin"), { recursive: true });
 await Promise.all([
@@ -81,6 +82,7 @@ await Promise.all([
   cp(join(root, "LICENSE"), join(archiveStage, "LICENSE")),
   cp(join(root, "THIRD_PARTY_NOTICES.md"), join(archiveStage, "THIRD_PARTY_NOTICES.md")),
 ]);
+await copyIOSRunnerSources(root, join(archiveStage, "bin", "SimViewIOSDeviceRunner"));
 await $`ditto -c -k --norsrc --keepParent ${archiveStage} ${join(artifacts, `simview-${version}-macos.zip`)}`;
 
 await $`bun ${join(root, "scripts/generate-sbom.ts")} ${join(artifacts, "sbom.cdx.json")}`;
@@ -113,6 +115,14 @@ await writeFile(
           version,
           protocolVersion: ANDROID_AGENT_PROTOCOL_VERSION,
           sha256: androidAgentSha256,
+        },
+        {
+          name: "SimViewIOSDeviceRunner",
+          version,
+          protocolVersion: 1,
+          deploymentTarget: "15.0",
+          sourceOnly: true,
+          sha256: iosRunnerSourceSha256,
         },
       ],
       files: releaseFiles,

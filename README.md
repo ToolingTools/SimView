@@ -1,9 +1,10 @@
 # SimView
 
-SimView is a local-first iOS Simulator and Android device preview and input
+SimView is a local-first iOS and Android device preview and input
 transport for agents, MCP hosts, and humans. On iOS it captures the Simulator's
 `IOSurface` directly, encodes H.264 with VideoToolbox, and injects physical input
-through SimulatorKit's Indigo HID functions. On Android it discovers emulators,
+through SimulatorKit's Indigo HID functions. Physical iOS devices use a
+SimView-owned, locally signed XCTest UI runner over authenticated USB. On Android it discovers emulators,
 authorized USB devices, and already-paired Wi-Fi devices with the installed
 official ADB, using a transient SimView-owned agent for streaming and input.
 
@@ -20,6 +21,8 @@ consume its versioned binary protocol.
 
 - macOS 14 or later
 - Full Xcode with an installed iOS Simulator runtime for iOS support
+- An Apple Development signing team, trusted USB pairing, Developer Mode, and
+  UI Automation authorization for physical iOS support
 - Android SDK Platform Tools (`adb`) for Android support
 - Bun 1.3.14 for source development only
 - JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
@@ -31,7 +34,7 @@ server and authorization keys; it does not pair devices, enable legacy
 macOS Android SDK location. Missing ADB does not prevent iOS use.
 
 Release archives contain compiled arm64 Bun clients, an arm64 Swift executable,
-and the versioned Android agent DEX/JAR.
+the source-only SimView XCTest runner, and the versioned Android agent DEX/JAR.
 End users do not need Bun, Node, Homebrew, AXe, IDB, a simulator helper app, or
 Screen Recording permission.
 
@@ -67,6 +70,25 @@ npx --yes --package @toolingtools/simview -- simview preview --device-id android
 SimView works with ready Android Emulators, authorized USB devices, and devices
 that are already paired over Wi-Fi. It reports unauthorized or offline targets
 without trying to change their ADB transport or pairing state.
+
+### Try it with a physical iPhone
+
+Connect the device directly by USB, accept Apple's trust prompt, enable
+Developer Mode, then list and prepare it. SimView builds the owned runner once
+and caches it by Xcode build, runner source, protocol, deployment target, and
+signing team:
+
+```sh
+simview devices --json
+simview device prepare --device-id ios:<udid> --team <team-id>
+simview apps list --device-id ios:<udid> --json
+simview preview --device-id ios:<udid> --app-bundle-id com.example.app
+```
+
+`--team` may be omitted when exactly one Apple Development team is available.
+The runner targets iOS 15+, while physical iOS 26 is the first acceptance
+target. Physical preview is not release-qualified until the hardware matrix in
+`docs/compatibility.md` records the complete performance and behavior suite.
 
 ### Codex plugin
 
@@ -146,6 +168,9 @@ bun packages/cli/src/index.ts devices --json
 bun packages/cli/src/index.ts devices --booted --json
 bun packages/cli/src/index.ts doctor --json
 bun packages/cli/src/index.ts preview
+simview device prepare --device-id ios:<udid> --team <team-id>
+simview apps list --device-id ios:<udid> --json
+simview apps select --device-id ios:<udid> --app-bundle-id com.example.app
 bun packages/cli/src/index.ts screenshot --device-id android:emulator-5554 --output ./device.png
 bun packages/cli/src/index.ts tree --json
 bun packages/cli/src/index.ts ax-tree --json
@@ -203,6 +228,7 @@ Tools:
 - `open_simview`
 - `connect_device`
 - `list_devices`
+- `prepare_device`, `list_apps`, `select_app`
 - `connect_simulator`
 - `list_simulators`
 - `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`

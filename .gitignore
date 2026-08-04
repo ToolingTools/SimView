@@ -4,6 +4,8 @@ dist/
 .build/
 native/SimViewProbe/build/
 *.xcodeproj/
+!native/SimViewIOSDeviceRunner/SimViewIOSDeviceRunner.xcodeproj/
+!native/SimViewIOSDeviceRunner/SimViewIOSDeviceRunner.xcodeproj/**
 *.xcworkspace/
 *.dSYM/
 artifacts/

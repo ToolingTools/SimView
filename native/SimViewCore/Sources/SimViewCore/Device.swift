@@ -49,19 +49,7 @@ struct DeviceDescription: Sendable {
     var capabilities: [String: Any] {
         switch platform {
         case .ios:
-            [
-                "capture": ["h264": true, "mjpeg": true, "screenshot": true],
-                "input": [
-                    "touch": true,
-                    "rawTouch": true,
-                    "text": "unicode",
-                    "buttons": ["home", "lock", "volume-up", "volume-down", "action"],
-                ],
-                "orientation": true,
-                "accessibility": true,
-                "androidContext": false,
-                "uikitProbe": true,
-            ]
+            kind == .simulator ? simulatorCapabilities : physicalIOSCapabilities
         case .android:
             [
                 "capture": ["h264": true, "mjpeg": true, "screenshot": true],
@@ -80,6 +68,39 @@ struct DeviceDescription: Sendable {
                 "uikitProbe": false,
             ]
         }
+    }
+
+    private var simulatorCapabilities: [String: Any] {
+        [
+            "capture": ["h264": true, "mjpeg": true, "screenshot": true],
+            "input": [
+                "touch": true,
+                "rawTouch": true,
+                "text": "unicode",
+                "buttons": ["home", "lock", "volume-up", "volume-down", "action"],
+            ],
+            "orientation": true,
+            "accessibility": true,
+            "androidContext": false,
+            "uikitProbe": true,
+        ]
+    }
+
+    private var physicalIOSCapabilities: [String: Any] {
+        [
+            "capture": ["h264": true, "mjpeg": false, "screenshot": true],
+            "input": [
+                "touch": true,
+                "rawTouch": false,
+                "text": "unicode",
+                // The runner advertises concrete XCUI buttons after it starts.
+                "buttons": [String](),
+            ],
+            "orientation": true,
+            "accessibility": true,
+            "androidContext": false,
+            "uikitProbe": false,
+        ]
     }
 }
 
@@ -145,6 +166,37 @@ enum DeviceRuntime {
 
 struct IOSDeviceProvider: DeviceProvider {
     func devices() throws -> [DeviceDescription] {
+        var result: [DeviceDescription] = []
+        var simulatorFailure: Error?
+        var physicalFailure: Error?
+        var simulatorSucceeded = false
+        var physicalSucceeded = false
+        do {
+            result.append(contentsOf: try simulatorDevices())
+            simulatorSucceeded = true
+        } catch {
+            simulatorFailure = error
+        }
+        do {
+            let lifecycle = IOSRunnerLifecycle()
+            result.append(
+                contentsOf: try IOSPhysicalDeviceProvider(
+                    runnerReadiness: { _ in
+                        lifecycle.readiness()["status"] as? String ?? "unknown"
+                    }
+                ).devices()
+            )
+            physicalSucceeded = true
+        } catch {
+            physicalFailure = error
+        }
+        if !simulatorSucceeded, !physicalSucceeded, let failure = simulatorFailure ?? physicalFailure {
+            throw failure
+        }
+        return result
+    }
+
+    private func simulatorDevices() throws -> [DeviceDescription] {
         try SimulatorRuntime.devices().map { device in
             DeviceDescription(
                 id: "ios:\(device.udid)",

@@ -52,6 +52,48 @@ capability fallbacks. Secure content remains blank and is never bypassed.
 The rows above deliberately make no Android performance, OEM, USB-device, or
 Wi-Fi-device compatibility claim until the complete smoke test is recorded.
 
+### Physical iOS matrix
+
+The owned XCTest runner has an iOS 15 deployment target. Compilation proves API
+availability only; hardware rows remain unadvertised until the full smoke suite
+passes. USB is the only initial transport. Apple's one-time pairing, trust,
+Developer Mode, UI Automation, account, and development-signing confirmations
+are prerequisites rather than SimView automation failures.
+
+| Xcode | Device runtime | Build/install | Preview performance | Inspection/annotations/input | Status |
+| --- | --- | --- | --- | --- | --- |
+| 26.x | iOS 26 | not tested | requires 30+ displayed FPS for 60 s and p95 below 250 ms | not tested | release blocked |
+| 26.x | iOS 18 | not tested | not tested | not tested | unadvertised |
+| 26.x | iOS 17 | not tested | not tested | not tested | unadvertised |
+| 26.x | iOS 16 | not tested | not tested | not tested | unadvertised |
+| 26.x | iOS 15 | not tested | not tested | not tested | unadvertised |
+| 26.5 | iOS 27 beta | unsigned generic compile only | not tested | discovery only | not acceptance evidence |
+
+QuickTime/Valeria and ReplayKit are intentionally absent. Current macOS does not
+publish the connected iPhone through AVFoundation/CoreMediaIO, direct Valeria
+access requires an Apple-private entitlement, and ReplayKit requires a manual
+Start Broadcast action.
+
+## Required physical iOS release smoke test
+
+For every advertised hardware row:
+
+1. Perform fresh preparation, automatic signing/install/start, then a zero-touch reconnect.
+2. Run an animated fixture for 60 seconds at 30+ displayed FPS (target 60) with
+   p95 capture-to-canvas latency below 250 ms and bounded queues/thermal behavior.
+3. Freeze a full-resolution public PNG; verify point/rectangle annotations,
+   exact crops, Send to Chat, and normalized-coordinate parity.
+4. Verify a bounded `ios-xcui` tree, point inspection, find/wait, manual app
+   switching, and explicit bundle-ID fallback.
+5. Verify tap, swipe, long press/drag, Unicode typing, every reported button,
+   orientation, activation, and termination.
+6. Exercise cable removal/reconnect, runner and `testmanagerd` crashes, device
+   lock, protected content, multi-client sharing, final-client capture cleanup,
+   and five-minute daemon exit.
+
+If the automatic XCTest screenshot seam cannot sustain the 30 FPS floor, the
+row remains blocked; a low-frame-rate preview must not be presented as parity.
+
 ## Required iOS release smoke test
 
 For every supported row:

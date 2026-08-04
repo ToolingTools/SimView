@@ -25,6 +25,9 @@ The generated npm package and plugin contain:
 - `bin/simview-android-agent.jar`: the versioned API-26+ DEX/JAR pushed
   transiently to Android targets.
 - `bin/libSimViewProbe.dylib`: the arm64 Simulator probe.
+- `bin/SimViewIOSDeviceRunner`: the SimView-owned Xcode project, Sources, and
+  Tests used to build a locally signed physical-iOS runner. It contains no
+  prebuilt runner app or third-party device stack.
 - the MCP App, portable skill, plugin manifests, assets, license, and notices.
 
 Release builds minify the embedded Bun bundle and strip local Mach-O symbols

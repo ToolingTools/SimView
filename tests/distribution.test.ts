@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
+import { assertOwnedIOSRunnerTree } from "../scripts/ios-runner-source";
 import {
   assertCodexPluginArchiveSize,
   createNpmPackageManifest,
@@ -74,5 +75,11 @@ describe("release distribution", () => {
     expect(() =>
       assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes + 1, "simview.tgz"),
     ).toThrow("exceeding the Codex plugin archive limit");
+  });
+
+  test("packages only SimView-owned iOS runner sources", async () => {
+    await expect(
+      assertOwnedIOSRunnerTree(join(root, "native", "SimViewIOSDeviceRunner")),
+    ).resolves.toBeUndefined();
   });
 });

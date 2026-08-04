@@ -54,6 +54,47 @@ describe("shared protocol contracts", () => {
     ).toBe(false);
   });
 
+  test("supports the owned physical iOS runner protocol", () => {
+    expect(
+      methodSchemas["device.prepare"].params.parse({
+        deviceId: "ios:DEVICE-123",
+        team: "TEAM123",
+      }),
+    ).toEqual({ deviceId: "ios:DEVICE-123", team: "TEAM123" });
+    expect(
+      methodSchemas["apps.list"].result.parse({
+        deviceId: "ios:DEVICE-123",
+        apps: [
+          {
+            bundleId: "com.example.app",
+            name: "Example",
+            version: "1.2",
+            system: false,
+            launchable: true,
+          },
+        ],
+      }).apps[0],
+    ).toMatchObject({ bundleId: "com.example.app", launchable: true });
+    expect(
+      methodSchemas["app.target"].params.parse({
+        deviceId: "ios:DEVICE-123",
+        appBundleId: "com.example.app",
+      }),
+    ).toMatchObject({ appBundleId: "com.example.app" });
+    expect(
+      methodSchemas["accessibility.snapshot"].result.safeParse({
+        schemaVersion: 1,
+        snapshotId: "xcui-1",
+        capturedAt: "2026-08-04T12:00:00.000Z",
+        source: "ios-xcui",
+        scope: "visible",
+        screen: { x: 0, y: 0, width: 430, height: 932 },
+        root: { ref: "xcui:root" },
+        stats: { nodeCount: 1, truncated: false },
+      }).success,
+    ).toBe(true);
+  });
+
   test("rejects out-of-range input at the protocol boundary", () => {
     expect(methodSchemas["input.tap"].params.safeParse({ x: 1.1, y: 0.5 }).success).toBe(false);
   });
@@ -137,6 +178,17 @@ describe("shared protocol contracts", () => {
       codec: "h264",
       connected: true,
     });
+  });
+
+  test("retains the selected physical iOS app in session state", () => {
+    const state = sessionStateSchema.parse({
+      reviewId: "e7787f9d-cfd8-4f52-b136-f16d02d30d30",
+      appBundleId: "com.example.app",
+      annotations: [],
+      codec: "h264",
+      connected: true,
+    });
+    expect(state.appBundleId).toBe("com.example.app");
   });
 
   test("bounds element tree chunks by UTF-8 bytes", () => {

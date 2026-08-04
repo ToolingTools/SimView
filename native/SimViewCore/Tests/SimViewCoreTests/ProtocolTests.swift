@@ -5,6 +5,49 @@ import XCTest
 @testable import SimViewCore
 
 final class ProtocolTests: XCTestCase {
+    private func coreDeviceRecord(
+        udid: String = "00008110-001234560123401E",
+        platform: String = "iOS",
+        reality: String = "physical",
+        pairing: String = "paired",
+        developerMode: String = "enabled",
+        transport: String = "wired",
+        locked: Bool? = false
+    ) -> [String: Any] {
+        var deviceProperties: [String: Any] = [
+            "name": "Test iPhone",
+            "osVersionNumber": "26.0",
+            "developerModeStatus": developerMode,
+            "ddiServicesAvailable": true,
+        ]
+        if let locked { deviceProperties["isLocked"] = locked }
+        return [
+            "identifier": "A3A9A44B-49B0-46AA-A12C-A78815B16BE7",
+            "visibilityClass": "default",
+            "connectionProperties": [
+                "pairingState": pairing,
+                "transportType": transport,
+                "tunnelState": "connected",
+            ],
+            "deviceProperties": deviceProperties,
+            "hardwareProperties": [
+                "platform": platform,
+                "reality": reality,
+                "udid": udid,
+                "marketingName": "iPhone 17 Pro",
+                "productType": "iPhone18,1",
+                "hardwareModel": "V53AP",
+            ],
+        ]
+    }
+
+    private func coreDeviceJSON(_ devices: [[String: Any]]) throws -> Data {
+        try JSONSerialization.data(withJSONObject: [
+            "info": ["jsonVersion": 3, "outcome": "success"],
+            "result": ["devices": devices],
+        ])
+    }
+
     private func temporaryExecutable(_ body: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("simview-adb-tests-\(UUID().uuidString)")
@@ -109,6 +152,111 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(preferredCodec(["mjpeg", "h264"]), "mjpeg")
         XCTAssertEqual(preferredCodec(["av1", "mjpeg"]), "mjpeg")
         XCTAssertEqual(preferredCodec([]), "mjpeg")
+    }
+
+    func testCoreDeviceParserReturnsOnlyPhysicalIOSDevices() throws {
+        let devices = try IOSPhysicalDeviceProvider.parseDevices(
+            coreDeviceJSON([
+                coreDeviceRecord(),
+                coreDeviceRecord(udid: "SIMULATOR-UDID", reality: "simulator"),
+                coreDeviceRecord(udid: "ANDROID-UDID", platform: "android"),
+            ]),
+            runnerReadiness: { _ in "prepared" }
+        )
+
+        XCTAssertEqual(devices.count, 1)
+        let device = try XCTUnwrap(devices.first)
+        XCTAssertEqual(device.id, "ios:00008110-001234560123401E")
+        XCTAssertEqual(device.nativeIdentifier, "00008110-001234560123401E")
+        XCTAssertEqual(device.kind, .physical)
+        XCTAssertEqual(device.state, "ready")
+        XCTAssertTrue(device.available)
+        XCTAssertEqual(device.runtime, "iOS 26.0")
+        XCTAssertEqual(device.metadata["runnerReady"], "prepared")
+        XCTAssertEqual(device.metadata["coreDeviceIdentifier"], "A3A9A44B-49B0-46AA-A12C-A78815B16BE7")
+    }
+
+    func testCoreDeviceProviderConsumesDocumentedJSONFileInsteadOfStdout() throws {
+        let fixture = try coreDeviceJSON([coreDeviceRecord()])
+        let provider = IOSPhysicalDeviceProvider(command: { executable, arguments in
+            guard executable == "/usr/bin/xcrun",
+                let option = arguments.firstIndex(of: "--json-output"),
+                arguments.indices.contains(option + 1)
+            else {
+                return ProcessResult(status: 1, output: "", error: "Missing JSON output path")
+            }
+            do {
+                try fixture.write(to: URL(fileURLWithPath: arguments[option + 1]))
+                return ProcessResult(status: 0, output: "not JSON", error: "")
+            } catch {
+                return ProcessResult(status: 1, output: "", error: error.localizedDescription)
+            }
+        })
+
+        XCTAssertEqual(try provider.devices().map(\.id), ["ios:00008110-001234560123401E"])
+    }
+
+    func testPhysicalIOSCapabilitiesNeverAdvertiseSimulatorOnlyPaths() throws {
+        let device = try XCTUnwrap(
+            IOSPhysicalDeviceProvider.parseDevices(coreDeviceJSON([coreDeviceRecord()])).first
+        )
+        let capabilities = device.capabilities
+        let capture = try XCTUnwrap(capabilities["capture"] as? [String: Bool])
+        let input = try XCTUnwrap(capabilities["input"] as? [String: Any])
+
+        XCTAssertEqual(capture["h264"], true)
+        XCTAssertEqual(capture["mjpeg"], false)
+        XCTAssertEqual(input["rawTouch"] as? Bool, false)
+        XCTAssertEqual(input["buttons"] as? [String], [])
+        XCTAssertEqual(capabilities["uikitProbe"] as? Bool, false)
+        XCTAssertEqual(capabilities["androidContext"] as? Bool, false)
+    }
+
+    func testCoreDeviceParserPreservesTruthfulUnavailableStates() throws {
+        let records = [
+            coreDeviceRecord(udid: "LOCKED", locked: true),
+            coreDeviceRecord(udid: "UNPAIRED", pairing: "unpaired"),
+            coreDeviceRecord(udid: "DEVMODE", developerMode: "disabled"),
+            coreDeviceRecord(udid: "WIRELESS", transport: "localNetwork"),
+            coreDeviceRecord(udid: "UNKNOWN", pairing: ""),
+        ]
+        let devices = try IOSPhysicalDeviceProvider.parseDevices(coreDeviceJSON(records))
+
+        XCTAssertEqual(
+            devices.map(\.state),
+            ["locked", "unpaired", "developer-mode-disabled", "unsupported-transport", "unknown"]
+        )
+        XCTAssertTrue(devices.allSatisfy { !$0.available })
+    }
+
+    func testUSBMuxIsAuthoritativeWhenCoreDeviceLabelsWiredDeviceAsLocalNetwork() throws {
+        let device = try XCTUnwrap(
+            IOSPhysicalDeviceProvider.parseDevices(
+                coreDeviceJSON([coreDeviceRecord(transport: "localNetwork")]),
+                usbConnected: { $0 == "00008110-001234560123401E" }
+            ).first
+        )
+
+        XCTAssertEqual(device.state, "ready")
+        XCTAssertTrue(device.available)
+        XCTAssertEqual(device.metadata["transport"], "localNetwork")
+        XCTAssertEqual(device.metadata["usbmuxUSB"], "true")
+    }
+
+    func testCoreDeviceParserRejectsMalformedAndUnboundedIdentifiers() throws {
+        XCTAssertThrowsError(try IOSPhysicalDeviceProvider.parseDevices(Data("not json".utf8))) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "IOS_DEVICE_DISCOVERY_INVALID")
+        }
+        XCTAssertThrowsError(try IOSPhysicalDeviceProvider.parseDevices(Data("{}".utf8))) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "IOS_DEVICE_DISCOVERY_INVALID")
+        }
+        let devices = try IOSPhysicalDeviceProvider.parseDevices(
+            coreDeviceJSON([
+                coreDeviceRecord(udid: "../../not-a-device"),
+                coreDeviceRecord(udid: String(repeating: "A", count: 257)),
+            ])
+        )
+        XCTAssertTrue(devices.isEmpty)
     }
 
     func testADBDeviceParserRetainsTransportStatesAndAttributes() {

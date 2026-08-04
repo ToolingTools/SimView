@@ -1,6 +1,7 @@
 import { mkdir, rm, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
+import { copyIOSRunnerSources, iosRunnerSourceFiles } from "./ios-runner-source";
 
 const root = resolve(import.meta.dir, "..");
 const stage = join(root, "artifacts", "plugin", "simview");
@@ -42,6 +43,7 @@ sourceFiles.push(
   join(root, "manifest.json"),
   join(root, ".codex-plugin", "plugin.json"),
 );
+sourceFiles.push(...(await iosRunnerSourceFiles(root)));
 const newestSource = Math.max(
   ...(await Promise.all(sourceFiles.map(async (path) => (await stat(path)).mtimeMs))),
 );
@@ -67,6 +69,7 @@ await $`cp ${join(root, "packages/cli/dist/simview")} ${join(stage, "bin/simview
 await $`cp ${join(root, "packages/core/bin/simview-core")} ${join(stage, "bin/simview-core")}`;
 await $`cp ${join(root, "packages/core/bin/libSimViewProbe.dylib")} ${join(stage, "bin/libSimViewProbe.dylib")}`;
 await $`cp ${join(root, "packages/core/bin/simview-android-agent.jar")} ${join(stage, "bin/simview-android-agent.jar")}`;
+await copyIOSRunnerSources(root, join(stage, "bin", "SimViewIOSDeviceRunner"));
 await $`chmod +x ${join(stage, "bin/simview")} ${join(stage, "bin/simview-core")}`;
 for (const path of new Bun.Glob("**/.DS_Store").scanSync({ cwd: stage, absolute: true })) {
   await rm(path, { force: true });

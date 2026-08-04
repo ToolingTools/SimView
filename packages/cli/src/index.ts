@@ -29,6 +29,8 @@ const commonOptions: Record<string, OptionDefinition> = {
 };
 
 const commandOptions: Record<string, Record<string, OptionDefinition>> = {
+  device: { ...commonOptions, team: { type: "string" } },
+  apps: { ...commonOptions, "bundle-id": { type: "string" } },
   devices: { booted: { type: "boolean" }, json: { type: "boolean" } },
   doctor: { json: { type: "boolean" } },
   preview: {
@@ -36,6 +38,7 @@ const commandOptions: Record<string, Record<string, OptionDefinition>> = {
     udid: { type: "string" },
     "no-open": { type: "boolean" },
     "print-url": { type: "boolean" },
+    "app-bundle-id": { type: "string" },
   },
   screenshot: {
     "device-id": { type: "string" },
@@ -175,6 +178,47 @@ export async function run(argv = process.argv): Promise<void> {
         options.json === true,
       );
       break;
+    case "device": {
+      const action = positional[0];
+      if (action !== "prepare" || positional.length !== 1) {
+        throw new Error("device requires the prepare action");
+      }
+      const selectedId = deviceId ?? udid;
+      if (!selectedId) throw new Error("device prepare requires --device-id");
+      const session = new SimViewSession();
+      try {
+        const result = await session.prepareDevice(
+          selectedId,
+          stringOption(options, "team", false),
+        );
+        printJson(result, true);
+      } finally {
+        await session.close();
+      }
+      break;
+    }
+    case "apps": {
+      const action = positional[0] ?? "list";
+      if (positional.length > 1 || (action !== "list" && action !== "select")) {
+        throw new Error("apps accepts list or select");
+      }
+      const selectedId = deviceId ?? udid;
+      if (!selectedId) throw new Error(`apps ${action} requires --device-id`);
+      const session = new SimViewSession();
+      try {
+        if (action === "list") {
+          printJson(await session.installedApps(selectedId), options.json === true);
+        } else {
+          const appBundleId =
+            stringOption(options, "app-bundle-id", false) ??
+            stringOption(options, "bundle-id", true);
+          printJson(await session.open(selectedId, { startRelay: false, appBundleId }), true);
+        }
+      } finally {
+        await session.close();
+      }
+      break;
+    }
     case "doctor":
       printJson(await coreJSON("doctor"), options.json === true);
       break;
@@ -221,7 +265,10 @@ export async function run(argv = process.argv): Promise<void> {
     }
     case "preview": {
       const session = new SimViewSession();
-      const state = await session.open(deviceId ?? udid);
+      const appBundleId = stringOption(options, "app-bundle-id", false);
+      const state = await session.open(deviceId ?? udid, {
+        ...(appBundleId ? { appBundleId } : {}),
+      });
       const browserUrl = session.browserUrl();
       const shouldOpen = options["no-open"] !== true;
       printJson(
@@ -561,8 +608,11 @@ function helpText(): string {
 Usage:
   simview --version
   simview devices [--booted] [--json]
+  simview device prepare --device-id ios:<udid> [--team <team-id>]
+  simview apps list --device-id ios:<udid> [--json]
+  simview apps select --device-id ios:<udid> --app-bundle-id <id>
   simview doctor --json
-  simview preview [--device-id <id>] [--no-open] [--print-url]
+  simview preview [--device-id <id>] [--app-bundle-id <id>] [--no-open] [--print-url]
   simview screenshot --output <path> [--device-id <id>]
   simview observe [--scope interactive|visible|full] [--output <png>] [--json]
   simview tree [--scope interactive|visible|full] [--json]

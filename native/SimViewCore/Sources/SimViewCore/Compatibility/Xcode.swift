@@ -38,7 +38,7 @@ extension String {
     var nonEmpty: String? { isEmpty ? nil : self }
 }
 
-struct ProcessResult {
+struct ProcessResult: Sendable {
     let status: Int32
     let output: String
     let error: String

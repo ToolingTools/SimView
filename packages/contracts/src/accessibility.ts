@@ -100,7 +100,7 @@ export const accessibilitySnapshotSchema = z
     schemaVersion: z.literal(1),
     snapshotId: z.string(),
     capturedAt: z.string(),
-    source: z.enum(["core-simulator-ax", "android-uiautomator"]),
+    source: z.enum(["core-simulator-ax", "ios-xcui", "android-uiautomator"]),
     scope: z.enum(["interactive", "visible", "full"]),
     screen: normalizedRectSchema,
     root: accessibilityNodeSchema,

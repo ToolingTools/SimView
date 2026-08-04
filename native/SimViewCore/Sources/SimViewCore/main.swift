@@ -61,11 +61,21 @@ do {
         }
         let requested = arguments.values["--device-id"] ?? arguments.values["--udid"]
         let device = try DeviceRuntime.select(requested: requested, configured: nil)
-        if device.platform == .android {
+        switch DeviceBackendRoute(device) {
+        case .android:
             let client = try ADBClient()
             let capture = AndroidFrameCapture(client: client, serial: device.nativeIdentifier)
             try capture.screenshot().write(to: URL(fileURLWithPath: output))
-        } else {
+        case .iosPhysical:
+            let backend = IOSPhysicalDeviceBackend(
+                onConfiguration: { _ in },
+                onFrame: { _, _, _ in },
+                onFailure: { _ in }
+            )
+            defer { backend.shutdown() }
+            _ = try backend.startCapture(device: device, appBundleID: nil)
+            try backend.screenshot().data.write(to: URL(fileURLWithPath: output))
+        case .iosSimulator:
             let semaphore = DispatchSemaphore(value: 0)
             let capture = FrameCapture()
             let failure = ErrorBox()

@@ -1,5 +1,6 @@
 import { readFile, realpath, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
+import { hashIOSRunnerSources } from "./ios-runner-source";
 
 interface PackageManifest {
   name: string;
@@ -77,6 +78,8 @@ const components: Component[] = [...manifests.values()]
 const bunVersion = rootManifest.packageManager?.replace(/^bun@/, "") ?? Bun.version;
 const bunRef = `pkg:generic/bun@${bunVersion}`;
 const webkitRef = "pkg:github/oven-sh/WebKit";
+const iosRunnerRef = `pkg:generic/simview-ios-device-runner@${rootManifest.version}`;
+const iosRunnerSourceHash = await hashIOSRunnerSources(root);
 const compiledArtifacts = await Promise.all(
   [
     {
@@ -123,6 +126,14 @@ components.push(
   ...compiledArtifacts,
   {
     type: "application",
+    "bom-ref": iosRunnerRef,
+    name: "SimView iOS device runner sources",
+    version: rootManifest.version,
+    hashes: [{ alg: "SHA-256", content: iosRunnerSourceHash }],
+    licenses: [{ expression: "Apache-2.0" }],
+  },
+  {
+    type: "application",
     "bom-ref": bunRef,
     name: "Bun runtime",
     version: bunVersion,
@@ -140,7 +151,10 @@ components.push(
 );
 
 const dependencyEntries = [
-  { ref: rootRef, dependsOn: compiledArtifacts.map((artifact) => artifact["bom-ref"]) },
+  {
+    ref: rootRef,
+    dependsOn: [...compiledArtifacts.map((artifact) => artifact["bom-ref"]), iosRunnerRef],
+  },
   {
     ref: compiledArtifacts[0]?.["bom-ref"] ?? `pkg:generic/simview-cli@${rootManifest.version}`,
     dependsOn: [bunRef, ...(relationships.get(rootRef) ?? [])],
@@ -149,6 +163,7 @@ const dependencyEntries = [
     ref: artifact["bom-ref"],
     dependsOn: [],
   })),
+  { ref: iosRunnerRef, dependsOn: [] },
   { ref: bunRef, dependsOn: [webkitRef] },
   ...[...manifests.entries()].map(([reference]) => ({
     ref: reference,

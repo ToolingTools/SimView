@@ -8,6 +8,7 @@
       "!!**/coverage",
       "!!**/node_modules",
       "!!**/native/SimViewCore/.build",
+      "!!**/native/SimViewIOSDeviceRunner/build",
       "!!**/native/SimViewProbe/build",
       "!!**/packages/*/dist",
       "!!**/packages/core/bin"

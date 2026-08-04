@@ -186,6 +186,54 @@ final class SimViewServer: @unchecked Sendable {
     private var androidAgentFrameSequence: UInt64 = 0
     private var androidInputWidth = 0
     private var androidInputHeight = 0
+    private lazy var iosPhysical = IOSPhysicalDeviceBackend(
+        onConfiguration: { [weak self] configuration in
+            guard let self else { return }
+            self.queue.async {
+                guard self.captureActive,
+                    self.selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical
+                else { return }
+                self.latestH264Configuration = configuration
+                self.broadcast(
+                    WireFrame(kind: .h264Configuration, payload: configuration),
+                    codec: "h264"
+                )
+            }
+        },
+        onFrame: { [weak self] timestamp, keyframe, bytes in
+            guard let self else { return }
+            self.queue.async {
+                guard self.captureActive,
+                    self.selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical
+                else { return }
+                self.iosPhysicalFrameSequence &+= 1
+                self.frameID = "ios-xcui-\(self.iosPhysicalFrameSequence)"
+                self.metrics.didCapture()
+                var payload = Data()
+                var micros = timestamp.bigEndian
+                withUnsafeBytes(of: &micros) { payload.append(contentsOf: $0) }
+                payload.append(keyframe ? 1 : 0)
+                payload.append(bytes)
+                self.broadcast(WireFrame(kind: .h264Frame, payload: payload), codec: "h264")
+            }
+        },
+        onFailure: { [weak self] error in
+            guard let self else { return }
+            self.queue.async {
+                self.iosPhysicalError =
+                    (error as? SimViewError)?.message ?? error.localizedDescription
+                self.latestH264Configuration = nil
+                if self.selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                    self.captureActive = false
+                }
+            }
+        }
+    )
+    private var iosPhysicalError: String?
+    private var iosPhysicalFrameSequence: UInt64 = 0
+    private var iosPhysicalWidth = 0
+    private var iosPhysicalHeight = 0
+    private var iosPhysicalAppBundleID: String?
     private var latestH264Configuration: Data?
     private var captureActive = false
     private var captureDeviceID: String?
@@ -340,11 +388,59 @@ final class SimViewServer: @unchecked Sendable {
         switch request.method {
         case "devices.list":
             sendResult(try DeviceRuntime.devices().map(\.dictionary), requestID: request.id, to: connection)
+        case "device.prepare":
+            let device = try selectDevice(request.deviceIdentifier)
+            guard DeviceBackendRoute(device) == .iosPhysical else {
+                throw SimViewError(
+                    "METHOD_UNSUPPORTED",
+                    "Device preparation is only required for physical iOS devices"
+                )
+            }
+            sendResult(
+                try iosPhysical.prepare(
+                    device: device,
+                    team: request.params["team"]?.stringValue
+                ),
+                requestID: request.id,
+                to: connection
+            )
+        case "apps.list":
+            let device = try selectDevice(request.deviceIdentifier)
+            guard DeviceBackendRoute(device) == .iosPhysical else {
+                throw SimViewError(
+                    "METHOD_UNSUPPORTED",
+                    "Installed-app listing is only available for physical iOS devices"
+                )
+            }
+            sendResult(try iosPhysical.apps(device: device), requestID: request.id, to: connection)
+        case "app.target":
+            let device = try selectDevice(request.deviceIdentifier)
+            guard DeviceBackendRoute(device) == .iosPhysical else {
+                throw SimViewError(
+                    "METHOD_UNSUPPORTED",
+                    "App targeting is only available for physical iOS devices"
+                )
+            }
+            let bundleID = try request.params.string("appBundleId")
+            let result = try iosPhysical.selectApp(device: device, bundleID: bundleID)
+            iosPhysicalAppBundleID = bundleID
+            sendResult(result, requestID: request.id, to: connection)
         case "device.describe":
             let device = try selectDevice(request.deviceIdentifier)
             var value = deviceResponseDictionary(device)
-            let captureWidth = device.platform == .ios ? capture.width : androidCapture?.width ?? 0
-            let captureHeight = device.platform == .ios ? capture.height : androidCapture?.height ?? 0
+            let captureWidth: Int
+            let captureHeight: Int
+            switch DeviceBackendRoute(device) {
+            case .iosSimulator:
+                captureWidth = capture.width
+                captureHeight = capture.height
+            case .iosPhysical:
+                captureWidth = iosPhysicalWidth
+                captureHeight = iosPhysicalHeight
+            case .android:
+                captureWidth = androidCapture?.width ?? 0
+                captureHeight = androidCapture?.height ?? 0
+            }
             if captureWidth > 0 {
                 value["pixelWidth"] = captureWidth
                 value["pixelHeight"] = captureHeight
@@ -352,12 +448,19 @@ final class SimViewServer: @unchecked Sendable {
             sendResult(value, requestID: request.id, to: connection)
         case "capture.start":
             let device = try selectDevice(request.deviceIdentifier)
-            try startCapture(device)
+            if DeviceBackendRoute(device) == .iosPhysical, connection.codec != "h264" {
+                throw SimViewError(
+                    "CODEC_UNSUPPORTED",
+                    "Physical iOS preview requires an H.264-capable client"
+                )
+            }
+            let requestedBundleID = request.params["appBundleId"]?.stringValue
+            try startCapture(device, appBundleID: requestedBundleID)
             sendResult(
                 [
                     "device": deviceResponseDictionary(device),
                     "codec": connection.codec,
-                    "frameRate": device.platform == .android && androidAgent == nil ? 4 : 60,
+                    "frameRate": DeviceBackendRoute(device) == .android && androidAgent == nil ? 4 : 60,
                 ], requestID: request.id, to: connection)
         case "capture.stop":
             stopCapture()
@@ -366,14 +469,30 @@ final class SimViewServer: @unchecked Sendable {
             guard captureActive else {
                 throw SimViewError("CAPTURE_NOT_STARTED", "Start capture before requesting a keyframe")
             }
-            if let androidAgent {
+            if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                try iosPhysical.requestKeyframe()
+            } else if let androidAgent {
                 try androidAgent.requestKeyframe()
             } else {
                 Task { await h264.forceKeyframe() }
             }
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "capture.screenshot":
-            if selectedDevice?.platform == .android, let androidCapture {
+            if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                let screenshot = try iosPhysical.screenshot()
+                let width = (screenshot.metadata["width"] as? NSNumber)?.intValue ?? iosPhysicalWidth
+                let height = (screenshot.metadata["height"] as? NSNumber)?.intValue ?? iosPhysicalHeight
+                iosPhysicalWidth = width
+                iosPhysicalHeight = height
+                sendResult(
+                    [
+                        "frameId": frameID,
+                        "width": width,
+                        "height": height,
+                        "byteLength": screenshot.data.count,
+                    ], requestID: request.id, to: connection)
+                connection.send(WireFrame(kind: .pngScreenshot, payload: screenshot.data))
+            } else if selectedDevice?.platform == .android, let androidCapture {
                 let png = try androidCapture.screenshot()
                 sendResult(
                     [
@@ -398,7 +517,12 @@ final class SimViewServer: @unchecked Sendable {
                 connection.send(WireFrame(kind: .pngScreenshot, payload: png))
             }
         case "input.touch":
-            if selectedDevice?.platform == .android {
+            if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                throw SimViewError(
+                    "INPUT_RAW_TOUCH_UNAVAILABLE",
+                    "Physical iOS uses discrete XCUI gestures rather than raw touch injection"
+                )
+            } else if selectedDevice?.platform == .android {
                 guard let androidAgent, let dimensions = androidInputDimensions()
                 else {
                     throw SimViewError(
@@ -432,7 +556,13 @@ final class SimViewServer: @unchecked Sendable {
         case "input.swipe":
             let from = try request.params.dictionary("from")
             let to = try request.params.dictionary("to")
-            if let androidAgent, let dimensions = androidInputDimensions() {
+            if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                try iosPhysical.swipe(
+                    fromX: try from.double("x"), fromY: try from.double("y"),
+                    toX: try to.double("x"), toY: try to.double("y"),
+                    duration: request.params.double("durationMs") / 1_000
+                )
+            } else if let androidAgent, let dimensions = androidInputDimensions() {
                 try androidAgent.swipe(
                     fromX: try from.double("x"), fromY: try from.double("y"),
                     toX: try to.double("x"), toY: try to.double("y"),
@@ -458,7 +588,10 @@ final class SimViewServer: @unchecked Sendable {
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.typeText":
             let method: String
-            if let androidAgent {
+            if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                try iosPhysical.typeText(request.params.string("text"))
+                method = "ios-xcui"
+            } else if let androidAgent {
                 method = try androidAgent.typeText(request.params.string("text"))
             } else if let controller = try androidInputIfSelected() {
                 method = try controller.typeText(request.params.string("text"))
@@ -468,8 +601,11 @@ final class SimViewServer: @unchecked Sendable {
             }
             sendResult(["accepted": true, "inputMethod": method], requestID: request.id, to: connection)
         case "input.key":
-            if selectedDevice?.platform == .android {
-                throw SimViewError("INPUT_KEY_UNSUPPORTED", "Raw HID usages require the Android agent")
+            if selectedDevice.map(DeviceBackendRoute.init) != .iosSimulator {
+                throw SimViewError(
+                    "INPUT_KEY_UNSUPPORTED",
+                    "Raw HID usages are only available on iOS Simulator"
+                )
             }
             try prepareHID()
             hid.key(
@@ -478,7 +614,9 @@ final class SimViewServer: @unchecked Sendable {
             )
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.button":
-            if let androidAgent {
+            if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                try iosPhysical.pressButton(request.params.string("button"))
+            } else if let androidAgent {
                 try androidAgent.pressButton(request.params.string("button"))
             } else if let controller = try androidInputIfSelected() {
                 try controller.pressButton(request.params.string("button"))
@@ -488,7 +626,10 @@ final class SimViewServer: @unchecked Sendable {
             }
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "device.orientation.set":
-            if let controller = try androidInputIfSelected() {
+            if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+                try iosPhysical.setOrientation(request.params.string("orientation"))
+                try iosPhysical.requestKeyframe()
+            } else if let controller = try androidInputIfSelected() {
                 let orientation = try request.params.string("orientation")
                 try controller.setOrientation(orientation)
                 if let device = selectedDevice, let width = device.pixelWidth, let height = device.pixelHeight {
@@ -527,7 +668,12 @@ final class SimViewServer: @unchecked Sendable {
             let selector = try request.params.dictionary("selector")
             let device = try selectDevice(request.deviceIdentifier)
             let result: [String: Any]
-            if device.platform == .android {
+            if DeviceBackendRoute(device) == .iosPhysical {
+                result = try iosPhysical.find(
+                    selector: selector.foundationDictionary,
+                    timeout: nil
+                )
+            } else if device.platform == .android {
                 result = try requireAndroidAccessibility().find(
                     selector: selector.foundationDictionary,
                     scope: request.params["scope"]?.stringValue ?? "visible"
@@ -545,11 +691,20 @@ final class SimViewServer: @unchecked Sendable {
             let selector = try request.params.dictionary("selector").foundationDictionary
             let state = request.params["state"]?.stringValue ?? "visible"
             let timeout = request.params["timeoutMs"]?.intValue ?? 5_000
-            let result =
-                device.platform == .android
-                ? try requireAndroidAccessibility().wait(selector: selector, state: state, timeoutMs: timeout)
-                : try accessibility.wait(
+            let result: [String: Any]
+            if DeviceBackendRoute(device) == .iosPhysical {
+                result = try iosPhysical.wait(
+                    selector: selector,
+                    exists: state == "visible",
+                    timeout: Double(timeout) / 1_000
+                )
+            } else if device.platform == .android {
+                result = try requireAndroidAccessibility().wait(
+                    selector: selector, state: state, timeoutMs: timeout)
+            } else {
+                result = try accessibility.wait(
                     udid: device.nativeIdentifier, selector: selector, state: state, timeoutMs: timeout)
+            }
             sendResult(result, requestID: request.id, to: connection)
         case "device.context":
             let device = try selectDevice(request.deviceIdentifier)
@@ -625,11 +780,15 @@ final class SimViewServer: @unchecked Sendable {
                 "capabilities": [
                     "capture": true,
                     "input": true,
-                    "accessibility": selectedDevice?.platform == .android ? true : accessibility.available,
-                    "probe": selectedDevice?.platform == .android ? false : probe.status(),
+                    "accessibility": selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical
+                        || selectedDevice?.platform == .android || accessibility.available,
+                    "probe": selectedDevice.map(DeviceBackendRoute.init) == .iosSimulator
+                        ? probe.status() : false,
                     "androidContext": selectedDevice?.platform == .android,
                     "androidAgent": androidAgent != nil,
                     "androidAgentError": androidAgentError as Any? ?? NSNull(),
+                    "iosRunner": selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical,
+                    "iosRunnerError": iosPhysicalError as Any? ?? NSNull(),
                 ],
                 "clients": authenticated.count,
                 "clientsByCodec": [
@@ -647,7 +806,7 @@ final class SimViewServer: @unchecked Sendable {
         }
     }
 
-    private func startCapture(_ device: DeviceDescription) throws {
+    private func startCapture(_ device: DeviceDescription, appBundleID: String? = nil) throws {
         if captureActive, captureDeviceID == device.id { return }
         capture.stop()
         androidCapture?.stop()
@@ -661,6 +820,9 @@ final class SimViewServer: @unchecked Sendable {
         androidAgentError = nil
         androidAgentRestartAttempts = 0
         androidAgentFrameSequence = 0
+        if DeviceBackendRoute(device) != .iosPhysical { iosPhysical.shutdown() }
+        iosPhysicalError = nil
+        iosPhysicalFrameSequence = 0
         latestH264Configuration = nil
         selectedDevice = device
         captureDeviceID = device.id
@@ -683,9 +845,16 @@ final class SimViewServer: @unchecked Sendable {
         }
         captureActive = true
         do {
-            if device.platform == .ios {
+            switch DeviceBackendRoute(device) {
+            case .iosSimulator:
                 try capture.start(udid: device.nativeIdentifier, callback: handler)
-            } else {
+            case .iosPhysical:
+                let bundleID = appBundleID ?? iosPhysicalAppBundleID
+                let result = try iosPhysical.startCapture(device: device, appBundleID: bundleID)
+                iosPhysicalAppBundleID = bundleID
+                iosPhysicalWidth = (result["width"] as? NSNumber)?.intValue ?? 0
+                iosPhysicalHeight = (result["height"] as? NSNumber)?.intValue ?? 0
+            case .android:
                 let client = try ADBClient()
                 let androidCapture = AndroidFrameCapture(client: client, serial: device.nativeIdentifier)
                 self.androidClient = client
@@ -710,6 +879,7 @@ final class SimViewServer: @unchecked Sendable {
     private func stopCapture() {
         captureGeneration &+= 1
         capture.stop()
+        iosPhysical.stopCapture()
         androidCapture?.stop()
         androidAgent?.stop()
         androidController?.stop()
@@ -722,6 +892,8 @@ final class SimViewServer: @unchecked Sendable {
         androidAgentFrameSequence = 0
         androidInputWidth = 0
         androidInputHeight = 0
+        iosPhysicalWidth = 0
+        iosPhysicalHeight = 0
         latestH264Configuration = nil
         captureActive = false
         captureDeviceID = nil
@@ -938,8 +1110,8 @@ final class SimViewServer: @unchecked Sendable {
 
     private func prepareHID() throws {
         let device = try selectDevice(nil)
-        guard device.platform == .ios else {
-            throw SimViewError("INPUT_UNAVAILABLE", "The selected Android device does not use iOS HID")
+        guard DeviceBackendRoute(device) == .iosSimulator else {
+            throw SimViewError("INPUT_UNAVAILABLE", "Simulator HID is unavailable for this device backend")
         }
         try hid.setup(udid: device.nativeIdentifier)
     }
@@ -950,7 +1122,9 @@ final class SimViewServer: @unchecked Sendable {
         let x = try params.double("x")
         let y = try params.double("y")
         let duration = params.optionalDouble("durationMs").map { $0 / 1_000 } ?? defaultDuration
-        if let androidAgent, let dimensions = androidInputDimensions() {
+        if selectedDevice.map(DeviceBackendRoute.init) == .iosPhysical {
+            try iosPhysical.tap(x: x, y: y, duration: duration)
+        } else if let androidAgent, let dimensions = androidInputDimensions() {
             try androidAgent.tap(
                 x: x,
                 y: y,
@@ -998,6 +1172,12 @@ final class SimViewServer: @unchecked Sendable {
             androidAgentRestartAttempts = 0
             androidInputWidth = 0
             androidInputHeight = 0
+            if DeviceBackendRoute(selectedDevice) == .iosPhysical {
+                iosPhysical.shutdown()
+                iosPhysicalWidth = 0
+                iosPhysicalHeight = 0
+                iosPhysicalAppBundleID = nil
+            }
         }
         selectedDevice = device
         return device
@@ -1005,8 +1185,8 @@ final class SimViewServer: @unchecked Sendable {
 
     private func requireIOSDevice(_ requested: String?) throws -> DeviceDescription {
         let device = try selectDevice(requested)
-        guard device.platform == .ios else {
-            throw SimViewError("METHOD_UNSUPPORTED", "UIKit probe methods are unavailable on Android")
+        guard DeviceBackendRoute(device) == .iosSimulator else {
+            throw SimViewError("METHOD_UNSUPPORTED", "UIKit probe methods are only available on iOS Simulator")
         }
         return device
     }
@@ -1054,6 +1234,12 @@ final class SimViewServer: @unchecked Sendable {
                 maxNodes: params["maxNodes"]?.intValue ?? 1_200
             )
         }
+        if DeviceBackendRoute(device) == .iosPhysical {
+            return try iosPhysical.snapshot(
+                maxDepth: nil,
+                maxChildren: params["maxNodes"]?.intValue ?? 1_200
+            )
+        }
         return try accessibility.snapshot(
             udid: device.nativeIdentifier,
             scope: params["scope"]?.stringValue ?? "interactive",
@@ -1067,6 +1253,12 @@ final class SimViewServer: @unchecked Sendable {
         if device.platform == .android {
             return try requireAndroidAccessibility().elementAtPoint(
                 x: params.double("x"), y: params.double("y")
+            )
+        }
+        if DeviceBackendRoute(device) == .iosPhysical {
+            return try iosPhysical.elementAtPoint(
+                x: params.double("x"),
+                y: params.double("y")
             )
         }
         return try accessibility.elementAtPoint(
@@ -1090,6 +1282,13 @@ final class SimViewServer: @unchecked Sendable {
             input["rawTouch"] = agentAvailable
             capabilities["input"] = input
             result["capabilities"] = capabilities
+        } else if DeviceBackendRoute(device) == .iosPhysical {
+            let ownsActiveCapture = captureDeviceID == device.id
+            metadata["captureTransport"] = "simview-xcui-runner"
+            metadata["inputTransport"] = "ios-xcui"
+            metadata["usbTransport"] = "usbmux"
+            if let iosPhysicalAppBundleID { metadata["appBundleId"] = iosPhysicalAppBundleID }
+            if ownsActiveCapture, let iosPhysicalError { metadata["runnerError"] = iosPhysicalError }
         }
         result["metadata"] = metadata
         return result
@@ -1187,6 +1386,7 @@ final class SimViewServer: @unchecked Sendable {
     private func shutdown(exitCode: Int32) -> Never {
         probe.close()
         stopCapture()
+        iosPhysical.shutdown()
         listener?.cancel()
         timer?.cancel()
         for source in signalSources { source.cancel() }

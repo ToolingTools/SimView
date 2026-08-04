@@ -23,7 +23,9 @@ const appCalledTools = [
   "app_get_ui_context",
   "app_inspect_point",
   "app_list_devices",
+  "app_list_apps",
   "app_list_simulators",
+  "app_select_app",
   "app_take_screenshot",
   "save_review_images",
   "app_tap_element",
@@ -44,7 +46,10 @@ const modelOnlyTools = [
   "enable_ui_probe",
   "inspect_point",
   "list_devices",
+  "list_apps",
   "list_simulators",
+  "prepare_device",
+  "select_app",
   "take_screenshot",
   "tap_element",
 ];
@@ -293,6 +298,64 @@ describe("MCP app tools", () => {
     }
   });
 
+  test("exposes physical iOS preparation and target-app tools", async () => {
+    const session = new SimViewSession();
+    const device = physicalIosDevice("DEVICE-123", "iPhone");
+    let selectedBundleId: string | undefined;
+    session.prepareDevice = async (deviceId, team) => ({
+      device,
+      ready: true,
+      status: "ready",
+      team,
+      requestedDeviceId: deviceId,
+    });
+    session.installedApps = async () => ({
+      deviceId: device.id,
+      apps: [
+        {
+          bundleId: "com.example.app",
+          name: "Example",
+          system: false,
+          launchable: true,
+        },
+      ],
+    });
+    session.device = device;
+    session.selectApp = async (appBundleId) => {
+      selectedBundleId = appBundleId;
+      session.appBundleId = appBundleId;
+      return session.state();
+    };
+    const server = createServer(session);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "physical-ios", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const prepared = await client.callTool({
+        name: "prepare_device",
+        arguments: { deviceId: device.id, team: "TEAM123" },
+      });
+      expect(prepared.structuredContent).toMatchObject({
+        ready: true,
+        status: "ready",
+        team: "TEAM123",
+      });
+      const apps = await client.callTool({ name: "list_apps", arguments: {} });
+      expect(apps.structuredContent).toMatchObject({
+        deviceId: device.id,
+        apps: [{ bundleId: "com.example.app", launchable: true }],
+      });
+      const selected = await client.callTool({
+        name: "select_app",
+        arguments: { appBundleId: "com.example.app" },
+      });
+      expect(selectedBundleId).toBe("com.example.app");
+      expect(selected.structuredContent).toMatchObject({ appBundleId: "com.example.app" });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
   test("isolates review resources and per-device annotations", async () => {
     const first = new SimViewSession();
     const second = new SimViewSession();
@@ -471,4 +534,25 @@ function resourceUri(tools: Awaited<ReturnType<Client["listTools"]>>): string {
 
 function iosDevice(udid: string, name: string) {
   return parseDeviceDescription({ udid, name, state: "Booted", runtime: "iOS" });
+}
+
+function physicalIosDevice(udid: string, name: string) {
+  return parseDeviceDescription({
+    id: `ios:${udid}`,
+    platform: "ios",
+    kind: "physical",
+    state: "ready",
+    available: true,
+    udid,
+    name,
+    runtime: "iOS 26",
+    capabilities: {
+      capture: { h264: true, mjpeg: true, screenshot: true },
+      input: { touch: true, rawTouch: false, text: "unicode", buttons: ["home"] },
+      orientation: true,
+      accessibility: true,
+      androidContext: false,
+      uikitProbe: false,
+    },
+  });
 }

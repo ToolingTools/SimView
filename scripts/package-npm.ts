@@ -1,5 +1,6 @@
 import { chmod, cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { copyIOSRunnerSources } from "./ios-runner-source";
 import { assertCodexPluginArchiveSize, createNpmPackageManifest } from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
@@ -39,6 +40,7 @@ await Promise.all([
     join(stage, "bin/simview-android-agent.jar"),
   ),
 ]);
+await copyIOSRunnerSources(root, join(stage, "bin", "SimViewIOSDeviceRunner"));
 await Promise.all([
   chmod(join(stage, "bin/simview"), 0o755),
   chmod(join(stage, "bin/simview-core"), 0o755),

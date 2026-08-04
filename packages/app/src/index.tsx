@@ -10,7 +10,9 @@ import {
   type ElementTreePage,
   elementTreeOutputSchema,
   elementTreePageSchema,
+  type InstalledApp,
   inspectPointOutputSchema,
+  installedAppListSchema,
   previewPacketBatchSchema,
   type ScreenContext,
   type SessionState,
@@ -148,6 +150,9 @@ function SimView() {
   const [toolsOpen, setToolsOpen] = useState(false);
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
   const [availableDevices, setAvailableDevices] = useState<Device[]>([]);
+  const [installedApps, setInstalledApps] = useState<InstalledApp[]>([]);
+  const [appsLoading, setAppsLoading] = useState(false);
+  const [switchingApp, setSwitchingApp] = useState<string>();
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [switchingDevice, setSwitchingDevice] = useState<string>();
   const [embedded, setEmbedded] = useState(false);
@@ -504,6 +509,26 @@ function SimView() {
     }
   }
 
+  async function loadInstalledApps() {
+    setAppsLoading(true);
+    try {
+      const result = embedded
+        ? await bridge
+            .callServerTool({ name: "app_list_apps", arguments: {} })
+            .then((response) => installedAppListSchema.parse(response.structuredContent))
+        : await relayFetch("/apps").then(async (response) => {
+            if (!response.ok) throw new Error(`App list failed (${response.status})`);
+            return installedAppListSchema.parse(await response.json());
+          });
+      setInstalledApps(result.apps.filter((app) => app.launchable));
+    } catch (error) {
+      setInstalledApps([]);
+      show(`Unable to list apps: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setAppsLoading(false);
+    }
+  }
+
   async function toggleDeviceMenu() {
     if (deviceMenuOpen) {
       setDeviceMenuOpen(false);
@@ -511,7 +536,45 @@ function SimView() {
     }
     setToolsOpen(false);
     setDeviceMenuOpen(true);
-    await loadAvailableDevices();
+    if (state.device?.platform === "ios" && state.device.kind === "physical") {
+      await Promise.all([loadAvailableDevices(), loadInstalledApps()]);
+    } else {
+      setInstalledApps([]);
+      await loadAvailableDevices();
+    }
+  }
+
+  async function selectTargetApp(app: InstalledApp) {
+    if (switchingApp || app.bundleId === state.appBundleId) return;
+    setSwitchingApp(app.bundleId);
+    try {
+      const nextState = embedded
+        ? await bridge
+            .callServerTool({
+              name: "app_select_app",
+              arguments: { appBundleId: app.bundleId },
+            })
+            .then((result) => sessionStateSchema.parse(result.structuredContent))
+        : await relayFetch("/app", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ appBundleId: app.bundleId }),
+          }).then(async (response) => {
+            if (!response.ok) throw new Error((await response.text()) || "App selection failed");
+            return sessionStateSchema.parse(await response.json());
+          });
+      setState(nextState);
+      setAccessibility(undefined);
+      setScreenContext(undefined);
+      setElementFallback(undefined);
+      accessibilityInitialized.current = false;
+      setDeviceMenuOpen(false);
+      show(`Targeting ${app.name}`);
+    } catch (error) {
+      show(`Unable to select app: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setSwitchingApp(undefined);
+    }
   }
 
   async function selectDevice(device: Device) {
@@ -563,6 +626,11 @@ function SimView() {
       setState(nextState);
       setStartupPhase("waiting-for-frame");
       setDeviceMenuOpen(false);
+      if (nextState.device?.platform === "ios" && nextState.device.kind === "physical") {
+        void loadInstalledApps();
+      } else {
+        setInstalledApps([]);
+      }
       if (elementsOpen) void loadAccessibility(true);
       show(`Switched to ${nextState.device?.name ?? device.name}`);
     } catch (error) {
@@ -1734,36 +1802,70 @@ function SimView() {
                 {devicesLoading && !availableDevices.length ? (
                   <p>Looking for devices…</p>
                 ) : groupedDevices.length ? (
-                  groupedDevices.map((group) => (
-                    <section class="device-group" key={group.key}>
-                      <strong class="device-group-label">{group.label}</strong>
-                      {group.devices.map((device) => {
-                        const selected = device.id === state.device?.id;
-                        return (
-                          <button
-                            key={device.id}
-                            type="button"
-                            role="menuitem"
-                            class="device-option"
-                            disabled={!device.available || Boolean(switchingDevice)}
-                            title={!device.available ? deviceStatusLabel(device) : undefined}
-                            onClick={() => void selectDevice(device)}
-                          >
-                            <span class="device-check">{selected && <Icon name="check" />}</span>
-                            <span>
-                              <strong>{device.name}</strong>
-                              <small>{deviceStatusLabel(device)}</small>
-                            </span>
-                            {switchingDevice === device.id && (
-                              <span class="device-switching">Switching…</span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </section>
-                  ))
+                  <>
+                    {groupedDevices.map((group) => (
+                      <section class="device-group" key={group.key}>
+                        <strong class="device-group-label">{group.label}</strong>
+                        {group.devices.map((device) => {
+                          const selected = device.id === state.device?.id;
+                          return (
+                            <button
+                              key={device.id}
+                              type="button"
+                              role="menuitem"
+                              class="device-option"
+                              disabled={!device.available || Boolean(switchingDevice)}
+                              title={!device.available ? deviceStatusLabel(device) : undefined}
+                              onClick={() => void selectDevice(device)}
+                            >
+                              <span class="device-check">{selected && <Icon name="check" />}</span>
+                              <span>
+                                <strong>{device.name}</strong>
+                                <small>{deviceStatusLabel(device)}</small>
+                              </span>
+                              {switchingDevice === device.id && (
+                                <span class="device-switching">Switching…</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </section>
+                    ))}
+                    {state.device?.platform === "ios" && state.device.kind === "physical" && (
+                      <section class="device-group">
+                        <strong class="device-group-label">Target App</strong>
+                        {appsLoading ? (
+                          <p>Looking for installed apps…</p>
+                        ) : installedApps.length ? (
+                          installedApps.map((app) => (
+                            <button
+                              key={app.bundleId}
+                              type="button"
+                              role="menuitem"
+                              class="device-option"
+                              disabled={Boolean(switchingApp)}
+                              onClick={() => void selectTargetApp(app)}
+                            >
+                              <span class="device-check">
+                                {state.appBundleId === app.bundleId && <Icon name="check" />}
+                              </span>
+                              <span>
+                                <strong>{app.name}</strong>
+                                <small>{app.bundleId}</small>
+                              </span>
+                              {switchingApp === app.bundleId && (
+                                <span class="device-switching">Switching…</span>
+                              )}
+                            </button>
+                          ))
+                        ) : (
+                          <p>No launchable apps found.</p>
+                        )}
+                      </section>
+                    )}
+                  </>
                 ) : (
-                  <p>No iOS Simulators or Android devices found.</p>
+                  <p>No iOS or Android devices found.</p>
                 )}
               </div>
             )}
@@ -1982,9 +2084,13 @@ function SimView() {
                           ? elementFallback
                             ? "UIAutomator fallback · "
                             : "UIAutomator · "
-                          : elementFallback
-                            ? "AX fallback · "
-                            : "AX · "}
+                          : accessibility.source === "ios-xcui"
+                            ? elementFallback
+                              ? "XCUI fallback · "
+                              : "XCUI · "
+                            : elementFallback
+                              ? "AX fallback · "
+                              : "AX · "}
                       {accessibility.source === "react-native-fiber"
                         ? `${visibleElementCount} visible`
                         : accessibility.stats.nodeCount}

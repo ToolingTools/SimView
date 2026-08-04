@@ -33,6 +33,10 @@ platform backends and the high-throughput capture/input path.
 - `native/SimViewAndroid` owns the transient API-26+ Android agent. It is pushed
   under `/data/local/tmp`, started with `app_process`, authenticated before use,
   and removed when the backend shuts down.
+- `native/SimViewIOSDeviceRunner` owns the dependency-free XCTest UI-test
+  target for physical iOS. `simview-core` builds it with the user's Apple
+  Development team, writes session secrets only to a mode-0600 `.xctestrun`,
+  and reaches its random authenticated TCP port through an owned usbmux client.
 
 ## Process and trust flow
 
@@ -41,6 +45,7 @@ flowchart LR
   Host["MCP host or CLI"] -->|"typed, Zod-validated requests"| Client["SimView client"]
   Client -->|"authenticated Unix socket"| Core["simview-core"]
   Core -->|"SimulatorKit and CoreSimulator"| Simulator["iOS Simulator"]
+  Core -->|"usbmux + authenticated runner protocol"| IOSDevice["Physical iOS"]
   Core -->|"ADB"| Android["Android Emulator or device"]
   Host -->|"MCP App tools"| App["Preview app"]
   App -->|"Bearer HTTP or authenticated WebSocket"| Relay["127.0.0.1 relay"]
@@ -176,6 +181,16 @@ explicitly enabled for one non-Apple bundle, and accessibility remains usable
 without it. Do not move private symbols into TypeScript contracts or public
 documentation.
 
+Physical iOS is selected by both platform and kind and cannot enter
+SimulatorKit, CoreSimulator AX, Indigo HID, or UIKit-probe code. Its runner uses
+public XCUI snapshots, screenshots, gestures, typing, reported buttons,
+orientation, and app lifecycle. Automatic preview has one guarded Objective-C
+runtime seam for XCTest's private screenshot request; selector absence, failure,
+or timeout falls back to `XCUIScreen`. Full-resolution annotation freezes always
+use the public PNG path. Preview frames are downscaled to a 1,600-pixel maximum
+long edge and encoded as low-latency H.264 with VideoToolbox. Raw touch and the
+UIKit probe are never advertised for this backend.
+
 Android discovery shares the user's existing loopback ADB server. SimView never
 kills it, changes authorization keys, pairs devices, or enables legacy TCP mode.
 Every target operation passes `-s <serial>` as a process argument without a
@@ -192,6 +207,9 @@ release output. After native or protocol changes, run `bun run release:build`
 before packaging or plugin testing so the compiled artifacts cannot be stale.
 The release build produces arm64 binaries, permission-safe
 archives, SHA-256 checksums, `release-manifest.json`, and a CycloneDX SBOM.
+Distributions also carry only the owned iOS runner Xcode project, Sources, and
+Tests beside `simview-core`; packaging rejects external runner dependencies and
+build products.
 Binary publication remains blocked until the licensing, Developer ID signing,
 notarization, and real-target gates in `docs/binary-redistribution.md` and
 `docs/compatibility.md` have been reviewed.

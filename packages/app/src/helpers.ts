@@ -31,7 +31,7 @@ export type AnnotationMessageItem = {
 export const PREFERRED_INLINE_HEIGHT = 600;
 
 export type DeviceGroup = {
-  key: "ios-simulators" | "android-emulators" | "android-devices";
+  key: "ios-simulators" | "ios-devices" | "android-emulators" | "android-devices";
   label: string;
   devices: DeviceDescription[];
 };
@@ -39,12 +39,19 @@ export type DeviceGroup = {
 export function deviceGroups(devices: readonly DeviceDescription[]): DeviceGroup[] {
   const groups: DeviceGroup[] = [
     { key: "ios-simulators", label: "iOS Simulators", devices: [] },
+    { key: "ios-devices", label: "iOS Devices", devices: [] },
     { key: "android-emulators", label: "Android Emulators", devices: [] },
     { key: "android-devices", label: "Android Devices", devices: [] },
   ];
   for (const device of devices) {
     const group =
-      device.platform === "ios" ? groups[0] : device.kind === "physical" ? groups[2] : groups[1];
+      device.platform === "ios"
+        ? device.kind === "physical"
+          ? groups[1]
+          : groups[0]
+        : device.kind === "physical"
+          ? groups[3]
+          : groups[2];
     group?.devices.push(device);
   }
   return groups.filter((group) => group.devices.length > 0);
@@ -54,7 +61,16 @@ export function deviceStatusLabel(device: DeviceDescription): string {
   if (device.available) return formatRuntime(device.runtime, device.platform);
   switch (device.state) {
     case "unauthorized":
-      return "Authorization required — accept the ADB prompt on the device";
+    case "unpaired":
+      return device.platform === "ios"
+        ? "Authorization required — unlock, trust this Mac, and enable Developer Mode"
+        : "Authorization required — accept the ADB prompt on the device";
+    case "locked":
+      return "Locked — unlock the iPhone and keep it awake";
+    case "developer-mode-disabled":
+      return "Developer Mode required — enable it in Privacy & Security";
+    case "unsupported-transport":
+      return "USB required — connect the iPhone directly by cable";
     case "offline":
       return "Offline — reconnect the device or restart the emulator";
     case "booting":

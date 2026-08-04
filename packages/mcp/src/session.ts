@@ -7,9 +7,11 @@ import {
   type AccessibilitySnapshot,
   type Annotation,
   type DeviceDescription,
+  type DevicePreparation,
   type ElementSnapshot,
   FrameKind,
   flattenAccessibilityTree,
+  type InstalledAppList,
   type ScreenContext,
   SimViewClient,
 } from "@simview/client";
@@ -71,6 +73,7 @@ export class SimViewSession {
   client: SimViewClient | undefined = undefined;
   mjpegClient: SimViewClient | undefined = undefined;
   device: DeviceDescription | undefined = undefined;
+  appBundleId: string | undefined = undefined;
   frameId: string | undefined = undefined;
   lastAccessibility: AccessibilitySnapshot | undefined = undefined;
   lastElements: ElementSnapshot | undefined = undefined;
@@ -104,7 +107,10 @@ export class SimViewSession {
     return annotations;
   }
 
-  async open(deviceId?: string, options: { startRelay?: boolean } = {}): Promise<SessionState> {
+  async open(
+    deviceId?: string,
+    options: { startRelay?: boolean; appBundleId?: string; team?: string } = {},
+  ): Promise<SessionState> {
     if (!this.client) {
       const devices = await SimViewClient.listDevices();
       const available = devices.filter((device) => device.available);
@@ -118,9 +124,27 @@ export class SimViewSession {
         this.client = await SimViewClient.acquire({ deviceId: this.device.id, codec: "h264" });
         this.#connectionGeneration += 1;
         this.#bindFrames();
+        if (this.device.platform === "ios" && this.device.kind === "physical") {
+          const preparation = await this.client.request("device.prepare", {
+            ...selectedDeviceParams(this.device),
+            ...(options.team ? { team: options.team } : {}),
+          });
+          if (!preparation.ready) {
+            throw new Error(
+              preparation.message ?? `Device preparation failed: ${preparation.status}`,
+            );
+          }
+        }
+        if (options.appBundleId) {
+          await this.client.request("app.target", {
+            ...selectedDeviceParams(this.device),
+            appBundleId: options.appBundleId,
+          });
+          this.appBundleId = options.appBundleId;
+        }
         const capture = await this.client.request(
           "capture.start",
-          selectedDeviceParams(this.device),
+          selectedDeviceParams(this.device, this.appBundleId),
         );
         this.device = capture.device;
         if (options.startRelay !== false) this.startRelay();
@@ -131,12 +155,21 @@ export class SimViewSession {
         this.#connectionGeneration += 1;
         this.client = undefined;
         this.device = undefined;
+        this.appBundleId = undefined;
         this.#resetPreviewPackets();
         throw error;
       }
     } else if (deviceId) {
-      if (!matchesDeviceId(this.device, deviceId)) await this.selectDevice(deviceId);
-      else await this.refreshDevice();
+      if (!matchesDeviceId(this.device, deviceId)) {
+        await this.selectDevice(deviceId, options.appBundleId);
+      } else {
+        if (options.appBundleId && options.appBundleId !== this.appBundleId) {
+          await this.selectApp(options.appBundleId);
+        }
+        await this.refreshDevice();
+      }
+    } else if (options.appBundleId && options.appBundleId !== this.appBundleId) {
+      await this.selectApp(options.appBundleId);
     }
     return this.state();
   }
@@ -165,16 +198,95 @@ export class SimViewSession {
     return this.state();
   }
 
-  async selectDevice(deviceId: string): Promise<SessionState> {
+  async prepareDevice(deviceId?: string, team?: string): Promise<DevicePreparation> {
+    const selected = deviceId
+      ? (await this.devices()).find((device) => matchesDeviceId(device, deviceId))
+      : this.device;
+    if (!selected) throw new Error(`Device ${deviceId ?? "selection"} was not found`);
+    if (selected.platform !== "ios" || selected.kind !== "physical") {
+      throw new Error("Device preparation is only required for physical iOS devices");
+    }
+    const existing = matchesDeviceId(this.device, selected.id) ? this.client : undefined;
+    const client =
+      existing ?? (await SimViewClient.acquire({ deviceId: selected.id, codec: "h264" }));
+    try {
+      return await client.request("device.prepare", {
+        ...selectedDeviceParams(selected),
+        ...(team ? { team } : {}),
+      });
+    } finally {
+      if (!existing) await client.close();
+    }
+  }
+
+  async installedApps(deviceId?: string): Promise<InstalledAppList> {
+    const selected = deviceId
+      ? (await this.devices()).find((device) => matchesDeviceId(device, deviceId))
+      : this.device;
+    if (!selected) throw new Error(`Device ${deviceId ?? "selection"} was not found`);
+    if (selected.platform !== "ios" || selected.kind !== "physical") {
+      throw new Error("Installed app listing is only supported for physical iOS devices");
+    }
+    const existing = matchesDeviceId(this.device, selected.id) ? this.client : undefined;
+    const client =
+      existing ?? (await SimViewClient.acquire({ deviceId: selected.id, codec: "h264" }));
+    try {
+      return await client.request("apps.list", selectedDeviceParams(selected));
+    } finally {
+      if (!existing) await client.close();
+    }
+  }
+
+  async selectApp(appBundleId: string): Promise<SessionState> {
+    const device = this.device;
+    if (device?.platform !== "ios" || device.kind !== "physical") {
+      throw new Error("Target app selection is only supported for physical iOS devices");
+    }
+    await this.requireClient().request("app.target", {
+      ...selectedDeviceParams(device),
+      appBundleId,
+    });
+    this.appBundleId = appBundleId;
+    this.lastAccessibility = undefined;
+    this.lastElements = undefined;
+    this.lastScreenContext = undefined;
+    return this.state();
+  }
+
+  async selectDevice(deviceId: string, appBundleId?: string): Promise<SessionState> {
     const selected = (await this.availableDevices()).find((device) =>
       matchesDeviceId(device, deviceId),
     );
     if (!selected) throw new Error(`Device ${deviceId} is not available`);
-    if (selected.id === this.device?.id) return this.state();
+    if (selected.id === this.device?.id) {
+      return appBundleId && appBundleId !== this.appBundleId
+        ? this.selectApp(appBundleId)
+        : this.state();
+    }
 
     const nextClient = await SimViewClient.acquire({ deviceId: selected.id, codec: "h264" });
     try {
-      const capture = await nextClient.request("capture.start", selectedDeviceParams(selected));
+      if (selected.platform === "ios" && selected.kind === "physical") {
+        const preparation = await nextClient.request(
+          "device.prepare",
+          selectedDeviceParams(selected),
+        );
+        if (!preparation.ready) {
+          throw new Error(
+            preparation.message ?? `Device preparation failed: ${preparation.status}`,
+          );
+        }
+      }
+      if (appBundleId) {
+        await nextClient.request("app.target", {
+          ...selectedDeviceParams(selected),
+          appBundleId,
+        });
+      }
+      const capture = await nextClient.request(
+        "capture.start",
+        selectedDeviceParams(selected, appBundleId),
+      );
 
       this.#connectionGeneration += 1;
       for (const unsubscribe of this.#unsubscribers) unsubscribe();
@@ -185,6 +297,7 @@ export class SimViewSession {
       if (this.client) await this.client.close();
       this.client = nextClient;
       this.device = capture.device;
+      this.appBundleId = appBundleId;
       this.frameId = undefined;
       this.lastAccessibility = undefined;
       this.lastElements = undefined;
@@ -216,6 +329,7 @@ export class SimViewSession {
     return {
       reviewId: this.reviewId,
       device: this.device,
+      ...(this.appBundleId ? { appBundleId: this.appBundleId } : {}),
       frameId: this.frameId,
       route: screenContext?.route,
       component:
@@ -321,9 +435,12 @@ export class SimViewSession {
       : undefined;
     if (metro && device) {
       if (device.platform === "ios" && !metro.screenContext.bundleId) {
+        if (this.appBundleId) metro.screenContext.bundleId = this.appBundleId;
         try {
-          const target = await this.probeTarget();
-          metro.screenContext.bundleId = target.bundleId;
+          if (!metro.screenContext.bundleId && device.capabilities.uikitProbe) {
+            const target = await this.probeTarget();
+            metro.screenContext.bundleId = target.bundleId;
+          }
         } catch {
           // The Metro target remains useful when simctl cannot identify the focal app.
         }
@@ -558,11 +675,21 @@ export class SimViewSession {
           if (url.pathname === "/devices") {
             return Response.json({ devices: await session.devices() });
           }
+          if (url.pathname === "/apps") {
+            return Response.json(await session.installedApps());
+          }
+          if (url.pathname === "/app" && request.method === "POST") {
+            const { appBundleId } = z
+              .object({ appBundleId: z.string().min(1) })
+              .parse(await request.json());
+            return Response.json(await session.selectApp(appBundleId));
+          }
           if (url.pathname === "/device" && request.method === "POST") {
-            const { deviceId, udid } = z
+            const { deviceId, udid, appBundleId } = z
               .object({
                 deviceId: z.string().min(1).optional(),
                 udid: z.string().min(1).optional(),
+                appBundleId: z.string().min(1).optional(),
               })
               .refine((value) => Boolean(value.deviceId || value.udid), {
                 message: "deviceId or udid is required",
@@ -570,7 +697,7 @@ export class SimViewSession {
               .parse(await request.json());
             const selectedId = deviceId ?? udid;
             if (!selectedId) throw new Error("deviceId or udid is required");
-            return Response.json(await session.selectDevice(selectedId));
+            return Response.json(await session.selectDevice(selectedId, appBundleId));
           }
           if (url.pathname === "/input" && request.method === "POST") {
             return Response.json(
@@ -788,6 +915,7 @@ export class SimViewSession {
     if (this.client) await this.client.close();
     this.client = undefined;
     this.device = undefined;
+    this.appBundleId = undefined;
     this.frameId = undefined;
     this.lastAccessibility = undefined;
     this.lastElements = undefined;
@@ -859,7 +987,9 @@ export class SimViewSession {
         accessibility.screen.width > accessibility.screen.height
           ? ("landscape" as const)
           : ("portrait" as const),
+      ...(this.appBundleId ? { bundleId: this.appBundleId } : {}),
     };
+    if (!device?.capabilities.uikitProbe) return base;
     try {
       const status = await this.probeStatus();
       const target = status.connected ? undefined : await this.probeTarget();
@@ -1013,11 +1143,21 @@ function matchesDeviceId(device: DeviceDescription | undefined, requested: strin
   );
 }
 
-function selectedDeviceParams(device: DeviceDescription | undefined): {
+function selectedDeviceParams(
+  device: DeviceDescription | undefined,
+  appBundleId?: string,
+): {
   deviceId?: string | undefined;
   udid?: string | undefined;
+  appBundleId?: string | undefined;
 } {
-  return device ? { deviceId: device.id, ...(device.udid ? { udid: device.udid } : {}) } : {};
+  return device
+    ? {
+        deviceId: device.id,
+        ...(device.udid ? { udid: device.udid } : {}),
+        ...(appBundleId ? { appBundleId } : {}),
+      }
+    : {};
 }
 
 function previewMessage(kind: FrameKind, payload: Uint8Array): Uint8Array {

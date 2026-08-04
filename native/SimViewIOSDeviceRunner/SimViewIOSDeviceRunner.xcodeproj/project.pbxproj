@@ -1,0 +1,282 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		100000000000000000000001 /* RunnerProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000001 /* RunnerProtocol.swift */; };
+		100000000000000000000002 /* RunnerServer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000002 /* RunnerServer.swift */; };
+		100000000000000000000003 /* XCUIController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000003 /* XCUIController.swift */; };
+		100000000000000000000004 /* H264Encoder.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000004 /* H264Encoder.swift */; };
+		100000000000000000000005 /* PrivateScreenshotShim.m in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000005 /* PrivateScreenshotShim.m */; };
+		100000000000000000000006 /* SimViewIOSDeviceRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 200000000000000000000008 /* SimViewIOSDeviceRunnerTests.swift */; };
+		100000000000000000000007 /* XCTest.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000A /* XCTest.framework */; };
+		100000000000000000000008 /* Network.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000B /* Network.framework */; };
+		100000000000000000000009 /* VideoToolbox.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000C /* VideoToolbox.framework */; };
+		10000000000000000000000A /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 20000000000000000000000D /* UIKit.framework */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		200000000000000000000001 /* RunnerProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerProtocol.swift; sourceTree = "<group>"; };
+		200000000000000000000002 /* RunnerServer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RunnerServer.swift; sourceTree = "<group>"; };
+		200000000000000000000003 /* XCUIController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XCUIController.swift; sourceTree = "<group>"; };
+		200000000000000000000004 /* H264Encoder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = H264Encoder.swift; sourceTree = "<group>"; };
+		200000000000000000000005 /* PrivateScreenshotShim.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = PrivateScreenshotShim.m; sourceTree = "<group>"; };
+		200000000000000000000006 /* PrivateScreenshotShim.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = PrivateScreenshotShim.h; sourceTree = "<group>"; };
+		200000000000000000000007 /* SimViewIOSDeviceRunner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "SimViewIOSDeviceRunner-Bridging-Header.h"; sourceTree = "<group>"; };
+		200000000000000000000008 /* SimViewIOSDeviceRunnerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SimViewIOSDeviceRunnerTests.swift; sourceTree = "<group>"; };
+		200000000000000000000009 /* SimViewIOSDeviceRunner.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SimViewIOSDeviceRunner.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		20000000000000000000000A /* XCTest.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = XCTest.framework; path = System/Library/Frameworks/XCTest.framework; sourceTree = SDKROOT; };
+		20000000000000000000000B /* Network.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Network.framework; path = System/Library/Frameworks/Network.framework; sourceTree = SDKROOT; };
+		20000000000000000000000C /* VideoToolbox.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = VideoToolbox.framework; path = System/Library/Frameworks/VideoToolbox.framework; sourceTree = SDKROOT; };
+		20000000000000000000000D /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		300000000000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000007 /* XCTest.framework in Frameworks */,
+				100000000000000000000008 /* Network.framework in Frameworks */,
+				100000000000000000000009 /* VideoToolbox.framework in Frameworks */,
+				10000000000000000000000A /* UIKit.framework in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		400000000000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				400000000000000000000002 /* Sources */,
+				400000000000000000000003 /* Tests */,
+				400000000000000000000004 /* Frameworks */,
+				400000000000000000000005 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		400000000000000000000002 /* Sources */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000001 /* RunnerProtocol.swift */,
+				200000000000000000000002 /* RunnerServer.swift */,
+				200000000000000000000003 /* XCUIController.swift */,
+				200000000000000000000004 /* H264Encoder.swift */,
+				200000000000000000000005 /* PrivateScreenshotShim.m */,
+				200000000000000000000006 /* PrivateScreenshotShim.h */,
+				200000000000000000000007 /* SimViewIOSDeviceRunner-Bridging-Header.h */,
+			);
+			path = Sources;
+			sourceTree = "<group>";
+		};
+		400000000000000000000003 /* Tests */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000008 /* SimViewIOSDeviceRunnerTests.swift */,
+			);
+			path = Tests;
+			sourceTree = "<group>";
+		};
+		400000000000000000000004 /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				20000000000000000000000A /* XCTest.framework */,
+				20000000000000000000000B /* Network.framework */,
+				20000000000000000000000C /* VideoToolbox.framework */,
+				20000000000000000000000D /* UIKit.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
+		400000000000000000000005 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				200000000000000000000009 /* SimViewIOSDeviceRunner.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		500000000000000000000001 /* SimViewIOSDeviceRunner */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 600000000000000000000002 /* Build configuration list for PBXNativeTarget "SimViewIOSDeviceRunner" */;
+			buildPhases = (
+				700000000000000000000001 /* Sources */,
+				300000000000000000000001 /* Frameworks */,
+				700000000000000000000002 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = SimViewIOSDeviceRunner;
+			productName = SimViewIOSDeviceRunner;
+			productReference = 200000000000000000000009 /* SimViewIOSDeviceRunner.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		800000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2650;
+				LastUpgradeCheck = 2650;
+				TargetAttributes = {
+					500000000000000000000001 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+				};
+			};
+			buildConfigurationList = 600000000000000000000001 /* Build configuration list for PBXProject "SimViewIOSDeviceRunner" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = 400000000000000000000001;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 400000000000000000000005 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				500000000000000000000001 /* SimViewIOSDeviceRunner */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		700000000000000000000002 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		700000000000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				100000000000000000000001 /* RunnerProtocol.swift in Sources */,
+				100000000000000000000002 /* RunnerServer.swift in Sources */,
+				100000000000000000000003 /* XCUIController.swift in Sources */,
+				100000000000000000000004 /* H264Encoder.swift in Sources */,
+				100000000000000000000005 /* PrivateScreenshotShim.m in Sources */,
+				100000000000000000000006 /* SimViewIOSDeviceRunnerTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		900000000000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		900000000000000000000002 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				SDKROOT = iphoneos;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		900000000000000000000003 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "SimView Runner";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = tools.simview.ios-device-runner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/SimViewIOSDeviceRunner-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "";
+			};
+			name = Debug;
+		};
+		900000000000000000000004 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = "SimView Runner";
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@loader_path/Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = tools.simview.ios-device-runner;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = NO;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/SimViewIOSDeviceRunner-Bridging-Header.h";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		600000000000000000000001 /* Build configuration list for PBXProject "SimViewIOSDeviceRunner" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				900000000000000000000001 /* Debug */,
+				900000000000000000000002 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		600000000000000000000002 /* Build configuration list for PBXNativeTarget "SimViewIOSDeviceRunner" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				900000000000000000000003 /* Debug */,
+				900000000000000000000004 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 800000000000000000000001 /* Project object */;
+}
