@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmod } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   daemonRecordSchema,
@@ -55,6 +57,56 @@ describe("shared backend registry contracts", () => {
   test("can inspect trusted records from an earlier SimView version", () => {
     const historical = daemonRecordSchema.parse({ ...record, simviewVersion: "0.1.0" });
     expect(historical.simviewVersion).toBe("0.1.0");
+  });
+
+  test("keeps an authenticated fake backend alive and exits after its idle timeout", async () => {
+    const binary = fileURLToPath(new URL("fixtures/fake-simview-core.ts", import.meta.url));
+    const directory = await mkdtemp(join(tmpdir(), "simview-daemon-idle-test-"));
+    const socketPath = join(directory, "core.sock");
+    const token = "c".repeat(64);
+    const udid = randomUUID().toUpperCase();
+    const instanceId = "c".repeat(20);
+    await chmod(binary, 0o755);
+    const child = Bun.spawn(
+      [
+        binary,
+        "serve",
+        "--socket",
+        socketPath,
+        "--token-fd",
+        "0",
+        "--idle-timeout",
+        "1",
+        "--udid",
+        udid,
+        "--instance-id",
+        instanceId,
+      ],
+      {
+        stdin: new TextEncoder().encode(token),
+        stdout: "ignore",
+        stderr: "inherit",
+        detached: true,
+      },
+    );
+    child.unref();
+    let client: SimViewClient | undefined;
+    try {
+      await waitForSocket(socketPath);
+      client = await SimViewClient.attach(socketPath, token);
+      await Bun.sleep(1_200);
+      expect((await client.request("health.get", {})).pid).toBe(child.pid);
+
+      await client.close();
+      client = undefined;
+      expect(await waitForProcessExit(child)).toBe(0);
+      expect(await lstat(socketPath).catch(() => undefined)).toBeUndefined();
+    } finally {
+      await client?.close();
+      if (child.exitCode === null) child.kill();
+      await child.exited;
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   test("serializes simultaneous starters and keeps the backend alive for remaining clients", async () => {
@@ -116,4 +168,16 @@ async function waitForDaemonExit(udid: string): Promise<void> {
     if (!statuses.some((item) => item.udid === udid)) return;
     await Bun.sleep(20);
   }
+}
+
+async function waitForSocket(socketPath: string): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if ((await lstat(socketPath).catch(() => undefined))?.isSocket()) return;
+    await Bun.sleep(20);
+  }
+  throw new Error(`Timed out waiting for fake backend socket: ${socketPath}`);
+}
+
+async function waitForProcessExit(child: Bun.Subprocess): Promise<number | undefined> {
+  return Promise.race([child.exited, Bun.sleep(2_000).then(() => undefined)]);
 }
