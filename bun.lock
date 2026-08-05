@@ -21,7 +21,7 @@
     },
     "packages/app": {
       "name": "@simview/app",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "dependencies": {
         "@modelcontextprotocol/ext-apps": "1.7.5",
         "@simview/contracts": "workspace:*",
@@ -30,7 +30,7 @@
     },
     "packages/cli": {
       "name": "@simview/cli",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "dependencies": {
         "@simview/client": "workspace:*",
         "@simview/core": "workspace:*",
@@ -39,7 +39,7 @@
     },
     "packages/client": {
       "name": "@simview/client",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "dependencies": {
         "@simview/contracts": "workspace:*",
         "@simview/core": "workspace:*",
@@ -48,18 +48,18 @@
     },
     "packages/contracts": {
       "name": "@simview/contracts",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "dependencies": {
         "zod": "4.4.3",
       },
     },
     "packages/core": {
       "name": "@simview/core",
-      "version": "0.2.0",
+      "version": "0.3.0",
     },
     "packages/mcp": {
       "name": "@simview/mcp",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "dependencies": {
         "@modelcontextprotocol/server": "^2.0.0",
         "@simview/client": "workspace:*",
