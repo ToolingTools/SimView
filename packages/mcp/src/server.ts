@@ -257,8 +257,8 @@ export function createServer(
       const state = await session.open(deviceId ?? udid, {
         startRelay: false,
       });
-      if (appCapable) embeddedAppObserved = true;
-      scheduleBrowserFallback();
+      if (appCapable) observeEmbeddedApp();
+      else scheduleBrowserFallback();
       return toolResult(`SimView is connected to ${state.device?.name}.`, state);
     },
   );

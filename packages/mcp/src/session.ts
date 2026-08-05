@@ -23,6 +23,7 @@ import {
   type SaveReviewImagesInput,
   type SaveReviewImagesOutput,
   type SessionState,
+  saveReviewImagesInputSchema,
   uiContextSchema,
 } from "@simview/contracts";
 import type { ServerWebSocket } from "bun";
@@ -608,19 +609,7 @@ export class SimViewSession {
           if (url.pathname === "/review-images" && request.method === "POST") {
             return Response.json(
               await session.saveReviewImages(
-                z
-                  .object({
-                    screenshot: z.string().min(1).max(20_000_000),
-                    annotations: z
-                      .array(
-                        z.object({
-                          id: z.string().uuid(),
-                          screenshot: z.string().min(1).max(20_000_000),
-                        }),
-                      )
-                      .max(100),
-                  })
-                  .parse(await request.json()),
+                saveReviewImagesInputSchema.parse(await request.json()),
               ),
             );
           }

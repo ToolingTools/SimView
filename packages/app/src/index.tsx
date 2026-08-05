@@ -1107,26 +1107,20 @@ function SimView() {
     if (!embedded) return show("Send to Chat is available inside an MCP host");
     const canvas = canvasRef.current;
     if (!canvas?.width || !canvas.height) return show("No device frame to send");
-    const review = reviewExport(canvas);
+    const review = createReviewExport(canvas);
     if (!review) return show("Screenshot capture failed");
     try {
       const savedImages = saveReviewImagesOutputSchema.parse(
         (
           await bridge.callServerTool({
             name: "save_review_images",
-            arguments: {
-              screenshot: review.screenshot,
-              annotations: review.annotations.map(({ id, screenshot }) => ({ id, screenshot })),
-            },
+            arguments: reviewImageInput(review),
           })
         ).structuredContent,
       );
-      const annotationPaths = new Map(
-        savedImages.annotations.map((annotation) => [annotation.id, annotation.screenshotPath]),
-      );
       const result = await bridge.sendMessage({
         role: "user",
-        content: reviewMessageContent(savedImages, review, annotationPaths),
+        content: createReviewMessageContent(savedImages, review),
       });
       if (result.isError) throw new Error("The MCP host rejected the message");
     } catch (error) {
@@ -1140,7 +1134,7 @@ function SimView() {
     show("Sent frozen frame and annotation image paths to chat");
   }
 
-  function reviewExport(canvas: HTMLCanvasElement) {
+  function createReviewExport(canvas: HTMLCanvasElement) {
     const screenshot = canvas.toDataURL("image/png").split(",", 2)[1];
     if (!screenshot) return undefined;
     const annotations = visibleAnnotations.map((annotation) => ({
@@ -1164,11 +1158,20 @@ function SimView() {
     };
   }
 
-  function reviewMessageContent(
+  function reviewImageInput(review: NonNullable<ReturnType<typeof createReviewExport>>) {
+    return {
+      screenshot: review.screenshot,
+      annotations: review.annotations.map(({ id, screenshot }) => ({ id, screenshot })),
+    };
+  }
+
+  function createReviewMessageContent(
     savedImages: SaveReviewImagesOutput,
-    review: NonNullable<ReturnType<typeof reviewExport>>,
-    annotationPaths: ReadonlyMap<string, string>,
+    review: NonNullable<ReturnType<typeof createReviewExport>>,
   ) {
+    const annotationPaths = new Map(
+      savedImages.annotations.map((annotation) => [annotation.id, annotation.screenshotPath]),
+    );
     return annotationMessageContent(
       savedImages.screenshotPath,
       review.screenContext,
@@ -1180,27 +1183,21 @@ function SimView() {
     );
   }
 
-  async function copyReview() {
+  async function shareReview() {
     if (embedded) return void sendToChat();
     const canvas = canvasRef.current;
     if (!canvas?.width || !canvas.height) return show("No device frame to copy");
-    const review = reviewExport(canvas);
+    const review = createReviewExport(canvas);
     if (!review) return show("Screenshot capture failed");
     try {
       const response = await relayFetch("/review-images", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          screenshot: review.screenshot,
-          annotations: review.annotations.map(({ id, screenshot }) => ({ id, screenshot })),
-        }),
+        body: JSON.stringify(reviewImageInput(review)),
       });
       if (!response.ok) throw new Error(`The local relay returned ${response.status}`);
       const savedImages = saveReviewImagesOutputSchema.parse(await response.json());
-      const annotationPaths = new Map(
-        savedImages.annotations.map((annotation) => [annotation.id, annotation.screenshotPath]),
-      );
-      const text = reviewMessageContent(savedImages, review, annotationPaths)
+      const text = createReviewMessageContent(savedImages, review)
         .map((block) => block.text)
         .join("\n\n");
       try {
@@ -1859,7 +1856,7 @@ function SimView() {
             title={
               visibleAnnotations.length ? undefined : "Add an annotation before sending a review"
             }
-            onClick={() => void copyReview()}
+            onClick={() => void shareReview()}
           >
             <Icon name="send" /> <span>Send to Chat</span>
           </button>

@@ -664,20 +664,20 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       return found;
     }
     function focused(state) {
-      var path = []; var routeKeys = []; var routeNames = []; var current = state; var route = null;
+      var path = []; var routeKeys = []; var current = state; var route = null;
       while (current && Array.isArray(current.routes) && current.routes.length) {
         var index = typeof current.index === 'number' ? current.index : current.routes.length - 1;
         route = current.routes[index]; if (!route) break;
-        if (typeof route.name === 'string') { path.push(route.name); routeNames.push(route.name); }
+        if (typeof route.name === 'string') path.push(route.name);
         if (typeof route.key === 'string') routeKeys.push(route.key);
         current = route.state;
       }
-      return { route: route, path: path, routeKeys: routeKeys, routeNames: routeNames };
+      return { route: route, path: path, routeKeys: routeKeys };
     }
     function inactiveScene(route) {
-      if (!route || (!focus.routeKeys.length && !focus.routeNames.length)) return false;
+      if (!route || (!focus.routeKeys.length && !focus.path.length)) return false;
       if (typeof route.key === 'string') return focus.routeKeys.indexOf(route.key) === -1;
-      return typeof route.name === 'string' && focus.routeNames.indexOf(route.name) === -1;
+      return typeof route.name === 'string' && focus.path.indexOf(route.name) === -1;
     }
     var match = null; var matchDepth = -1; var fallbackMatch = null; var fallbackDepth = -1;
     var fibers = [{ fiber: rootFiber, depth: 0 }];
