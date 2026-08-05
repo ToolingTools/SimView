@@ -12,6 +12,7 @@ import {
   elementTreePageSchema,
   inspectPointOutputSchema,
   previewPacketBatchSchema,
+  type SaveReviewImagesOutput,
   type ScreenContext,
   type SessionState,
   SIMVIEW_VERSION,
@@ -127,6 +128,7 @@ function SimView() {
   const [frozenFrameId, setFrozenFrameId] = useState<string>();
   const [editor, setEditor] = useState<Editor>();
   const [toast, setToast] = useState("");
+  const [copyFallbackText, setCopyFallbackText] = useState("");
   const [hostContext, setHostContext] = useState<McpUiHostContext>();
   const [accessibility, setAccessibility] = useState<AccessibilitySnapshot>();
   const [screenContext, setScreenContext] = useState<ScreenContext>();
@@ -1105,8 +1107,36 @@ function SimView() {
     if (!embedded) return show("Send to Chat is available inside an MCP host");
     const canvas = canvasRef.current;
     if (!canvas?.width || !canvas.height) return show("No device frame to send");
-    const imageData = canvas.toDataURL("image/png").split(",", 2)[1];
-    if (!imageData) return show("Screenshot capture failed");
+    const review = createReviewExport(canvas);
+    if (!review) return show("Screenshot capture failed");
+    try {
+      const savedImages = saveReviewImagesOutputSchema.parse(
+        (
+          await bridge.callServerTool({
+            name: "save_review_images",
+            arguments: reviewImageInput(review),
+          })
+        ).structuredContent,
+      );
+      const result = await bridge.sendMessage({
+        role: "user",
+        content: createReviewMessageContent(savedImages, review),
+      });
+      if (result.isError) throw new Error("The MCP host rejected the message");
+    } catch (error) {
+      show(`Unable to send annotations: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    review.annotations.forEach((annotation) => {
+      sentAnnotationIds.current.add(annotation.id);
+    });
+    completeEnterInteractMode();
+    show("Sent frozen frame and annotation image paths to chat");
+  }
+
+  function createReviewExport(canvas: HTMLCanvasElement) {
+    const screenshot = canvas.toDataURL("image/png").split(",", 2)[1];
+    if (!screenshot) return undefined;
     const annotations = visibleAnnotations.map((annotation) => ({
       id: annotation.id,
       text: annotation.note,
@@ -1121,43 +1151,65 @@ function SimView() {
         uiContext,
         visibleAnnotations,
       );
+    return {
+      screenshot,
+      annotations,
+      screenContext: annotationMessageScreenContext(capturedScreenContext),
+    };
+  }
+
+  function reviewImageInput(review: NonNullable<ReturnType<typeof createReviewExport>>) {
+    return {
+      screenshot: review.screenshot,
+      annotations: review.annotations.map(({ id, screenshot }) => ({ id, screenshot })),
+    };
+  }
+
+  function createReviewMessageContent(
+    savedImages: SaveReviewImagesOutput,
+    review: NonNullable<ReturnType<typeof createReviewExport>>,
+  ) {
+    const annotationPaths = new Map(
+      savedImages.annotations.map((annotation) => [annotation.id, annotation.screenshotPath]),
+    );
+    return annotationMessageContent(
+      savedImages.screenshotPath,
+      review.screenContext,
+      review.annotations.map(({ id, text, context }) => ({
+        text,
+        context,
+        screenshotPath: annotationPaths.get(id) ?? savedImages.screenshotPath,
+      })),
+    );
+  }
+
+  async function shareReview() {
+    if (embedded) return void sendToChat();
+    const canvas = canvasRef.current;
+    if (!canvas?.width || !canvas.height) return show("No device frame to copy");
+    const review = createReviewExport(canvas);
+    if (!review) return show("Screenshot capture failed");
     try {
-      const savedImages = saveReviewImagesOutputSchema.parse(
-        (
-          await bridge.callServerTool({
-            name: "save_review_images",
-            arguments: {
-              screenshot: imageData,
-              annotations: annotations.map(({ id, screenshot }) => ({ id, screenshot })),
-            },
-          })
-        ).structuredContent,
-      );
-      const annotationPaths = new Map(
-        savedImages.annotations.map((annotation) => [annotation.id, annotation.screenshotPath]),
-      );
-      const result = await bridge.sendMessage({
-        role: "user",
-        content: annotationMessageContent(
-          savedImages.screenshotPath,
-          annotationMessageScreenContext(capturedScreenContext),
-          annotations.map(({ id, text, context }) => ({
-            text,
-            context,
-            screenshotPath: annotationPaths.get(id) ?? savedImages.screenshotPath,
-          })),
-        ),
+      const response = await relayFetch("/review-images", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(reviewImageInput(review)),
       });
-      if (result.isError) throw new Error("The MCP host rejected the message");
+      if (!response.ok) throw new Error(`The local relay returned ${response.status}`);
+      const savedImages = saveReviewImagesOutputSchema.parse(await response.json());
+      const text = createReviewMessageContent(savedImages, review)
+        .map((block) => block.text)
+        .join("\n\n");
+      try {
+        await navigator.clipboard.writeText(text);
+        show("Copied — paste into chat");
+      } catch {
+        setCopyFallbackText(text);
+        show("Select the review text below and paste it into chat");
+      }
     } catch (error) {
-      show(`Unable to send annotations: ${error instanceof Error ? error.message : String(error)}`);
-      return;
+      show(`Unable to prepare review: ${error instanceof Error ? error.message : String(error)}`);
     }
-    visibleAnnotations.forEach((annotation) => {
-      sentAnnotationIds.current.add(annotation.id);
-    });
-    completeEnterInteractMode();
-    show("Sent frozen frame and annotation image paths to chat");
   }
 
   async function captureOnly() {
@@ -1797,11 +1849,33 @@ function SimView() {
           >
             <Icon name="sidebar" /> <span>Inspector</span>
           </button>
-          <button type="button" class="primary send-chat" onClick={() => void sendToChat()}>
+          <button
+            type="button"
+            class="primary send-chat"
+            disabled={!visibleAnnotations.length}
+            title={
+              visibleAnnotations.length ? undefined : "Add an annotation before sending a review"
+            }
+            onClick={() => void shareReview()}
+          >
             <Icon name="send" /> <span>Send to Chat</span>
           </button>
         </div>
       </header>
+
+      {copyFallbackText && (
+        <dialog open class="copy-review-dialog" aria-label="Review text">
+          <p>Select the complete review text and paste it into chat.</p>
+          <textarea
+            readOnly
+            value={copyFallbackText}
+            onFocus={(event) => event.currentTarget.select()}
+          />
+          <button type="button" onClick={() => setCopyFallbackText("")}>
+            Close
+          </button>
+        </dialog>
+      )}
 
       <div class="workspace-single">
         <section class="single-stage">

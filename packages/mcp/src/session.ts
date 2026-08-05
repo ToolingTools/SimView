@@ -23,6 +23,7 @@ import {
   type SaveReviewImagesInput,
   type SaveReviewImagesOutput,
   type SessionState,
+  saveReviewImagesInputSchema,
   uiContextSchema,
 } from "@simview/contracts";
 import type { ServerWebSocket } from "bun";
@@ -235,6 +236,12 @@ export class SimViewSession {
   browserUrl(): string | undefined {
     if (!this.relay) return undefined;
     return `http://${this.relay.hostname}:${this.relay.port}/#token=${this.relayToken}`;
+  }
+
+  openBrowser(): void {
+    const url = this.browserUrl();
+    if (!url) throw new Error("The browser relay is not running");
+    Bun.spawn(["/usr/bin/open", url], { stdout: "ignore", stderr: "ignore" });
   }
 
   async screenshot(): Promise<Screenshot> {
@@ -597,6 +604,13 @@ export class SimViewSession {
                 note: body.note,
                 context: body.context,
               }),
+            );
+          }
+          if (url.pathname === "/review-images" && request.method === "POST") {
+            return Response.json(
+              await session.saveReviewImages(
+                saveReviewImagesInputSchema.parse(await request.json()),
+              ),
             );
           }
           if (url.pathname === "/accessibility") {

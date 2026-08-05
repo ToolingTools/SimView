@@ -1,13 +1,12 @@
 {
   "name": "@simview/mcp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
   "license": "Apache-2.0",
   "exports": "./src/index.ts",
   "dependencies": {
-    "@modelcontextprotocol/ext-apps": "1.7.5",
-    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/server": "^2.0.0",
     "@simview/client": "workspace:*",
     "@simview/contracts": "workspace:*",
     "metro-bridge": "0.2.8",
