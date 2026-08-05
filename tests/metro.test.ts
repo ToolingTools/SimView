@@ -241,6 +241,12 @@ describe("Metro source normalization", () => {
     ).toEqual({ file: "src/InboxScreen.tsx", line: 42, column: 7 });
   });
 
+  test("omits invalid debugger source positions", () => {
+    expect(
+      normalizeProjectSource({ file: "/work/app/src/InboxScreen.tsx", line: 0, column: 0 }, root),
+    ).toEqual({ file: "src/InboxScreen.tsx" });
+  });
+
   test("rejects dependencies, bundles, and paths outside the project", () => {
     expect(
       normalizeProjectSource({ file: "/work/app/node_modules/react/index.js" }, root),
@@ -398,6 +404,43 @@ describe("React Native Fiber projection", () => {
     });
     expect(JSON.stringify(result)).not.toContain("must-not-leak");
     expect(JSON.stringify(result)).not.toContain("private");
+  });
+
+  test("keeps the focused scene and global overlays while omitting inactive navigation scenes", async () => {
+    const root = fiber("Root", {});
+    const navigation = fiber("NavigationContainer", {});
+    const activeScene = fiber("SceneView", { route: { key: "inbox-key", name: "Inbox" } });
+    const inactiveScene = fiber("SceneView", { route: { key: "settings-key", name: "Settings" } });
+    const activeScreen = fiber("InboxScreen", {}, "/work/app/src/InboxScreen.tsx");
+    const inactiveScreen = fiber("SettingsScreen", {}, "/work/app/src/SettingsScreen.tsx");
+    const activeHost = fiber("View", { testID: "inbox-button" });
+    const inactiveHost = fiber("View", { testID: "settings-button" });
+    const toastHost = fiber("View", { testID: "toast-overlay" });
+    activeHost.type = "RCTView";
+    inactiveHost.type = "RCTView";
+    toastHost.type = "RCTView";
+    navigation.memoizedState = {
+      memoizedState: { index: 0, routes: [{ key: "inbox-key", name: "Inbox" }] },
+      next: null,
+    };
+    link(root, navigation);
+    navigation.sibling = toastHost;
+    toastHost.return = root;
+    link(navigation, activeScene);
+    activeScene.sibling = inactiveScene;
+    inactiveScene.return = navigation;
+    link(activeScene, activeScreen);
+    link(activeScreen, activeHost);
+    link(inactiveScene, inactiveScreen);
+    link(inactiveScreen, inactiveHost);
+
+    const result = await inspectFiber(root, { nativeFabricUIManager: {} });
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).toContain("inbox-button");
+    expect(serialized).toContain("toast-overlay");
+    expect(serialized).not.toContain("settings-button");
+    expect(result.screen).toMatchObject({ route: "Inbox", component: "InboxScreen" });
   });
 
   test("reads Expo Router state without bridge instrumentation", async () => {

@@ -557,6 +557,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         } catch (_) { done(null); }
       }));
     }
+    var focus = focused(navState());
     function walk(fiber, depth) {
       if (!fiber || depth > 600 || count >= MAX_NODES) {
         if (fiber) truncated = true;
@@ -564,6 +565,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       }
       var name = nameOf(fiber);
       var props = fiber.memoizedProps || {};
+      if (name === 'SceneView' && inactiveScene(props.route)) return [];
       var host = typeof fiber.type === 'string';
       var path = componentPath(fiber);
       var testID = typeof props.testID === 'string' ? props.testID : undefined;
@@ -662,16 +664,21 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       return found;
     }
     function focused(state) {
-      var path = []; var current = state; var route = null;
+      var path = []; var routeKeys = []; var routeNames = []; var current = state; var route = null;
       while (current && Array.isArray(current.routes) && current.routes.length) {
         var index = typeof current.index === 'number' ? current.index : current.routes.length - 1;
         route = current.routes[index]; if (!route) break;
-        if (typeof route.name === 'string') path.push(route.name);
+        if (typeof route.name === 'string') { path.push(route.name); routeNames.push(route.name); }
+        if (typeof route.key === 'string') routeKeys.push(route.key);
         current = route.state;
       }
-      return { route: route, path: path };
+      return { route: route, path: path, routeKeys: routeKeys, routeNames: routeNames };
     }
-    var focus = focused(navState());
+    function inactiveScene(route) {
+      if (!route || (!focus.routeKeys.length && !focus.routeNames.length)) return false;
+      if (typeof route.key === 'string') return focus.routeKeys.indexOf(route.key) === -1;
+      return typeof route.name === 'string' && focus.routeNames.indexOf(route.name) === -1;
+    }
     var match = null; var matchDepth = -1; var fallbackMatch = null; var fallbackDepth = -1;
     var fibers = [{ fiber: rootFiber, depth: 0 }];
     while (fibers.length) {
@@ -863,9 +870,15 @@ export function normalizeProjectSource(
   if (!projectRelative || projectRelative.startsWith("..") || isAbsolute(projectRelative)) {
     return undefined;
   }
+  const line = positiveSourcePosition(source.line);
+  const column = positiveSourcePosition(source.column);
   return {
     file: projectRelative,
-    line: source.line,
-    column: source.column,
+    ...(line === undefined ? {} : { line }),
+    ...(column === undefined ? {} : { column }),
   };
+}
+
+function positiveSourcePosition(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : undefined;
 }
