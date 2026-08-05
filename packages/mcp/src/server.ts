@@ -1,7 +1,11 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { McpServer, ResourceTemplate } from "@modelcontextprotocol/server";
+import {
+  CLIENT_CAPABILITIES_META_KEY,
+  McpServer,
+  ResourceTemplate,
+} from "@modelcontextprotocol/server";
 import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { compactAccessibilityTree } from "@simview/client";
 import {
@@ -43,6 +47,7 @@ import { SimViewSession } from "./session";
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? SIMVIEW_VERSION;
 const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
 const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
+const BROWSER_FALLBACK_DELAY_MS = 5_000;
 
 function resourceMetadata(reviewId: string) {
   const resourceUri = `ui://simview/${VERSION}/reviews/${reviewId}/preview.html`;
@@ -158,9 +163,41 @@ const observeOutputSchema = z.object({
   semanticError: semanticErrorSchema.optional(),
 });
 
-export function createServer(session = new SimViewSession()): McpServer {
+export function createServer(
+  session = new SimViewSession(),
+  { browserFallbackDelayMs = BROWSER_FALLBACK_DELAY_MS } = {},
+): McpServer {
   const server = new McpServer({ name: "simview", version: VERSION });
   const metadata = resourceMetadata(session.reviewId);
+  // Standard MCP Apps clients advertise support. Older HTML app hosts do not,
+  // so their resource read is the only reliable acknowledgement before fallback.
+  let embeddedAppObserved = false;
+  let browserFallback: ReturnType<typeof setTimeout> | undefined;
+  const cancelBrowserFallback = () => {
+    if (browserFallback) clearTimeout(browserFallback);
+    browserFallback = undefined;
+  };
+  const observeEmbeddedApp = () => {
+    embeddedAppObserved = true;
+    cancelBrowserFallback();
+  };
+  const scheduleBrowserFallback = () => {
+    cancelBrowserFallback();
+    if (embeddedAppObserved) return;
+    browserFallback = setTimeout(() => {
+      browserFallback = undefined;
+      try {
+        session.startRelay();
+        session.openBrowser();
+      } catch (error) {
+        console.error(
+          `Unable to open the SimView browser fallback: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }, browserFallbackDelayMs);
+    browserFallback.unref?.();
+  };
+  server.server.onclose = cancelBrowserFallback;
   const connectDevice = async (deviceId?: string) => {
     const state = await session.open(deviceId);
     return toolResult(`SimView is connected to ${state.device?.name}.`, state);
@@ -218,17 +255,11 @@ export function createServer(session = new SimViewSession()): McpServer {
     async ({ deviceId, udid }, context) => {
       const appCapable = supportsMcpApps(server, context);
       const state = await session.open(deviceId ?? udid, {
-        startRelay: !appCapable,
+        startRelay: false,
       });
-      if (appCapable) {
-        return toolResult(`SimView is connected to ${state.device?.name}.`, state);
-      }
-      session.startRelay();
-      session.openBrowser();
-      return toolResult(
-        "SimView opened in your default browser. Add annotations, select Send to Chat, then paste the copied review into chat.",
-        state,
-      );
+      if (appCapable) embeddedAppObserved = true;
+      scheduleBrowserFallback();
+      return toolResult(`SimView is connected to ${state.device?.name}.`, state);
     },
   );
 
@@ -393,6 +424,7 @@ export function createServer(session = new SimViewSession()): McpServer {
   );
 
   const readPreviewResource = async (uri = new URL(metadata.resourceUri)) => {
+    observeEmbeddedApp();
     const html = await appHtml(session.state());
     return {
       contents: [
@@ -1186,7 +1218,9 @@ export async function runServer(): Promise<void> {
       const session = new SimViewSession();
       sessions.add(session);
       const server = createServer(session);
+      const onclose = server.server.onclose;
       server.server.onclose = () => {
+        onclose?.();
         sessions.delete(session);
         void session.close();
       };
@@ -1199,15 +1233,22 @@ export async function runServer(): Promise<void> {
 }
 
 function supportsMcpApps(server: McpServer, context: { mcpReq: { envelope?: unknown } }): boolean {
-  const modernCapabilities = (
-    context.mcpReq.envelope as { clientCapabilities?: unknown } | undefined
-  )?.clientCapabilities;
-  const capabilities = modernCapabilities ?? server.server.getClientCapabilities();
-  if (!capabilities || typeof capabilities !== "object") return false;
-  const record = capabilities as Record<string, unknown>;
-  return Boolean(
-    record["io.modelcontextprotocol/ui"] ??
-      (record.extensions as Record<string, unknown> | undefined)?.["io.modelcontextprotocol/ui"] ??
-      (record.experimental as Record<string, unknown> | undefined)?.["io.modelcontextprotocol/ui"],
+  const envelope = asRecord(context.mcpReq.envelope);
+  return [
+    envelope?.clientCapabilities,
+    envelope?.[CLIENT_CAPABILITIES_META_KEY],
+    server.server.getClientCapabilities(),
+  ].some(hasMcpUiCapability);
+}
+
+export function hasMcpUiCapability(capabilities: unknown): boolean {
+  const record = asRecord(capabilities);
+  if (!record) return false;
+  return [record, asRecord(record.extensions), asRecord(record.experimental)].some(
+    (candidate) => candidate && "io.modelcontextprotocol/ui" in candidate,
   );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
 }

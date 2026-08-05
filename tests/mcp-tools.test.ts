@@ -10,7 +10,7 @@ import {
   parseDeviceDescription,
 } from "@simview/contracts";
 import { assembleElementTreePages } from "../packages/app/src/helpers";
-import { createServer } from "../packages/mcp/src/server";
+import { createServer, hasMcpUiCapability } from "../packages/mcp/src/server";
 import { SimViewSession } from "../packages/mcp/src/session";
 
 const appCalledTools = [
@@ -50,6 +50,13 @@ const modelOnlyTools = [
 ];
 
 describe("MCP app tools", () => {
+  test("recognizes the MCP App capability in modern and legacy capability locations", () => {
+    expect(hasMcpUiCapability({ "io.modelcontextprotocol/ui": {} })).toBe(true);
+    expect(hasMcpUiCapability({ extensions: { "io.modelcontextprotocol/ui": {} } })).toBe(true);
+    expect(hasMcpUiCapability({ experimental: { "io.modelcontextprotocol/ui": {} } })).toBe(true);
+    expect(hasMcpUiCapability({ extensions: {} })).toBe(false);
+  });
+
   test("opens the browser only for hosts without the MCP App capability", async () => {
     const noAppSession = previewSession();
     const appSession = previewSession();
@@ -60,10 +67,30 @@ describe("MCP app tools", () => {
 
     expect(noAppSession.browserOpened).toBe(1);
     expect(noAppSession.relayStarted).toBe(1);
-    expect((noApp.content as Array<{ text: string }>)[0]?.text).toContain("Send to Chat");
+    expect((noApp.content as Array<{ text: string }>)[0]?.text).toContain("connected");
     expect(appSession.browserOpened).toBe(0);
     expect(appSession.relayStarted).toBe(0);
     expect((app.content as Array<{ text: string }>)[0]?.text).toContain("connected");
+  });
+
+  test("does not open the browser when a v1 host reads the app resource", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = previewSession();
+    const server = createServer(session, { browserFallbackDelayMs: 25 });
+    const client = new Client({ name: "simview-v1-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+
+    try {
+      const uri = resourceUri(await client.listTools());
+      await client.callTool({ name: "open_simview", arguments: {} });
+      await client.readResource({ uri });
+      await Bun.sleep(35);
+
+      expect(session.browserOpened).toBe(0);
+      expect(session.relayStarted).toBe(0);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
   });
 
   test("authorizes app calls and persists annotation mutations", async () => {
@@ -500,11 +527,13 @@ async function callOpenSimView(
   capabilities: Record<string, unknown> = {},
 ) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createServer(session);
+  const server = createServer(session, { browserFallbackDelayMs: 0 });
   const client = new Client({ name: "simview-test", version: "1.0.0" }, { capabilities } as never);
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {
-    return await client.callTool({ name: "open_simview", arguments: {} });
+    const result = await client.callTool({ name: "open_simview", arguments: {} });
+    await Bun.sleep(5);
+    return result;
   } finally {
     await Promise.all([client.close(), server.close(), session.close()]);
   }
