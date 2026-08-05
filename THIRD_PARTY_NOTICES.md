@@ -35,8 +35,6 @@ copyright Evan Bacon and contributors, licensed under Apache-2.0.
 The adapted concepts and selector declarations are isolated under
 `native/SimViewCore/Sources/SimViewCore/Compatibility`.
 
-SimView does not contain or redistribute Argent binaries or proprietary source.
-
 ### IDB
 
 Portions of SimView's host-side CoreSimulator accessibility translation flow
@@ -45,7 +43,7 @@ Platforms, Inc. and affiliates, licensed under the MIT License.
 
 The adapted bridge is isolated in
 `native/SimViewCore/Sources/SimViewAXShim`. SimView's injected UIKit probe is an
-independent implementation and contains no Argent binary or proprietary code.
+independent implementation and contains no proprietary code.
 
 ## Release records
 
