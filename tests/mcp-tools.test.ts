@@ -10,7 +10,7 @@ import {
   parseDeviceDescription,
 } from "@simview/contracts";
 import { assembleElementTreePages } from "../packages/app/src/helpers";
-import { createServer, hasMcpUiCapability } from "../packages/mcp/src/server";
+import { createServer, hasMcpUiCapability, isDesktopMcpAppHost } from "../packages/mcp/src/server";
 import { SimViewSession } from "../packages/mcp/src/session";
 
 const appCalledTools = [
@@ -57,6 +57,12 @@ describe("MCP app tools", () => {
     expect(hasMcpUiCapability({ extensions: {} })).toBe(false);
   });
 
+  test("recognizes Claude Code sessions hosted by Claude Desktop", () => {
+    expect(isDesktopMcpAppHost({ CLAUDE_CODE_ENTRYPOINT: "claude-desktop" })).toBe(true);
+    expect(isDesktopMcpAppHost({ CLAUDE_CODE_ENTRYPOINT: "cli" })).toBe(false);
+    expect(isDesktopMcpAppHost({})).toBe(false);
+  });
+
   test("opens the browser only for hosts without the MCP App capability", async () => {
     const noAppSession = previewSession();
     const appSession = previewSession();
@@ -91,6 +97,15 @@ describe("MCP app tools", () => {
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }
+  });
+
+  test("does not pre-empt Claude Desktop with the browser fallback", async () => {
+    const session = previewSession();
+    const result = await callOpenSimView(session, {}, { CLAUDE_CODE_ENTRYPOINT: "claude-desktop" });
+
+    expect(session.browserOpened).toBe(0);
+    expect(session.relayStarted).toBe(0);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toContain("connected");
   });
 
   test("authorizes app calls and persists annotation mutations", async () => {
@@ -525,9 +540,10 @@ function previewSession(): SimViewSession & { browserOpened: number; relayStarte
 async function callOpenSimView(
   session: SimViewSession,
   capabilities: Record<string, unknown> = {},
+  environment: Readonly<Record<string, string | undefined>> = {},
 ) {
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const server = createServer(session, { browserFallbackDelayMs: 0 });
+  const server = createServer(session, { browserFallbackDelayMs: 0, environment });
   const client = new Client({ name: "simview-test", version: "1.0.0" }, { capabilities } as never);
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   try {

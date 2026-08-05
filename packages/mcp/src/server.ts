@@ -165,7 +165,13 @@ const observeOutputSchema = z.object({
 
 export function createServer(
   session = new SimViewSession(),
-  { browserFallbackDelayMs = BROWSER_FALLBACK_DELAY_MS } = {},
+  {
+    browserFallbackDelayMs = BROWSER_FALLBACK_DELAY_MS,
+    environment = process.env,
+  }: {
+    browserFallbackDelayMs?: number;
+    environment?: Readonly<Record<string, string | undefined>>;
+  } = {},
 ): McpServer {
   const server = new McpServer({ name: "simview", version: VERSION });
   const metadata = resourceMetadata(session.reviewId);
@@ -253,7 +259,7 @@ export function createServer(
       _meta: metadata.openPreview,
     },
     async ({ deviceId, udid }, context) => {
-      const appCapable = supportsMcpApps(server, context);
+      const appCapable = supportsMcpApps(server, context, environment);
       const state = await session.open(deviceId ?? udid, {
         startRelay: false,
       });
@@ -1232,13 +1238,19 @@ export async function runServer(): Promise<void> {
   );
 }
 
-function supportsMcpApps(server: McpServer, context: { mcpReq: { envelope?: unknown } }): boolean {
+function supportsMcpApps(
+  server: McpServer,
+  context: { mcpReq: { envelope?: unknown } },
+  environment: Readonly<Record<string, string | undefined>>,
+): boolean {
   const envelope = asRecord(context.mcpReq.envelope);
-  return [
-    envelope?.clientCapabilities,
-    envelope?.[CLIENT_CAPABILITIES_META_KEY],
-    server.server.getClientCapabilities(),
-  ].some(hasMcpUiCapability);
+  return (
+    [
+      envelope?.clientCapabilities,
+      envelope?.[CLIENT_CAPABILITIES_META_KEY],
+      server.server.getClientCapabilities(),
+    ].some(hasMcpUiCapability) || isDesktopMcpAppHost(environment)
+  );
 }
 
 export function hasMcpUiCapability(capabilities: unknown): boolean {
@@ -1247,6 +1259,15 @@ export function hasMcpUiCapability(capabilities: unknown): boolean {
   return [record, asRecord(record.extensions), asRecord(record.experimental)].some(
     (candidate) => candidate && "io.modelcontextprotocol/ui" in candidate,
   );
+}
+
+export function isDesktopMcpAppHost(
+  environment: Readonly<Record<string, string | undefined>>,
+): boolean {
+  // Claude Desktop currently launches plugin MCP servers through Claude Code without
+  // forwarding its outer MCP Apps capability. The entrypoint is inherited by the
+  // child server and distinguishes that path from terminal Claude Code.
+  return environment.CLAUDE_CODE_ENTRYPOINT === "claude-desktop";
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

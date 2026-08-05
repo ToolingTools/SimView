@@ -2,7 +2,7 @@
   "manifest_version": "0.3",
   "name": "simview",
   "display_name": "SimView",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Control and review local iOS Simulators and Android devices.",
   "long_description": "A local-only iOS Simulator and ADB device preview with physical input, semantics, and review annotations.",
   "author": {
