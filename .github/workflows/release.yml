@@ -113,7 +113,7 @@ jobs:
           chmod 600 "${NOTARY_KEY}"
           xcrun notarytool submit artifacts/release/simview-plugin.zip --key "${NOTARY_KEY}" --key-id "${APPLE_NOTARY_KEY_ID}" --issuer "${APPLE_NOTARY_ISSUER_ID}" --wait
       - run: bun run smoke:npm
-      - uses: actions/attest@c32b4b8b198b65d0bd9d63490e847ff7b53989d4 # v4.0.0
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
           subject-path: |
             artifacts/release/*.zip
