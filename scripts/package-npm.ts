@@ -1,6 +1,11 @@
 import { chmod, cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { assertCodexPluginArchiveSize, createNpmPackageManifest } from "./release-config";
+import {
+  assertCodexPluginArchiveSize,
+  assertNoRepowiseArtifacts,
+  createNpmPackageManifest,
+  createPackagedMcpConfig,
+} from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
 const release = join(root, "artifacts", "release");
@@ -15,16 +20,18 @@ await rm(stage, { recursive: true, force: true });
 await mkdir(join(stage, "bin"), { recursive: true });
 await mkdir(join(stage, "app"), { recursive: true });
 await mkdir(join(stage, "assets"), { recursive: true });
+await mkdir(join(stage, "skills"), { recursive: true });
 await mkdir(release, { recursive: true });
 await mkdir(npmCache, { recursive: true });
 
 await Promise.all([
   cp(join(root, ".codex-plugin"), join(stage, ".codex-plugin"), { recursive: true }),
   cp(join(root, ".claude-plugin"), join(stage, ".claude-plugin"), { recursive: true }),
-  cp(join(root, "skills"), join(stage, "skills"), { recursive: true }),
+  cp(join(root, "skills", "simview"), join(stage, "skills", "simview"), {
+    recursive: true,
+  }),
   cp(join(root, "assets", "icon-512.png"), join(stage, "assets", "icon-512.png")),
   cp(join(root, "packages/app/dist"), join(stage, "app/dist"), { recursive: true }),
-  cp(join(root, ".mcp.json"), join(stage, ".mcp.json")),
   cp(join(root, "README.md"), join(stage, "README.md")),
   cp(join(root, "LICENSE"), join(stage, "LICENSE")),
   cp(join(root, "THIRD_PARTY_NOTICES.md"), join(stage, "THIRD_PARTY_NOTICES.md")),
@@ -47,6 +54,11 @@ await writeFile(
   join(stage, "package.json"),
   `${JSON.stringify(createNpmPackageManifest(rootManifest.version, packageName), null, 2)}\n`,
 );
+await writeFile(
+  join(stage, ".mcp.json"),
+  `${JSON.stringify(createPackagedMcpConfig(await Bun.file(join(root, ".mcp.json")).json()), null, 2)}\n`,
+);
+await assertNoRepowiseArtifacts(stage);
 
 const pack = Bun.spawn(
   ["npm", "pack", "--json", "--pack-destination", release, "--cache", npmCache, stage],

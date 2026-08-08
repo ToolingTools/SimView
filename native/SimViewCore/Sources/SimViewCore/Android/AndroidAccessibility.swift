@@ -1,23 +1,36 @@
 import Foundation
 
-final class AndroidAccessibilityService {
+final class AndroidAccessibilityService: @unchecked Sendable {
     private let client: ADBClient
     private let serial: String
+    private weak var agent: AndroidAgentConnection?
+    private let observation: AccessibilityObservationCoordinator
 
-    init(client: ADBClient, serial: String) {
+    init(
+        client: ADBClient,
+        serial: String,
+        agent: AndroidAgentConnection? = nil,
+        observation: AccessibilityObservationCoordinator = AccessibilityObservationCoordinator()
+    ) {
         self.client = client
         self.serial = serial
+        self.agent = agent
+        self.observation = observation
     }
 
     func snapshot(
         scope: String = "interactive", maxNodes: Int = 1_200, timeout: TimeInterval = 15
     ) throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(max(0.1, timeout))
+        if let agent {
+            let xml = try agent.accessibilitySnapshot(timeout: max(0.1, deadline.timeIntervalSinceNow))
+            return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-agent-uiautomator")
+        }
         let remotePath = "/data/local/tmp/simview-\(UUID().uuidString.lowercased()).xml"
         defer {
             _ = try? client.execute(
                 ["shell", "rm", "-f", remotePath], serial: serial, timeout: 2)
         }
-        let deadline = Date().addingTimeInterval(max(0.1, timeout))
         let dump = try client.require(
             ["shell", "uiautomator", "dump", "--compressed", remotePath],
             serial: serial,
@@ -36,6 +49,15 @@ final class AndroidAccessibilityService {
         guard xml.count <= 8 * 1024 * 1024 else {
             throw SimViewError("ACCESSIBILITY_RESPONSE_TOO_LARGE", "UIAutomator hierarchy exceeds 8 MiB")
         }
+        return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-uiautomator")
+    }
+
+    private func parsedSnapshot(
+        _ xml: Data,
+        scope: String,
+        maxNodes: Int,
+        source: String
+    ) throws -> [String: Any] {
         let snapshotID = UUID().uuidString.lowercased()
         let parser = AndroidHierarchyParser(maxNodes: max(1, min(maxNodes, 5_000)))
         let root = try parser.parse(xml, referencePrefix: "android:\(snapshotID)")
@@ -46,7 +68,7 @@ final class AndroidAccessibilityService {
             "schemaVersion": 1,
             "snapshotId": snapshotID,
             "capturedAt": ISO8601DateFormatter().string(from: Date()),
-            "source": "android-uiautomator",
+            "source": source,
             "scope": scope,
             "screen": ["x": 0, "y": 0, "width": display.width, "height": display.height],
             "root": selectedRoot,
@@ -96,25 +118,43 @@ final class AndroidAccessibilityService {
         guard state == "visible" || state == "hidden" else {
             throw SimViewError("PARAMETER_INVALID", "accessibility.wait state must be visible or hidden")
         }
+        try validateAccessibilitySelector(selector)
         let deadline = Date().addingTimeInterval(Double(max(1, min(timeoutMs, 30_000))) / 1_000)
+        var revision: String?
         var lastCount = 0
-        repeat {
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { break }
-            let result = try find(selector: selector, timeout: remaining)
-            lastCount = result["count"] as? Int ?? 0
+        while Date() < deadline {
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            let observed = try observation.observe(
+                afterRevision: revision,
+                scope: "visible",
+                maxNodes: 5_000,
+                settleQuietMilliseconds: 75,
+                maximumWaitMilliseconds: min(500, Int(remaining * 1_000)),
+                strategy: agent == nil ? "snapshot-diff" : "android-uiautomation"
+            ) { [weak self] scope, maxNodes in
+                guard let self else {
+                    throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "Accessibility service is unavailable")
+                }
+                return try self.snapshot(scope: scope, maxNodes: maxNodes, timeout: 15)
+            }
+            revision = observed.revision
+            var matches: [[String: Any]] = []
+            if let root = observed.snapshot["root"] as? [String: Any] {
+                collectMatches(root, selector: selector, matches: &matches)
+            }
+            lastCount = matches.count
             if (state == "visible" && lastCount > 0) || (state == "hidden" && lastCount == 0) {
                 return [
                     "schemaVersion": 1,
                     "state": state,
                     "satisfied": true,
                     "count": lastCount,
-                    "snapshotId": result["snapshotId"] as Any,
-                    "matches": result["matches"] as Any,
+                    "snapshotId": observed.snapshot["snapshotId"] as Any,
+                    "matches": matches,
                 ]
             }
-            Thread.sleep(forTimeInterval: 0.1)
-        } while Date() < deadline
+            if observed.timedOut { break }
+        }
         throw SimViewError(
             "ACCESSIBILITY_REQUEST_TIMEOUT",
             "Timed out waiting for Android accessibility element to become \(state)",

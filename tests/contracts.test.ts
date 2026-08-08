@@ -1,9 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type AccessibilitySnapshot,
+  accessibilityObserveParamsSchema,
+  accessibilityObserveResultSchema,
+  accessibilityResourceSchema,
   accessibilitySelectorSchema,
   annotationGeometrySchema,
   deviceDescriptionSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
+  elementSearchQuerySchema,
   elementTreeOutputSchema,
   elementTreePageSchema,
   inspectPointOutputSchema,
@@ -13,6 +18,7 @@ import {
   parseMethodResult,
   protocolResponseSchema,
   sessionStateSchema,
+  stableAccessibilityEntries,
 } from "@simview/contracts";
 
 describe("shared protocol contracts", () => {
@@ -27,12 +33,22 @@ describe("shared protocol contracts", () => {
 
     expect(params.codecs).toEqual(["h264", "mjpeg"]);
     expect(result.codec).toBe("h264");
-    expect(result.protocolVersion).toBe(2);
+    expect(result.protocolVersion).toBe(3);
   });
 
   test("rejects empty accessibility selectors", () => {
     expect(accessibilitySelectorSchema.safeParse({}).success).toBe(false);
     expect(accessibilitySelectorSchema.parse({ identifier: "submit" }).exact).toBe(true);
+  });
+
+  test("bounds semantic element searches", () => {
+    expect(elementSearchQuerySchema.parse({ query: "Shop" })).toMatchObject({
+      query: "Shop",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 10,
+    });
+    expect(elementSearchQuerySchema.safeParse({ query: "", limit: 50 }).success).toBe(false);
   });
 
   test("uses visible and hidden as the only wait states", () => {
@@ -54,8 +70,78 @@ describe("shared protocol contracts", () => {
     ).toBe(false);
   });
 
+  test("validates accessibility observation and resource envelopes", () => {
+    const snapshot = observationSnapshot("ax-1", "first-ref", "Continue");
+    expect(accessibilityObserveParamsSchema.parse({})).toMatchObject({
+      scope: "interactive",
+      maxNodes: 1_200,
+      settleQuietMs: 75,
+      maxWaitMs: 500,
+    });
+    const observation = accessibilityObserveResultSchema.parse({
+      snapshot,
+      revision: "7",
+      eventChanged: true,
+      stable: true,
+      timedOut: false,
+      strategy: "snapshot-diff",
+      settledAt: snapshot.capturedAt,
+    });
+    const resource = accessibilityResourceSchema.parse({
+      schemaVersion: 1,
+      revision: observation.revision,
+      semanticHash: "a".repeat(64),
+      capturedAt: snapshot.capturedAt,
+      strategy: observation.strategy,
+      snapshot,
+    });
+    expect(resource.snapshot.snapshotId).toBe("ax-1");
+  });
+
+  test("keeps semantic identities stable when snapshot refs are regenerated", () => {
+    const first = observationSnapshot("ax-1", "first-ref", "Continue");
+    const regenerated = observationSnapshot("ax-2", "second-ref", "Continue");
+    const changed = observationSnapshot("ax-3", "third-ref", "Continue");
+    const changedButton = changed.root.children?.[0];
+    if (!changedButton) throw new Error("Test snapshot is missing its button");
+    changedButton.enabled = false;
+
+    const firstEntries = stableAccessibilityEntries(first.root);
+    const regeneratedEntries = stableAccessibilityEntries(regenerated.root);
+    const changedEntries = stableAccessibilityEntries(changed.root);
+    expect(regeneratedEntries.map(({ key }) => key)).toEqual(firstEntries.map(({ key }) => key));
+    expect(regeneratedEntries.map(({ value }) => value)).toEqual(
+      firstEntries.map(({ value }) => value),
+    );
+    expect(changedEntries.map(({ key }) => key)).toEqual(firstEntries.map(({ key }) => key));
+    expect(changedEntries.map(({ value }) => value)).not.toEqual(
+      firstEntries.map(({ value }) => value),
+    );
+  });
+
   test("rejects out-of-range input at the protocol boundary", () => {
     expect(methodSchemas["input.tap"].params.safeParse({ x: 1.1, y: 0.5 }).success).toBe(false);
+  });
+
+  test("bounds timestamped gestures by pointers, duration, and total samples", () => {
+    const track = {
+      pointerId: 0,
+      waypoints: [
+        { x: 0.2, y: 0.3, timestampMs: 0 },
+        { x: 0.8, y: 0.7, timestampMs: 350 },
+      ],
+    };
+    expect(methodSchemas["input.gesture"].params.safeParse({ tracks: [track] }).success).toBe(true);
+    expect(
+      methodSchemas["input.gesture"].params.safeParse({
+        tracks: [{ ...track, waypoints: [...track.waypoints].reverse() }],
+      }).success,
+    ).toBe(false);
+    expect(
+      methodSchemas["input.gesture"].params.safeParse({
+        tracks: [track, { ...track, pointerId: 0 }],
+      }).success,
+    ).toBe(false);
   });
 
   test("normalizes legacy iOS descriptions and validates Android device capabilities", () => {
@@ -234,3 +320,31 @@ describe("shared protocol contracts", () => {
     ).toBe(true);
   });
 });
+
+function observationSnapshot(
+  snapshotId: string,
+  ref: string,
+  label: string,
+): AccessibilitySnapshot {
+  return {
+    schemaVersion: 1,
+    snapshotId,
+    capturedAt: "2026-08-08T10:00:00.000Z",
+    source: "core-simulator-ax",
+    scope: "interactive",
+    screen: { x: 0, y: 0, width: 402, height: 874 },
+    root: {
+      ref: "root-ref",
+      children: [
+        {
+          ref,
+          identifier: "continue-button",
+          role: "button",
+          label,
+          enabled: true,
+        },
+      ],
+    },
+    stats: { nodeCount: 2, truncated: false },
+  };
+}

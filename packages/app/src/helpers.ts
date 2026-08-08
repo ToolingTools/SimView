@@ -28,7 +28,7 @@ export type AnnotationMessageItem = {
   screenshotPath: string;
 };
 
-export const PREFERRED_INLINE_HEIGHT = 600;
+const PREFERRED_INLINE_HEIGHT = 600;
 
 export type DeviceGroup = {
   key: "ios-simulators" | "android-emulators" | "android-devices";

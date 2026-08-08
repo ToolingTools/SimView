@@ -4,7 +4,59 @@ import XCTest
 
 @testable import SimViewCore
 
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage = 0
+
+    var value: Int { lock.withLock { storage } }
+
+    func increment() -> Int {
+        lock.withLock {
+            storage += 1
+            return storage
+        }
+    }
+}
+
+private final class AccessibilitySnapshotBox: @unchecked Sendable {
+    let value: [String: Any]
+
+    init(_ value: [String: Any]) {
+        self.value = value
+    }
+}
+
 final class ProtocolTests: XCTestCase {
+    private func pixelBuffer(red: UInt8, green: UInt8, blue: UInt8) throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        XCTAssertEqual(
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                64,
+                64,
+                kCVPixelFormatType_32BGRA,
+                nil,
+                &buffer
+            ),
+            kCVReturnSuccess
+        )
+        let result = try XCTUnwrap(buffer)
+        CVPixelBufferLockBaseAddress(result, [])
+        let bytes = CVPixelBufferGetBaseAddress(result)!.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(result)
+        for y in 0..<64 {
+            for x in 0..<64 {
+                let offset = y * stride + x * 4
+                bytes[offset] = blue
+                bytes[offset + 1] = green
+                bytes[offset + 2] = red
+                bytes[offset + 3] = 255
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(result, [])
+        return result
+    }
+
     private func temporaryExecutable(_ body: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("simview-adb-tests-\(UUID().uuidString)")
@@ -30,6 +82,84 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(request.params["codecs"]?.arrayValue?.compactMap(\.stringValue), ["h264", "mjpeg"])
     }
 
+    func testAccessibilityObservationSettlesAnEventBurstWithoutCapturingOnTheCallback() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "ax:1", "label": "Continue"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 0,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        XCTAssertTrue(baseline.stable)
+        XCTAssertEqual(baseline.revision, "1")
+
+        coordinator.markEvent()
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 250,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        XCTAssertTrue(settled.eventChanged)
+        XCTAssertTrue(settled.stable)
+        XCTAssertFalse(settled.timedOut)
+    }
+
+    func testAccessibilityObservationReturnsAValidTimeoutForAnUnchangedTree() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "ax:1"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 0,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        let timedOut = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 30,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        XCTAssertFalse(timedOut.eventChanged)
+        XCTAssertFalse(timedOut.stable)
+        XCTAssertTrue(timedOut.timedOut)
+    }
+
+    func testAccessibilityObservationRejectsMalformedRevisions() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        XCTAssertThrowsError(
+            try coordinator.observe(
+                afterRevision: "not-a-revision",
+                scope: "interactive",
+                maxNodes: 100,
+                settleQuietMilliseconds: 75,
+                maximumWaitMilliseconds: 100,
+                strategy: "snapshot-diff"
+            ) { _, _ in [:] }
+        ) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "PARAMETER_INVALID")
+        }
+    }
+
     func testJSONValueRoundTrip() throws {
         let value = JSONValue.object([
             "boolean": .bool(true),
@@ -48,6 +178,177 @@ final class ProtocolTests: XCTestCase {
         let latency = metrics.dictionary["latencyMs"] as! [String: Double]
         XCTAssertGreaterThan(latency["p50"]!, 1_000)
         XCTAssertGreaterThan(latency["p95"]!, 1_900)
+    }
+
+    func testH264DecodeSchedulingPolicyBoundsWorkAndWaitsForAKeyframe() {
+        var policy = H264DecodeSchedulingPolicy(maximumWorkCount: 3)
+        _ = (0..<3).map { _ in policy.receive(isKeyframe: false) }
+        XCTAssertEqual(policy.workCount, 3)
+        XCTAssertLessThanOrEqual(policy.workCount, policy.maximumWorkCount)
+
+        XCTAssertEqual(policy.receive(isKeyframe: false), .resynchronize)
+        XCTAssertTrue(policy.waitingForKeyframe)
+        XCTAssertEqual(policy.workCount, 0)
+        XCTAssertEqual(policy.receive(isKeyframe: false), .drop)
+
+        guard case .submit(let recoveryGeneration) = policy.receive(isKeyframe: true) else {
+            return XCTFail("Recovery keyframe was not submitted")
+        }
+        XCTAssertFalse(policy.waitingForKeyframe)
+        XCTAssertEqual(policy.workCount, 1)
+        policy.complete(generation: recoveryGeneration &- 1)
+        XCTAssertEqual(policy.workCount, 1, "A stale callback must not release current work")
+        policy.complete(generation: recoveryGeneration)
+        XCTAssertEqual(policy.workCount, 0)
+    }
+
+    func testH264DecodeFailurePolicyTriggersOneBoundedRecovery() {
+        var policy = H264DecodeFailurePolicy(maximumConsecutiveFailures: 3)
+        XCTAssertFalse(policy.recordFailure())
+        XCTAssertFalse(policy.recordFailure())
+        policy.recordSuccess()
+        XCTAssertFalse(policy.recordFailure())
+        XCTAssertFalse(policy.recordFailure())
+        XCTAssertTrue(policy.recordFailure())
+        XCTAssertFalse(policy.recordFailure())
+        XCTAssertTrue(policy.recoveryTriggered)
+        policy.reset()
+        XCTAssertFalse(policy.recoveryTriggered)
+        XCTAssertEqual(policy.consecutiveFailures, 0)
+    }
+
+    func testOnDemandObservationDoesNotEncodeUntilVisualRequest() throws {
+        let attempts = LockedCounter()
+        let completions = LockedCounter()
+        let coordinator = ObservationCoordinator(
+            imagePreparationPolicy: .onDemand,
+            prepareImage: { frame in
+                _ = attempts.increment()
+                return (
+                    Data([1, 2, 3]), CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame)
+                )
+            },
+            didCompleteImagePreparation: { _ = completions.increment() }
+        )
+        coordinator.ingest(try pixelBuffer(red: 20, green: 30, blue: 40), frameID: "semantic")
+        Thread.sleep(forTimeInterval: 0.12)
+        let semantic = try coordinator.observe(
+            visual: false, afterRevision: nil, maximumWaitMilliseconds: 100)
+        XCTAssertNil(semantic.image)
+        XCTAssertEqual(semantic.width, 64)
+        XCTAssertEqual(semantic.height, 64)
+        XCTAssertEqual(attempts.value, 0)
+
+        let visual = try coordinator.observe(
+            visual: true, afterRevision: nil, maximumWaitMilliseconds: 1_000)
+        XCTAssertEqual(visual.image, Data([1, 2, 3]))
+        XCTAssertEqual(attempts.value, 1)
+        XCTAssertEqual(completions.value, 1)
+    }
+
+    func testSwitchingToOnDemandCancelsScheduledEagerPreparation() throws {
+        let attempts = LockedCounter()
+        let coordinator = ObservationCoordinator(prepareImage: { frame in
+            _ = attempts.increment()
+            return (Data([4]), CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame))
+        })
+        coordinator.ingest(try pixelBuffer(red: 30, green: 40, blue: 50), frameID: "policy")
+        coordinator.setImagePreparationPolicy(.onDemand)
+        Thread.sleep(forTimeInterval: 0.12)
+        let semantic = try coordinator.observe(
+            visual: false, afterRevision: nil, maximumWaitMilliseconds: 100)
+        XCTAssertNil(semantic.image)
+        XCTAssertEqual(attempts.value, 0)
+    }
+
+    func testConcurrentVisualObservationsCoalesceOneEncode() throws {
+        let attempts = LockedCounter()
+        let coordinator = ObservationCoordinator(
+            imagePreparationPolicy: .onDemand,
+            prepareImage: { frame in
+                _ = attempts.increment()
+                Thread.sleep(forTimeInterval: 0.05)
+                return (Data([9]), CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame))
+            }
+        )
+        coordinator.ingest(try pixelBuffer(red: 50, green: 60, blue: 70), frameID: "shared")
+        let first = expectation(description: "first visual observation")
+        let second = expectation(description: "second visual observation")
+        for done in [first, second] {
+            DispatchQueue.global().async {
+                defer { done.fulfill() }
+                let result = try? coordinator.observe(
+                    visual: true, afterRevision: nil, maximumWaitMilliseconds: 1_000)
+                XCTAssertEqual(result?.image, Data([9]))
+            }
+        }
+        wait(for: [first, second], timeout: 2)
+        XCTAssertEqual(attempts.value, 1)
+    }
+
+    func testOnDemandObservationRetriesOnlyOnALaterRequestAfterFailure() throws {
+        let attempts = LockedCounter()
+        let coordinator = ObservationCoordinator(
+            imagePreparationPolicy: .onDemand,
+            prepareImage: { frame in
+                if attempts.increment() == 1 {
+                    throw SimViewError("TEST_ENCODE_FAILURE", "Expected test failure")
+                }
+                return (Data([7]), CVPixelBufferGetWidth(frame), CVPixelBufferGetHeight(frame))
+            }
+        )
+        coordinator.ingest(try pixelBuffer(red: 80, green: 90, blue: 100), frameID: "retry")
+        let failed = try coordinator.observe(
+            visual: true, afterRevision: nil, maximumWaitMilliseconds: 150)
+        XCTAssertNil(failed.image)
+        XCTAssertEqual(attempts.value, 1)
+        let retried = try coordinator.observe(
+            visual: true, afterRevision: nil, maximumWaitMilliseconds: 1_000)
+        XCTAssertEqual(retried.image, Data([7]))
+        XCTAssertEqual(attempts.value, 2)
+    }
+
+    func testObservationCoordinatorSettlesAndKeepsOnlyTheNewestPreparedFrame() throws {
+        let coordinator = ObservationCoordinator()
+        coordinator.ingest(try pixelBuffer(red: 255, green: 0, blue: 0), frameID: "one")
+        let first = try coordinator.observe(
+            visual: true,
+            afterRevision: nil,
+            maximumWaitMilliseconds: 1_000
+        )
+        XCTAssertEqual(first.frameRevision, 1)
+        XCTAssertEqual(first.imageRevision, 1)
+        XCTAssertEqual(first.frameID, "one")
+        XCTAssertTrue(first.stable)
+        XCTAssertNotNil(first.image)
+
+        coordinator.ingest(try pixelBuffer(red: 255, green: 0, blue: 0), frameID: "one-again")
+        let unchanged = try coordinator.observe(
+            visual: true,
+            afterRevision: first.frameRevision,
+            maximumWaitMilliseconds: 1_000
+        )
+        XCTAssertEqual(unchanged.frameRevision, 2)
+        XCTAssertEqual(unchanged.changeRevision, 1)
+        XCTAssertEqual(unchanged.imageRevision, 1)
+        XCTAssertEqual(unchanged.image, first.image)
+
+        coordinator.ingest(try pixelBuffer(red: 0, green: 0, blue: 255), frameID: "two")
+        let second = try coordinator.observe(
+            visual: true,
+            afterRevision: unchanged.frameRevision,
+            maximumWaitMilliseconds: 1_000
+        )
+        XCTAssertEqual(second.frameRevision, 3)
+        XCTAssertEqual(second.changeRevision, 2)
+        XCTAssertEqual(second.imageRevision, 2)
+        XCTAssertEqual(second.frameID, "two")
+        XCTAssertNotEqual(first.image, second.image)
+
+        coordinator.clear()
+        XCTAssertThrowsError(
+            try coordinator.observe(visual: false, afterRevision: nil, maximumWaitMilliseconds: 0)
+        )
     }
 
     func testAccessibilitySelectorRequiresAMatchingField() throws {
@@ -353,13 +654,13 @@ final class ProtocolTests: XCTestCase {
 
     func testAndroidAgentHandshakeRejectsVersionOrAuthenticationFailure() throws {
         XCTAssertNoThrow(
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 4, 0, 0, 0, 0]))
+        )
+        XCTAssertThrowsError(
             try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 2, 0, 0, 0, 0]))
         )
         XCTAssertThrowsError(
-            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 1, 0, 0, 0, 0]))
-        )
-        XCTAssertThrowsError(
-            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 2, 0, 0, 0, 1]))
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 4, 0, 0, 0, 1]))
         )
     }
 
@@ -379,6 +680,35 @@ final class ProtocolTests: XCTestCase {
         let encoded = try await encoder.encode(buffer)
         XCTAssertFalse(encoded.bytes.isEmpty)
         XCTAssertTrue(encoded.keyframe)
+        await encoder.stop()
+    }
+
+    func testH264DecoderProducesABGRAObservationFrame() async throws {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            160,
+            90,
+            kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+            &pixelBuffer
+        )
+        XCTAssertEqual(status, kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixelBuffer)
+        let encoder = H264Encoder()
+        let encoded = try await encoder.encode(buffer)
+        let configuration = try XCTUnwrap(encoded.configuration)
+        let decoded = expectation(description: "decoded Android H.264 frame")
+        let decoder = H264Decoder()
+        try decoder.configure(configuration) { frame, _ in
+            XCTAssertEqual(CVPixelBufferGetPixelFormatType(frame), kCVPixelFormatType_32BGRA)
+            XCTAssertEqual(CVPixelBufferGetWidth(frame), 160)
+            XCTAssertEqual(CVPixelBufferGetHeight(frame), 90)
+            decoded.fulfill()
+        }
+        decoder.decode(encoded.bytes, timestampMicros: 1_000)
+        await fulfillment(of: [decoded], timeout: 2)
+        decoder.stop()
         await encoder.stop()
     }
 }

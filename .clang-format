@@ -3,8 +3,8 @@ IndentWidth: 2
 ContinuationIndentWidth: 4
 ColumnLimit: 100
 SortIncludes: Never
+SpaceAfterCStyleCast: true
 AllowShortFunctionsOnASingleLine: Empty
 BreakBeforeBraces: Attach
 ObjCBinPackProtocolList: Auto
 ObjCBlockIndentWidth: 2
-

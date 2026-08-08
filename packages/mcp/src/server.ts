@@ -10,19 +10,27 @@ import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { compactAccessibilityTree } from "@simview/client";
 import {
   accessibilityNodeSchema,
+  accessibilityObservationStrategySchema,
+  accessibilityResourceSchema,
   accessibilitySelectorSchema,
   accessibilitySnapshotSchema,
   annotationContextSchema,
   annotationGeometrySchema,
   annotationSchema,
+  type DeviceDescription,
   deviceListSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   ELEMENT_TREE_TRANSFER_MAX_BYTES,
+  type ElementSearchMatch,
   type ElementTreeOutput,
   type ElementTreePage,
+  elementSearchMatchSchema,
+  elementSearchQuerySchema,
   elementSnapshotSchema,
   elementTreeOutputSchema,
   elementTreePageSchema,
+  flattenAccessibilityTree,
+  gestureTracksSchema,
   inspectPointOutputSchema,
   jsonObjectSchema,
   jsonValueSchema,
@@ -35,19 +43,127 @@ import {
   saveReviewImagesOutputSchema,
   screenContextSchema,
   semanticErrorSchema,
+  semanticNodeSummarySchema,
   sessionStateSchema,
-  simulatorListSchema,
+  stableAccessibilityEntries,
+  summarizeAccessibilityNode,
   uiContextSchema,
 } from "@simview/contracts";
 import { z } from "zod";
 import { resolveAppRoot } from "./app-assets";
 import { inlineAppModule } from "./app-html";
-import { SimViewSession } from "./session";
+import { type AccessibilityObservation, SimViewSession, type WarmObservation } from "./session";
 
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? SIMVIEW_VERSION;
 const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
 const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 const BROWSER_FALLBACK_DELAY_MS = 5_000;
+const DEVICE_PAGE_LIMIT = 25;
+const DEVICE_INVENTORY_SNAPSHOT_TTL_MS = 30_000;
+const DEVICE_INVENTORY_SNAPSHOT_LIMIT = 4;
+const DEVICE_INVENTORY_RETAINED_LIMIT = 250;
+const UNAMBIGUOUS_SEARCH_SCORE_GAP = 0.1;
+
+export interface DeviceListOptions {
+  availableOnly?: boolean | undefined;
+  platform?: "ios" | "android" | undefined;
+  offset?: number | undefined;
+  limit?: number | undefined;
+  cursor?: string | undefined;
+}
+
+type DeviceInventorySnapshot = {
+  devices: DeviceDescription[];
+  inventoryTotal: number;
+  total: number;
+  limit: number;
+  offset: number;
+  expiresAt: number;
+  truncated: boolean;
+};
+
+class DeviceInventorySnapshotCache {
+  readonly #entries = new Map<string, DeviceInventorySnapshot>();
+
+  constructor(
+    private readonly ttlMilliseconds: number,
+    private readonly now: () => number,
+  ) {}
+
+  clear() {
+    this.#entries.clear();
+  }
+
+  create(snapshot: Omit<DeviceInventorySnapshot, "expiresAt">): string {
+    this.#pruneExpired();
+    while (this.#entries.size >= DEVICE_INVENTORY_SNAPSHOT_LIMIT) {
+      const oldest = this.#entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.#entries.delete(oldest);
+    }
+    const cursor = randomBytes(32).toString("base64url");
+    this.#entries.set(cursor, {
+      ...snapshot,
+      expiresAt: this.now() + this.ttlMilliseconds,
+    });
+    return cursor;
+  }
+
+  continue(cursor: string): DeviceInventorySnapshot {
+    this.#pruneExpired();
+    const snapshot = this.#entries.get(cursor);
+    if (!snapshot) throw new Error("Device inventory cursor is invalid or expired");
+    this.#entries.delete(cursor);
+    return snapshot;
+  }
+
+  #pruneExpired() {
+    const now = this.now();
+    for (const [cursor, snapshot] of this.#entries) {
+      if (snapshot.expiresAt <= now) this.#entries.delete(cursor);
+    }
+  }
+}
+
+export function deviceListPage(inventory: DeviceDescription[], options: DeviceListOptions = {}) {
+  const availableOnly = options.availableOnly ?? true;
+  const offset = Math.max(0, options.offset ?? 0);
+  const limit = Math.max(1, Math.min(DEVICE_PAGE_LIMIT, options.limit ?? 10));
+  const filtered = inventory
+    .filter((device) => !availableOnly || device.available)
+    .filter((device) => !options.platform || device.platform === options.platform)
+    .toSorted(
+      (left, right) =>
+        Number(right.available) - Number(left.available) ||
+        left.platform.localeCompare(right.platform) ||
+        left.name.localeCompare(right.name) ||
+        left.id.localeCompare(right.id),
+    );
+  const devices = filtered.slice(offset, offset + limit);
+  return {
+    devices,
+    inventoryTotal: inventory.length,
+    total: filtered.length,
+    returned: devices.length,
+    offset,
+    limit,
+    hasMore: offset + devices.length < filtered.length,
+  };
+}
+
+function sortedDeviceInventory(inventory: DeviceDescription[], options: DeviceListOptions) {
+  const availableOnly = options.availableOnly ?? true;
+  return inventory
+    .filter((device) => !availableOnly || device.available)
+    .filter((device) => !options.platform || device.platform === options.platform)
+    .toSorted(
+      (left, right) =>
+        Number(right.available) - Number(left.available) ||
+        left.platform.localeCompare(right.platform) ||
+        left.name.localeCompare(right.name) ||
+        left.id.localeCompare(right.id),
+    );
+}
 
 function resourceMetadata(reviewId: string) {
   const resourceUri = `ui://simview/${VERSION}/reviews/${reviewId}/preview.html`;
@@ -71,6 +187,40 @@ function resourceMetadata(reviewId: string) {
 }
 
 type ResourceMetadata = ReturnType<typeof resourceMetadata>;
+
+function unambiguousSearchMatch({
+  matches,
+  total,
+}: {
+  matches: ElementSearchMatch[];
+  total: number;
+}): ElementSearchMatch | undefined {
+  const winner = matches[0];
+  if (!winner) return undefined;
+  if (total === 1) return winner;
+  const runnerUp = matches[1];
+  if (!runnerUp) return undefined;
+  if (winner.exact && !runnerUp.exact) return winner;
+  return winner.score - runnerUp.score >= UNAMBIGUOUS_SEARCH_SCORE_GAP ? winner : undefined;
+}
+
+type ObservationBaseline = {
+  afterRevision: string | undefined;
+  beforeSemanticHash: string | undefined;
+  afterVisualRevision: number | undefined;
+};
+
+async function captureObservationBaseline(session: SimViewSession): Promise<ObservationBaseline> {
+  if (!session.lastAccessibility) await session.accessibilityObserve({ maxWaitMs: 0 });
+  return {
+    afterRevision: session.accessibilityRevision,
+    beforeSemanticHash: session.lastAccessibility
+      ? semanticHashForSnapshot(session.lastAccessibility)
+      : undefined,
+    afterVisualRevision: session.latestObservation?.changeRevision,
+  };
+}
+
 type ElementTreePageCache = {
   transferId: string;
   deviceId: string | undefined;
@@ -107,6 +257,46 @@ function compactElementTree(result: ElementTreeOutput): string {
   return [summary, fallback, compactAccessibilityTree(result.snapshot)].filter(Boolean).join("\n");
 }
 
+type SemanticIndex = Map<string, { hash: string; ref: string }>;
+
+function indexSemantics(snapshot: z.output<typeof accessibilitySnapshotSchema>): SemanticIndex {
+  return new Map(
+    stableAccessibilityEntries(snapshot.root).map(({ key, ref, value }) => [
+      key,
+      { ref, hash: createHash("sha256").update(JSON.stringify(value)).digest("hex") },
+    ]),
+  );
+}
+
+function semanticHash(index: SemanticIndex): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify(
+        [...index]
+          .map(([key, entry]) => [key, entry.hash] as const)
+          .sort(([left], [right]) => left.localeCompare(right)),
+      ),
+    )
+    .digest("hex");
+}
+
+function semanticHashForSnapshot(snapshot: z.output<typeof accessibilitySnapshotSchema>): string {
+  return semanticHash(indexSemantics(snapshot));
+}
+
+function semanticDelta(previous: SemanticIndex, current: SemanticIndex) {
+  const added = [...current.keys()].filter((ref) => !previous.has(ref));
+  const removed = [...previous].filter(([key]) => !current.has(key)).map(([, entry]) => entry.ref);
+  const changed = [...current]
+    .filter(([key, entry]) => previous.get(key)?.hash !== entry.hash && previous.has(key))
+    .map(([, entry]) => entry.ref);
+  return {
+    added: added.map((key) => current.get(key)?.ref ?? key),
+    removed,
+    changed,
+  };
+}
+
 function elementTreePage(cache: ElementTreePageCache, pageIndex: number): ElementTreePage {
   const pageCount = Math.ceil(cache.bytes.byteLength / ELEMENT_TREE_PAGE_RAW_BYTES);
   if (pageIndex < 0 || pageIndex >= pageCount) {
@@ -136,6 +326,14 @@ const findElementsOutputSchema = z.object({
   matches: z.array(accessibilityNodeSchema),
   count: z.number().int().nonnegative(),
 });
+const searchElementsOutputSchema = z.object({
+  snapshotId: z.string(),
+  query: elementSearchQuerySchema,
+  matches: z.array(elementSearchMatchSchema),
+  count: z.number().int().nonnegative(),
+  total: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
 const waitOutputSchema = z.object({
   durationMs: z.number().nonnegative(),
   schemaVersion: z.literal(1),
@@ -150,35 +348,161 @@ const screenshotOutputSchema = z.object({
   width: z.number().int().positive(),
   height: z.number().int().positive(),
 });
+const postActionAccessibilitySchema = z.object({
+  event: z.enum(["changed", "timed_out", "unavailable"]),
+  semantic: z.enum(["changed", "unchanged", "unconfirmed", "unavailable"]),
+  revision: z.string().optional(),
+  strategy: accessibilityObservationStrategySchema.optional(),
+  stable: z.boolean(),
+  forcedRetry: z.boolean(),
+  visualChanged: z.boolean().optional(),
+  resourceUri: z.string().optional(),
+});
+const postActionObservationSchema = z.object({ accessibility: postActionAccessibilitySchema });
 const observeOutputSchema = z.object({
+  observationId: z.string(),
   frameId: z.string(),
-  frameCapturedAt: z.string(),
+  sourceRevisions: z.object({
+    frame: z.number().int().nonnegative(),
+    visualChange: z.number().int().nonnegative(),
+    image: z.number().int().nonnegative(),
+    accessibility: z.string().optional(),
+    fiber: z.string().optional(),
+  }),
+  timestamps: z.object({
+    frameCapturedAt: z.string(),
+    settledAt: z.string(),
+    accessibilityReadyAt: z.string().optional(),
+    fiberReadyAt: z.string().optional(),
+    imageReadyAt: z.string().optional(),
+    mcpReturnedAt: z.string(),
+  }),
+  stability: z.object({ stable: z.boolean(), ageMs: z.number().nonnegative() }),
+  cache: z.object({ imageHit: z.boolean(), fiberHit: z.boolean() }),
+  semantic: z.object({
+    hash: z.string().optional(),
+    status: z.enum(["full", "delta", "unchanged", "unavailable"]),
+    nodeCount: z.number().int().nonnegative(),
+    truncated: z.boolean(),
+    added: z.array(z.string()).optional(),
+    removed: z.array(z.string()).optional(),
+    changed: z.array(z.string()).optional(),
+    nodes: z.array(semanticNodeSummarySchema).optional(),
+  }),
+  vision: z.object({
+    included: z.boolean(),
+    reason: z.string(),
+    mimeType: z.literal("image/jpeg").optional(),
+    returnedBytes: z.number().int().nonnegative(),
+  }),
   snapshot: accessibilitySnapshotSchema.optional(),
   elements: elementSnapshotSchema.optional(),
   screenContext: screenContextSchema.optional(),
-  accessibilityCapturedAt: z.string().optional(),
-  elementsCapturedAt: z.string().optional(),
-  captureDeltaMs: z.number().nonnegative().optional(),
   fallback: elementTreeOutputSchema.shape.fallback.optional(),
   semanticError: semanticErrorSchema.optional(),
+  postAction: postActionObservationSchema.optional(),
 });
+
+const actionSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("tap"), x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
+  z.object({
+    type: z.literal("long_press"),
+    x: z.number().min(0).max(1),
+    y: z.number().min(0).max(1),
+    durationMs: z.number().int().min(100).max(5_000).default(600),
+  }),
+  z.object({
+    type: z.literal("swipe"),
+    from: normalizedPointSchema,
+    to: normalizedPointSchema,
+    durationMs: z.number().int().min(50).max(5_000).default(350),
+  }),
+  z.object({ type: z.literal("type_text"), text: z.string().max(10_000) }),
+  z.object({
+    type: z.literal("press_button"),
+    button: z.enum(["home", "back", "overview", "lock", "volume-up", "volume-down", "action"]),
+  }),
+  z.object({
+    type: z.literal("set_orientation"),
+    orientation: z.enum(["portrait", "portrait-upside-down", "landscape-left", "landscape-right"]),
+  }),
+  z.object({
+    type: z.literal("gesture"),
+    tracks: gestureTracksSchema,
+  }),
+  z.object({
+    type: z.literal("tap_element"),
+    ref: z.string().optional(),
+    identifier: z.string().optional(),
+    role: z.string().optional(),
+    name: z.string().optional(),
+    value: z.string().optional(),
+    exact: z.boolean().default(true),
+    index: z.number().int().min(0).optional(),
+    query: z.string().trim().min(1).max(200).optional(),
+  }),
+  z.object({
+    type: z.literal("wait_for_element"),
+    ref: z.string().optional(),
+    identifier: z.string().optional(),
+    role: z.string().optional(),
+    name: z.string().optional(),
+    value: z.string().optional(),
+    exact: z.boolean().default(true),
+    index: z.number().int().min(0).optional(),
+    state: z.enum(["visible", "hidden"]).default("visible"),
+    timeoutMs: z.number().int().min(100).max(30_000).default(5_000),
+  }),
+]);
 
 export function createServer(
   session = new SimViewSession(),
   {
     browserFallbackDelayMs = BROWSER_FALLBACK_DELAY_MS,
     environment = process.env,
+    deviceProvider = () =>
+      import("@simview/client").then(({ SimViewClient }) => SimViewClient.listDevices()),
+    deviceInventorySnapshotTTLMS = DEVICE_INVENTORY_SNAPSHOT_TTL_MS,
+    now = Date.now,
   }: {
     browserFallbackDelayMs?: number;
     environment?: Readonly<Record<string, string | undefined>>;
+    deviceProvider?: () => Promise<DeviceDescription[]>;
+    deviceInventorySnapshotTTLMS?: number;
+    now?: () => number;
   } = {},
 ): McpServer {
-  const server = new McpServer({ name: "simview", version: VERSION });
+  const server = new McpServer(
+    { name: "simview", version: VERSION },
+    { capabilities: { resources: { subscribe: true } } },
+  );
   const metadata = resourceMetadata(session.reviewId);
+  let accessibilityResourceSubscribed = false;
+  server.server.setRequestHandler(
+    "resources/subscribe",
+    { params: z.object({ uri: z.string() }), result: z.object({}) },
+    async ({ uri }) => {
+      accessibilityResourceSubscribed = uri === session.accessibilityResourceUri;
+      return {};
+    },
+  );
+  server.server.setRequestHandler(
+    "resources/unsubscribe",
+    { params: z.object({ uri: z.string() }), result: z.object({}) },
+    async ({ uri }) => {
+      if (uri === session.accessibilityResourceUri) accessibilityResourceSubscribed = false;
+      return {};
+    },
+  );
+  const unsubscribeAccessibilityResource = session.onAccessibilityResourceUpdate(() => {
+    if (!accessibilityResourceSubscribed) return;
+    void server.server.sendResourceUpdated({ uri: session.accessibilityResourceUri });
+  });
   // Standard MCP Apps clients advertise support. Older HTML app hosts do not,
   // so their resource read is the only reliable acknowledgement before fallback.
   let embeddedAppObserved = false;
   let browserFallback: ReturnType<typeof setTimeout> | undefined;
+  const inventorySnapshots = new DeviceInventorySnapshotCache(deviceInventorySnapshotTTLMS, now);
   const cancelBrowserFallback = () => {
     if (browserFallback) clearTimeout(browserFallback);
     browserFallback = undefined;
@@ -203,24 +527,93 @@ export function createServer(
     }, browserFallbackDelayMs);
     browserFallback.unref?.();
   };
-  server.server.onclose = cancelBrowserFallback;
-  const connectDevice = async (deviceId?: string) => {
-    const state = await session.open(deviceId);
+  server.server.onclose = () => {
+    cancelBrowserFallback();
+    inventorySnapshots.clear();
+    unsubscribeAccessibilityResource();
+  };
+  const connectDevice = async (
+    deviceId?: string,
+    observationMode: "hybrid" | "semantic" = "semantic",
+  ) => {
+    const state = await session.open(deviceId, { startRelay: false, observationMode });
     return toolResult(`SimView is connected to ${state.device?.name}.`, state);
   };
-  const listDevices = async () => {
-    const devices = await import("@simview/client").then(({ SimViewClient }) =>
-      SimViewClient.listDevices(),
+  const listDevices = async (options: DeviceListOptions = {}) => {
+    if (options.cursor) {
+      if (
+        options.availableOnly !== undefined ||
+        options.platform !== undefined ||
+        options.offset !== undefined ||
+        options.limit !== undefined
+      ) {
+        throw new Error("Continuing device inventory requires only its cursor");
+      }
+      const snapshot = inventorySnapshots.continue(options.cursor);
+      const devices = snapshot.devices.slice(snapshot.offset, snapshot.offset + snapshot.limit);
+      const nextOffset = snapshot.offset + devices.length;
+      const hasMore = nextOffset < snapshot.devices.length;
+      const nextCursor = hasMore
+        ? inventorySnapshots.create({ ...snapshot, offset: nextOffset })
+        : undefined;
+      const page = {
+        devices,
+        inventoryTotal: snapshot.inventoryTotal,
+        total: snapshot.total,
+        returned: devices.length,
+        offset: snapshot.offset,
+        limit: snapshot.limit,
+        hasMore,
+        ...(nextCursor ? { nextCursor } : {}),
+        ...(snapshot.truncated ? { snapshotTruncated: true } : {}),
+      };
+      return toolResult(
+        `Found ${page.total} matching device${page.total === 1 ? "" : "s"}; returned ${page.returned}.`,
+        page,
+      );
+    }
+    const inventory = await deviceProvider();
+    if ((options.offset ?? 0) > 0) {
+      const page = deviceListPage(inventory, options);
+      const label = options.availableOnly === false ? "matching" : "available";
+      return toolResult(
+        `Found ${page.total} ${label} device${page.total === 1 ? "" : "s"}; returned ${page.returned}.`,
+        page,
+      );
+    }
+    const sorted = sortedDeviceInventory(inventory, options);
+    const retained = sorted.slice(0, DEVICE_INVENTORY_RETAINED_LIMIT);
+    const limit = Math.max(1, Math.min(DEVICE_PAGE_LIMIT, options.limit ?? 10));
+    const devices = retained.slice(0, limit);
+    const nextOffset = devices.length;
+    const hasMore = nextOffset < retained.length;
+    const snapshotTruncated = retained.length < sorted.length;
+    const nextCursor = hasMore
+      ? inventorySnapshots.create({
+          devices: retained,
+          inventoryTotal: inventory.length,
+          total: sorted.length,
+          limit,
+          offset: nextOffset,
+          truncated: snapshotTruncated,
+        })
+      : undefined;
+    const page = {
+      devices,
+      inventoryTotal: inventory.length,
+      total: sorted.length,
+      returned: devices.length,
+      offset: 0,
+      limit,
+      hasMore,
+      ...(nextCursor ? { nextCursor } : {}),
+      ...(snapshotTruncated ? { snapshotTruncated: true } : {}),
+    };
+    const label = options.availableOnly === false ? "matching" : "available";
+    return toolResult(
+      `Found ${page.total} ${label} device${page.total === 1 ? "" : "s"}; returned ${page.returned}.`,
+      page,
     );
-    return toolResult("Local devices.", { devices });
-  };
-  const listSimulators = async () => {
-    const devices = await import("@simview/client").then(({ SimViewClient }) =>
-      SimViewClient.listDevices(),
-    );
-    return toolResult("Local simulator and emulator devices.", {
-      devices: devices.filter((device) => device.kind !== "physical"),
-    });
   };
   const takeScreenshot = async () => {
     const screenshot = await session.screenshot();
@@ -243,6 +636,367 @@ export function createServer(
       },
     };
   };
+  const observationHistory = new Map<
+    string,
+    { hash: string; index: SemanticIndex; sessionKey: string }
+  >();
+  const observe = async ({
+    mode = "semantic",
+    sinceObservationId,
+    afterRevision,
+    afterVisualRevision,
+    postAction,
+    settleQuietMs = 75,
+    maxWaitMs = 500,
+  }: {
+    mode?: "auto" | "semantic" | "visual" | undefined;
+    sinceObservationId?: string | undefined;
+    afterRevision?: string | undefined;
+    afterVisualRevision?: number | undefined;
+    postAction?: { beforeSemanticHash?: string | undefined };
+    settleQuietMs?: number | undefined;
+    maxWaitMs?: number | undefined;
+  }) => {
+    const includeVision = mode === "visual";
+    const accessibilityPromise = session
+      .accessibilityObserve({
+        afterRevision,
+        scope: "interactive",
+        maxNodes: 1_200,
+        settleQuietMs,
+        maxWaitMs,
+      })
+      .then((value) => ({ value }))
+      .catch((error: unknown) => ({ error }));
+    const visualPromise = includeVision
+      ? session.warmObservation({
+          visual: true,
+          afterRevision: afterVisualRevision,
+          settleQuietMs,
+          maxWaitMs,
+        })
+      : Promise.resolve(undefined);
+    const [accessibilityOutcome, visualResult] = await Promise.all([
+      accessibilityPromise,
+      visualPromise,
+    ]);
+    let visualObservation = visualResult;
+    const firstAccessibility =
+      "value" in accessibilityOutcome ? accessibilityOutcome.value : undefined;
+    const accessibilityError =
+      "error" in accessibilityOutcome ? accessibilityOutcome.error : undefined;
+    if (!includeVision && accessibilityError) {
+      visualObservation = await session
+        .warmObservation({ visual: false, maxWaitMs: 0 })
+        .catch(() => undefined);
+    }
+    let accessibilityObservation: AccessibilityObservation | undefined = firstAccessibility;
+    let forcedRetry = false;
+    const visualChanged =
+      afterVisualRevision !== undefined &&
+      visualObservation !== undefined &&
+      visualObservation.changeRevision > afterVisualRevision;
+    if (
+      postAction?.beforeSemanticHash &&
+      accessibilityObservation &&
+      semanticHashForSnapshot(accessibilityObservation.snapshot) ===
+        postAction.beforeSemanticHash &&
+      (accessibilityObservation.eventChanged || visualChanged)
+    ) {
+      forcedRetry = true;
+      try {
+        accessibilityObservation = await session.accessibilityObserve({
+          scope: "interactive",
+          maxNodes: 1_200,
+          settleQuietMs,
+          maxWaitMs: 0,
+        });
+      } catch {
+        // Keep the first bounded result when the forced retry is unavailable.
+      }
+    }
+    if (!accessibilityObservation && session.lastAccessibility) {
+      accessibilityObservation = {
+        snapshot: session.lastAccessibility,
+        revision: session.accessibilityRevision ?? session.lastAccessibility.snapshotId,
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy:
+          session.lastAccessibility.source === "android-agent-uiautomator"
+            ? "android-uiautomation"
+            : "snapshot-diff",
+        settledAt: session.lastAccessibility.capturedAt,
+      };
+    }
+    const warm: WarmObservation =
+      visualObservation ??
+      ({
+        observationId: `accessibility-${accessibilityObservation?.revision ?? "unavailable"}`,
+        frameId: session.frameId ?? "accessibility",
+        frameRevision: 0,
+        changeRevision: 0,
+        imageRevision: 0,
+        capturedAt: accessibilityObservation?.snapshot.capturedAt ?? new Date().toISOString(),
+        settledAt: accessibilityObservation?.settledAt ?? new Date().toISOString(),
+        stable: accessibilityObservation?.stable ?? false,
+        ageMs: 0,
+        width: accessibilityObservation?.snapshot.screen.width ?? 0,
+        height: accessibilityObservation?.snapshot.screen.height ?? 0,
+        byteLength: 0,
+        imageIncluded: false,
+        cacheHit: false,
+      } satisfies WarmObservation);
+    let result: ElementTreeOutput | undefined;
+    let snapshot: z.output<typeof accessibilitySnapshotSchema> | undefined;
+    let semanticError: z.output<typeof semanticErrorSchema> | undefined;
+    let index: SemanticIndex = new Map();
+    let hash: string | undefined;
+    try {
+      result = await session.preparedElementSnapshot(240);
+      if (!accessibilityObservation) {
+        throw accessibilityError ?? new Error("Accessibility observation is unavailable");
+      }
+      snapshot = accessibilityObservation.snapshot;
+      if (!snapshot) throw new Error("Semantic observation did not produce accessibility state");
+      index = indexSemantics(snapshot);
+      hash = semanticHash(index);
+    } catch (error) {
+      semanticError = {
+        code: "semantic_inspection_failed",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      };
+    }
+
+    const sessionKey = `${session.connectionGeneration}:${session.device?.id ?? "disconnected"}`;
+    const candidatePrevious = sinceObservationId
+      ? observationHistory.get(sinceObservationId)
+      : undefined;
+    const previous = candidatePrevious?.sessionKey === sessionKey ? candidatePrevious : undefined;
+    const delta = previous && hash ? semanticDelta(previous.index, index) : undefined;
+    const semanticStatus = !hash
+      ? ("unavailable" as const)
+      : !previous
+        ? ("full" as const)
+        : previous.hash === hash
+          ? ("unchanged" as const)
+          : ("delta" as const);
+    let postActionEvent: "changed" | "timed_out" | "unavailable" | undefined;
+    if (postAction) {
+      if (!accessibilityObservation) postActionEvent = "unavailable";
+      else if (accessibilityObservation.timedOut) postActionEvent = "timed_out";
+      else if (accessibilityObservation.eventChanged) postActionEvent = "changed";
+      else postActionEvent = "timed_out";
+    }
+    let postActionSemantic: "changed" | "unchanged" | "unconfirmed" | "unavailable" | undefined;
+    if (postAction) {
+      if (!hash) postActionSemantic = "unavailable";
+      else if (postAction.beforeSemanticHash === undefined) postActionSemantic = "changed";
+      else if (hash !== postAction.beforeSemanticHash) postActionSemantic = "changed";
+      else if (forcedRetry || visualChanged || accessibilityObservation?.eventChanged) {
+        postActionSemantic = "unconfirmed";
+      } else {
+        postActionSemantic = "unchanged";
+      }
+    }
+    const observationId = randomUUID();
+    if (hash) {
+      observationHistory.set(observationId, { hash, index, sessionKey });
+      while (observationHistory.size > 8) {
+        const oldest = observationHistory.keys().next().value;
+        if (oldest === undefined) break;
+        observationHistory.delete(oldest);
+      }
+    }
+    const visionReason = includeVision
+      ? "explicit-visual-mode"
+      : semanticError
+        ? "semantic-unavailable-vision-not-requested"
+        : "semantic-mode";
+    const text = semanticError
+      ? `Semantic inspection unavailable: ${semanticError.message}`
+      : semanticStatus === "unchanged"
+        ? `Semantic state unchanged (${hash?.slice(0, 12)}).`
+        : semanticStatus === "delta"
+          ? `Semantic delta: +${delta?.added.length ?? 0} -${delta?.removed.length ?? 0} ~${delta?.changed.length ?? 0}.`
+          : result
+            ? compactElementTree(result)
+            : "No semantic state is available.";
+    const changedRefs = new Set([...(delta?.added ?? []), ...(delta?.changed ?? [])]);
+    const semanticNodes = snapshot
+      ? flattenAccessibilityTree(snapshot.root)
+          .filter(
+            (node) =>
+              semanticStatus === "full" ||
+              (semanticStatus === "delta" && changedRefs.has(node.ref)),
+          )
+          .map(summarizeAccessibilityNode)
+      : undefined;
+    const structuredContent = {
+      observationId,
+      frameId: warm.frameId,
+      sourceRevisions: {
+        frame: warm.frameRevision,
+        visualChange: warm.changeRevision,
+        image: warm.imageRevision,
+        accessibility: accessibilityObservation?.revision,
+        fiber: result?.snapshot.snapshotId,
+      },
+      timestamps: {
+        frameCapturedAt: warm.capturedAt,
+        settledAt: warm.settledAt,
+        accessibilityReadyAt: accessibilityObservation?.settledAt,
+        fiberReadyAt: result?.snapshot.capturedAt,
+        imageReadyAt: warm.imageReadyAt,
+        mcpReturnedAt: new Date().toISOString(),
+      },
+      stability: {
+        stable: warm.stable && (accessibilityObservation?.stable ?? false),
+        ageMs: warm.ageMs,
+      },
+      cache: { imageHit: warm.cacheHit, fiberHit: false },
+      semantic: {
+        hash,
+        status: semanticStatus,
+        nodeCount: index.size,
+        truncated: snapshot?.stats.truncated ?? false,
+        ...(semanticStatus === "delta" ? delta : {}),
+        ...(semanticStatus === "full" || semanticStatus === "delta"
+          ? { nodes: semanticNodes }
+          : {}),
+      },
+      vision: {
+        included: Boolean(includeVision && warm.image),
+        reason: visionReason,
+        mimeType: includeVision && warm.image ? ("image/jpeg" as const) : undefined,
+        returnedBytes: includeVision ? (warm.image?.byteLength ?? 0) : 0,
+      },
+      screenContext: result?.screenContext,
+      fallback: result?.fallback,
+      semanticError,
+      ...(postAction
+        ? {
+            postAction: {
+              accessibility: {
+                event: postActionEvent,
+                semantic: postActionSemantic,
+                revision: accessibilityObservation?.revision,
+                strategy: accessibilityObservation?.strategy,
+                stable: accessibilityObservation?.stable ?? false,
+                forcedRetry,
+                ...(visualChanged ? { visualChanged: true } : {}),
+                ...(hash ? { resourceUri: session.accessibilityResourceUri } : {}),
+              },
+            },
+          }
+        : {}),
+    };
+    return {
+      content: [
+        ...(includeVision && warm.image
+          ? [
+              {
+                type: "image" as const,
+                data: Buffer.from(warm.image).toString("base64"),
+                mimeType: "image/jpeg" as const,
+              },
+            ]
+          : []),
+        { type: "text" as const, text },
+      ],
+      structuredContent,
+    };
+  };
+  const dispatchAction = async (action: z.output<typeof actionSchema>) => {
+    switch (action.type) {
+      case "tap":
+        return session.dispatchInput({
+          method: "input.tap",
+          params: { x: action.x, y: action.y },
+        });
+      case "long_press":
+        return session.dispatchInput({
+          method: "input.longPress",
+          params: { x: action.x, y: action.y, durationMs: action.durationMs },
+        });
+      case "swipe":
+        return session.dispatchInput({
+          method: "input.swipe",
+          params: { from: action.from, to: action.to, durationMs: action.durationMs },
+        });
+      case "type_text":
+        return session.dispatchInput({ method: "input.typeText", params: { text: action.text } });
+      case "press_button":
+        return session.dispatchInput({
+          method: "input.button",
+          params: { button: action.button },
+        });
+      case "set_orientation":
+        session.requireCapability("orientation", "Orientation changes");
+        return session.requireClient().request("device.orientation.set", {
+          orientation: action.orientation,
+        });
+      case "gesture":
+        return session.dispatchInput({
+          method: "input.gesture",
+          params: { tracks: action.tracks },
+        });
+      case "tap_element": {
+        let selector: z.output<typeof accessibilitySelectorSchema>;
+        if (action.query) {
+          const search = await session.searchElements({
+            query: action.query,
+            actionableOnly: true,
+            visibleOnly: true,
+            limit: 5,
+          });
+          const winner = unambiguousSearchMatch(search);
+          if (!winner) {
+            throw new Error(
+              `Semantic query matched ${search.total} elements; refine it before using tap_element in an action batch`,
+            );
+          }
+          selector = accessibilitySelectorSchema.parse({
+            ref: winner.element.ref,
+          });
+        } else {
+          selector = accessibilitySelectorSchema.parse(action);
+        }
+        const matches = await session.resolveActionableElement(selector);
+        const element = matches.matches[0];
+        const frame = element?.frame?.normalized;
+        if (
+          !element ||
+          !frame ||
+          frame.width <= 0 ||
+          frame.height <= 0 ||
+          element.enabled === false
+        ) {
+          throw new Error(
+            "The semantic tap target is unavailable, disabled, or has no visible frame",
+          );
+        }
+        return session.dispatchInput({
+          method: "input.tap",
+          params: { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
+        });
+      }
+      case "wait_for_element": {
+        const selector = accessibilitySelectorSchema.parse(action);
+        const result = await session.requireClient().request("accessibility.wait", {
+          ...(session.device?.id ? { deviceId: session.device.id } : {}),
+          ...(session.device?.udid ? { udid: session.device.udid } : {}),
+          selector,
+          state: action.state,
+          timeoutMs: action.timeoutMs,
+        });
+        // Refresh once so the match becomes the current semantic cache for the next action.
+        await session.accessibilitySnapshot();
+        return result;
+      }
+    }
+  };
 
   server.registerTool(
     "open_simview",
@@ -260,9 +1014,21 @@ export function createServer(
     },
     async ({ deviceId, udid }, context) => {
       const appCapable = supportsMcpApps(server, context, environment);
-      const state = await session.open(deviceId ?? udid, {
-        startRelay: false,
-      });
+      const requestedDevice = deviceId ?? udid;
+      if (!session.client || session.client.connected === false || !session.device) {
+        throw new Error(
+          "No healthy device session is connected; call connect_device before opening the preview",
+        );
+      }
+      if (
+        requestedDevice &&
+        requestedDevice !== session.device.id &&
+        requestedDevice !== session.device.udid
+      ) {
+        throw new Error("open_simview cannot switch devices; call connect_device first");
+      }
+      const state = session.state();
+      await session.enablePreview(true);
       if (appCapable) observeEmbeddedApp();
       else scheduleBrowserFallback();
       return toolResult(`SimView is connected to ${state.device?.name}.`, state);
@@ -274,11 +1040,14 @@ export function createServer(
     {
       title: "Connect device",
       description: "Start or select a device session without opening the interactive preview.",
-      inputSchema: { deviceId: z.string().min(1).optional() },
+      inputSchema: {
+        deviceId: z.string().min(1).optional(),
+        observationMode: z.enum(["hybrid", "semantic"]).default("semantic"),
+      },
       outputSchema: sessionStateSchema,
       _meta: metadata.modelOnly,
     },
-    ({ deviceId }) => connectDevice(deviceId),
+    ({ deviceId, observationMode }) => connectDevice(deviceId, observationMode),
   );
 
   server.registerTool(
@@ -294,80 +1063,111 @@ export function createServer(
   );
 
   server.registerTool(
-    "connect_simulator",
-    {
-      title: "Connect simulator",
-      description: "Start or select a simulator session without opening the interactive preview.",
-      inputSchema: { udid: z.string().min(1).optional() },
-      outputSchema: sessionStateSchema,
-      _meta: metadata.modelOnly,
-    },
-    ({ udid }) => connectDevice(udid),
-  );
-
-  server.registerTool(
-    "app_connect_simulator",
-    {
-      title: "Switch simulator",
-      description: "Switch the Simulator used by the open SimView preview.",
-      inputSchema: { udid: z.string().min(1).optional() },
-      outputSchema: sessionStateSchema,
-      _meta: metadata.appOnly,
-    },
-    ({ udid }) => connectDevice(udid),
-  );
-
-  server.registerTool(
     "list_devices",
     {
       title: "List devices",
-      description: "List local iOS Simulators, Android emulators, and Android devices.",
-      inputSchema: {},
+      description:
+        "List available local devices by default. Continue a stable first-page snapshot with nextCursor; offset remains available for compatibility.",
+      inputSchema: {
+        availableOnly: z.boolean().optional(),
+        platform: z.enum(["ios", "android"]).optional(),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).optional(),
+        cursor: z.string().min(1).max(128).optional(),
+      },
       outputSchema: deviceListSchema,
       _meta: metadata.modelOnly,
     },
-    listDevices,
+    (options) => listDevices(options),
   );
 
   server.registerTool(
     "app_list_devices",
     {
       title: "List devices",
-      description: "List devices available to the open SimView preview.",
-      inputSchema: {},
+      description:
+        "List one bounded snapshot page of devices for the open SimView preview and continue with its cursor.",
+      inputSchema: {
+        availableOnly: z.boolean().optional(),
+        platform: z.enum(["ios", "android"]).optional(),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).optional(),
+        cursor: z.string().min(1).max(128).optional(),
+      },
       outputSchema: deviceListSchema,
       _meta: metadata.appOnly,
     },
-    listDevices,
-  );
-
-  server.registerTool(
-    "list_simulators",
-    {
-      title: "List simulators",
-      description: "Compatibility tool listing local iOS Simulators and Android emulators.",
-      inputSchema: {},
-      outputSchema: simulatorListSchema,
-      _meta: metadata.modelOnly,
-    },
-    listSimulators,
-  );
-
-  server.registerTool(
-    "app_list_simulators",
-    {
-      title: "List simulators",
-      description: "Compatibility tool listing iOS Simulators and Android emulators.",
-      inputSchema: {},
-      outputSchema: simulatorListSchema,
-      _meta: metadata.appOnly,
-    },
-    listSimulators,
+    (options) =>
+      listDevices(
+        options.cursor ? options : { ...options, availableOnly: options.availableOnly ?? false },
+      ),
   );
 
   registerInputTools(server, session);
+  server.registerTool(
+    "observe_screen",
+    {
+      title: "Observe screen",
+      description:
+        "Read prepared semantic state without waiting for an image. Use visual mode only when the user explicitly requests visual inspection.",
+      inputSchema: {
+        mode: z.enum(["auto", "semantic", "visual"]).default("semantic"),
+        sinceObservationId: z.string().uuid().optional(),
+      },
+      outputSchema: observeOutputSchema,
+    },
+    ({ mode, sinceObservationId }) => observe({ mode, sinceObservationId }),
+  );
+  server.registerTool(
+    "perform_actions",
+    {
+      title: "Perform actions",
+      description:
+        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation.",
+      inputSchema: {
+        actions: z.array(actionSchema).min(1).max(20),
+        observe: z.enum(["auto", "semantic", "visual", "none"]).default("semantic"),
+        settleQuietMs: z.number().int().min(20).max(500).default(75),
+        maxWaitMs: z.number().int().min(0).max(5_000).default(500),
+      },
+      outputSchema: z.object({
+        actionCount: z.number().int().min(1).max(20),
+        durationMs: z.number().nonnegative(),
+        receipts: z.array(genericObjectOutputSchema),
+        observation: observeOutputSchema.optional(),
+      }),
+    },
+    async ({ actions, observe: observationMode, settleQuietMs, maxWaitMs }) => {
+      const started = performance.now();
+      const baseline =
+        observationMode === "none" ? undefined : await captureObservationBaseline(session);
+      const receipts = [];
+      for (const action of actions) receipts.push(await dispatchAction(action));
+      if (observationMode === "none") {
+        return toolResult("Ordered actions completed.", {
+          actionCount: actions.length,
+          durationMs: performance.now() - started,
+          receipts,
+        });
+      }
+      const observed = await observe({
+        mode: observationMode,
+        afterRevision: baseline?.afterRevision,
+        afterVisualRevision: baseline?.afterVisualRevision,
+        postAction: { beforeSemanticHash: baseline?.beforeSemanticHash },
+        settleQuietMs,
+        maxWaitMs,
+      });
+      return toolResultWithContent(observed.content, {
+        actionCount: actions.length,
+        durationMs: performance.now() - started,
+        receipts,
+        observation: observed.structuredContent,
+      });
+    },
+  );
   registerAppBridgeTools(server, session, metadata);
-  registerAccessibilityTools(server, session, metadata);
+  registerAccessibilityTools(server, session, metadata, observe);
   registerAnnotationTools(server, session, metadata);
 
   server.registerTool(
@@ -478,6 +1278,27 @@ export function createServer(
     },
   );
 
+  server.registerResource(
+    "SimView accessibility tree",
+    session.accessibilityResourceUri,
+    {
+      description: "The latest settled accessibility tree for this SimView review.",
+      mimeType: "application/json",
+    },
+    async (uri) => {
+      const resource = accessibilityResourceSchema.parse(await session.accessibilityResource());
+      return {
+        contents: [
+          {
+            uri: uri.toString(),
+            mimeType: "application/json",
+            text: JSON.stringify(resource),
+          },
+        ],
+      };
+    },
+  );
+
   return server;
 }
 
@@ -485,6 +1306,19 @@ function registerAccessibilityTools(
   server: McpServer,
   session: SimViewSession,
   metadata: ResourceMetadata,
+  observe: (input: {
+    mode?: "auto" | "semantic" | "visual" | undefined;
+    afterRevision?: string | undefined;
+    afterVisualRevision?: number | undefined;
+    postAction?: { beforeSemanticHash?: string | undefined };
+    settleQuietMs?: number | undefined;
+    maxWaitMs?: number | undefined;
+  }) => Promise<{
+    content: Array<
+      { type: "text"; text: string } | { type: "image"; data: string; mimeType: "image/jpeg" }
+    >;
+    structuredContent: Record<string, unknown>;
+  }>,
 ): void {
   const selectorSchema = {
     ref: z.string().optional(),
@@ -494,6 +1328,13 @@ function registerAccessibilityTools(
     value: z.string().optional(),
     exact: z.boolean().default(true),
     index: z.number().int().min(0).optional(),
+  };
+  const tapElementInputSchema = {
+    ...selectorSchema,
+    query: z.string().trim().min(1).max(200).optional(),
+    observe: z.enum(["semantic", "visual", "none"]).default("semantic"),
+    settleQuietMs: z.number().int().min(20).max(500).default(75),
+    maxWaitMs: z.number().int().min(0).max(5_000).default(500),
   };
   const getAccessibilityTree = async (
     scope: "interactive" | "visible" | "full",
@@ -575,15 +1416,36 @@ function registerAccessibilityTools(
     },
   );
   const tapElement = async (selector: unknown) => {
-    const parsedSelector = accessibilitySelectorSchema.parse(selector);
-    const result = await session.findElements(parsedSelector);
-    const index = parsedSelector.index ?? 0;
+    const input = z.object(tapElementInputSchema).parse(selector);
+    let parsedSelector: z.output<typeof accessibilitySelectorSchema>;
+    if (input.query) {
+      const search = await session.searchElements({
+        query: input.query,
+        actionableOnly: true,
+        visibleOnly: true,
+        limit: 5,
+      });
+      const winner = unambiguousSearchMatch(search);
+      if (!winner) {
+        return toolResult("The semantic query is ambiguous; no tap was sent.", {
+          candidates: search.matches,
+          count: search.total,
+          tapped: false,
+        });
+      }
+      parsedSelector = accessibilitySelectorSchema.parse({
+        ref: winner.element.ref,
+      });
+    } else {
+      parsedSelector = accessibilitySelectorSchema.parse(input);
+    }
+    const result = await session.resolveActionableElement(parsedSelector);
     if (result.count !== 1 && parsedSelector.index === undefined) {
       throw new Error(
         `Selector matched ${result.count} elements; refine the selector or pass index`,
       );
     }
-    const match = result.matches[index];
+    const match = result.matches[0];
     const frame = match?.frame?.normalized;
     if (!match) throw new Error("The selected element does not exist");
     if (match.enabled === false) throw new Error("The selected element is disabled");
@@ -594,12 +1456,31 @@ function registerAccessibilityTools(
     if (!session.device?.capabilities.input.touch) {
       throw new Error("Tap is not supported by the selected device");
     }
-    const receipt = await session.requireClient().request("input.tap", point);
-    return toolResult("Physical element tap accepted; observe the screen to verify the outcome.", {
+    const baseline =
+      input.observe === "none" ? undefined : await captureObservationBaseline(session);
+    const receipt = await session.dispatchInput({ method: "input.tap", params: point });
+    if (input.observe === "none") {
+      return toolResult("Physical element tap accepted.", {
+        selector: parsedSelector,
+        element: match,
+        point,
+        receipt,
+      });
+    }
+    const observed = await observe({
+      mode: input.observe,
+      afterRevision: baseline?.afterRevision,
+      afterVisualRevision: baseline?.afterVisualRevision,
+      postAction: { beforeSemanticHash: baseline?.beforeSemanticHash },
+      settleQuietMs: input.settleQuietMs,
+      maxWaitMs: input.maxWaitMs,
+    });
+    return toolResultWithContent(observed.content, {
       selector: parsedSelector,
       element: match,
       point,
       receipt,
+      observation: observed.structuredContent,
     });
   };
   const inspectPoint = async (x: number, y: number) => {
@@ -631,73 +1512,6 @@ function registerAccessibilityTools(
       "The target app relaunched and connected to the UIKit probe.",
       await session.enableProbe(bundleId),
     );
-
-  server.registerTool(
-    "observe_screen",
-    {
-      title: "Observe screen",
-      description:
-        "Capture the selected device as a PNG and return semantic context when available. The screenshot is still returned when semantic inspection fails.",
-      inputSchema: {},
-      outputSchema: observeOutputSchema,
-    },
-    async () => {
-      const frameStarted = new Date();
-      const screenshot = await session.screenshot();
-      const frameCapturedAt = new Date();
-      try {
-        const result = await session.elementSnapshot("interactive");
-        const snapshot = session.lastAccessibility;
-        if (!snapshot) throw new Error("Semantic fallback was not captured");
-        const accessibilityCapturedAt = new Date(snapshot.capturedAt);
-        return {
-          content: [
-            {
-              type: "image" as const,
-              data: Buffer.from(screenshot.bytes).toString("base64"),
-              mimeType: "image/png",
-            },
-            { type: "text" as const, text: compactElementTree(result) },
-          ],
-          structuredContent: {
-            frameId: screenshot.frameId,
-            frameCapturedAt: frameCapturedAt.toISOString(),
-            snapshot,
-            elements: result.snapshot,
-            screenContext: result.screenContext,
-            accessibilityCapturedAt: snapshot.capturedAt,
-            elementsCapturedAt: result.snapshot.capturedAt,
-            captureDeltaMs: Math.max(0, accessibilityCapturedAt.getTime() - frameStarted.getTime()),
-            fallback: result.fallback,
-          },
-        };
-      } catch (error) {
-        const semanticError = {
-          code: "semantic_inspection_failed",
-          message: error instanceof Error ? error.message : String(error),
-          recoverable: true,
-        };
-        return {
-          content: [
-            {
-              type: "image" as const,
-              data: Buffer.from(screenshot.bytes).toString("base64"),
-              mimeType: "image/png",
-            },
-            {
-              type: "text" as const,
-              text: `Semantic inspection unavailable: ${semanticError.message}`,
-            },
-          ],
-          structuredContent: {
-            frameId: screenshot.frameId,
-            frameCapturedAt: frameCapturedAt.toISOString(),
-            semanticError,
-          },
-        };
-      }
-    },
-  );
 
   server.registerTool(
     "get_element_tree",
@@ -776,6 +1590,30 @@ function registerAccessibilityTools(
       return toolResult(`Matched ${result.count} accessible element(s).`, result);
     },
   );
+  server.registerTool(
+    "search_elements",
+    {
+      title: "Search elements",
+      description:
+        "Search the current semantic tree with a natural-language query and return bounded ranked matches. Use the winning ref with tap_element; this tool never captures or returns an image.",
+      inputSchema: {
+        query: z.string().trim().min(1).max(200),
+        roles: z.array(z.string().trim().min(1)).max(10).optional(),
+        actionableOnly: z.boolean().default(true),
+        visibleOnly: z.boolean().default(true),
+        limit: z.number().int().min(1).max(20).default(10),
+      },
+      outputSchema: searchElementsOutputSchema,
+      _meta: metadata.modelOnly,
+    },
+    async (query) => {
+      const result = await session.searchElements(elementSearchQuerySchema.parse(query));
+      return toolResult(
+        `Matched ${result.total} semantic element(s); returned ${result.count} ranked result(s).`,
+        result,
+      );
+    },
+  );
 
   server.registerTool(
     "tap_element",
@@ -783,13 +1621,8 @@ function registerAccessibilityTools(
       title: "Tap element",
       description:
         "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through device input.",
-      inputSchema: selectorSchema,
-      outputSchema: z.object({
-        selector: accessibilitySelectorSchema,
-        element: accessibilityNodeSchema,
-        point: normalizedPointSchema,
-        receipt: acceptedOutputSchema,
-      }),
+      inputSchema: tapElementInputSchema,
+      outputSchema: genericObjectOutputSchema,
       _meta: metadata.modelOnly,
     },
     tapElement,
@@ -800,13 +1633,8 @@ function registerAccessibilityTools(
     {
       title: "Tap preview element",
       description: "Re-resolve and physically tap an element selected in the open preview.",
-      inputSchema: selectorSchema,
-      outputSchema: z.object({
-        selector: accessibilitySelectorSchema,
-        element: accessibilityNodeSchema,
-        point: normalizedPointSchema,
-        receipt: acceptedOutputSchema,
-      }),
+      inputSchema: tapElementInputSchema,
+      outputSchema: genericObjectOutputSchema,
       _meta: metadata.appOnly,
     },
     tapElement,
@@ -970,6 +1798,17 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
       input({ method: "input.swipe", params: { from, to, durationMs } }),
   );
   server.registerTool(
+    "perform_gesture",
+    {
+      title: "Perform gesture",
+      description:
+        "Perform one or two normalized timestamped pointer tracks (up to five seconds and 120 total samples).",
+      inputSchema: { tracks: gestureTracksSchema },
+      outputSchema: acceptedOutputSchema,
+    },
+    ({ tracks }) => input({ method: "input.gesture", params: { tracks } }),
+  );
+  server.registerTool(
     "long_press",
     {
       title: "Long press",
@@ -1075,6 +1914,7 @@ function registerAppBridgeTools(
             "input.tap",
             "input.longPress",
             "input.swipe",
+            "input.gesture",
             "input.button",
             "input.typeText",
           ]),
@@ -1172,11 +2012,19 @@ async function appHtml(initialState: SessionState): Promise<string> {
   return inlineAppModule(template, script, initialState);
 }
 
-function toolResult(text: string, structuredContent: unknown) {
+function structuredJson(structuredContent: unknown) {
   const json = jsonObjectSchema.parse(JSON.parse(JSON.stringify(structuredContent)));
+  return json;
+}
+
+function toolResultWithContent<T>(content: T, structuredContent: unknown) {
+  return { content, structuredContent: structuredJson(structuredContent) };
+}
+
+function toolResult(text: string, structuredContent: unknown) {
   return {
     content: [{ type: "text" as const, text }],
-    structuredContent: json,
+    structuredContent: structuredJson(structuredContent),
   };
 }
 

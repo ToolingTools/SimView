@@ -15,10 +15,48 @@ func validateAccessibilitySelector(_ selector: [String: Any]) throws {
     }
 }
 
-final class AccessibilityService {
+final class AccessibilityService: @unchecked Sendable {
     private var screenBounds: [String: (width: Double, height: Double)] = [:]
+    private let observation: AccessibilityObservationCoordinator
+    private var observedUDID: String?
+    private(set) var observationStrategy = "snapshot-diff"
+
+    init(observation: AccessibilityObservationCoordinator = AccessibilityObservationCoordinator()) {
+        self.observation = observation
+    }
 
     var available: Bool { SVAccessibilityBridge.isAvailable() }
+
+    @discardableResult
+    func startObservation(udid: String, onEvent: @escaping @Sendable () -> Void) -> Bool {
+        if observedUDID == udid { return observationStrategy == "ios-axp" }
+        if let observedUDID, let device = SimulatorRuntime.object(udid: observedUDID) {
+            SVAccessibilityBridge.stopObservingDevice(device)
+        }
+        guard let device = SimulatorRuntime.object(udid: udid) else {
+            observationStrategy = "snapshot-diff"
+            return false
+        }
+        let started: Bool
+        do {
+            try SVAccessibilityBridge.startObservingDevice(device, handler: onEvent)
+            started = true
+        } catch {
+            started = false
+        }
+        observedUDID = started ? udid : nil
+        observationStrategy = started ? "ios-axp" : "snapshot-diff"
+        return started
+    }
+
+    func stopObservation(udid: String? = nil) {
+        guard let observedUDID, udid == nil || udid == observedUDID else { return }
+        if let device = SimulatorRuntime.object(udid: observedUDID) {
+            SVAccessibilityBridge.stopObservingDevice(device)
+        }
+        self.observedUDID = nil
+        observationStrategy = "snapshot-diff"
+    }
 
     func snapshot(
         udid: String,
@@ -127,10 +165,32 @@ final class AccessibilityService {
             )
         }
         let deadline = Date().addingTimeInterval(Double(max(1, min(timeoutMs, 30_000))) / 1_000)
+        var revision: String?
         var lastCount = 0
+        var lastSnapshot: [String: Any] = [:]
+        var lastMatches: [[String: Any]] = []
         repeat {
-            let result = try find(udid: udid, selector: selector, scope: "visible")
-            lastCount = result["count"] as? Int ?? 0
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            let observed = try observation.observe(
+                afterRevision: revision,
+                scope: "visible",
+                maxNodes: 5_000,
+                settleQuietMilliseconds: 75,
+                maximumWaitMilliseconds: min(500, Int(remaining * 1_000)),
+                strategy: "snapshot-diff"
+            ) { [weak self] scope, maxNodes in
+                guard let self else {
+                    throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "Accessibility service is unavailable")
+                }
+                return try self.snapshot(udid: udid, scope: scope, maxNodes: maxNodes)
+            }
+            revision = observed.revision
+            lastSnapshot = observed.snapshot
+            lastMatches = []
+            if let root = observed.snapshot["root"] as? [String: Any] {
+                collectMatches(root, selector: selector, matches: &lastMatches)
+            }
+            lastCount = lastMatches.count
             let satisfied = state == "hidden" ? lastCount == 0 : lastCount > 0
             if satisfied {
                 return [
@@ -138,11 +198,10 @@ final class AccessibilityService {
                     "state": state,
                     "satisfied": true,
                     "count": lastCount,
-                    "snapshotId": result["snapshotId"] as Any,
-                    "matches": result["matches"] as Any,
+                    "snapshotId": lastSnapshot["snapshotId"] as Any,
+                    "matches": lastMatches,
                 ]
             }
-            Thread.sleep(forTimeInterval: 0.1)
         } while Date() < deadline
         throw SimViewError(
             "ACCESSIBILITY_REQUEST_TIMEOUT",

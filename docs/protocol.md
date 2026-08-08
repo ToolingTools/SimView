@@ -1,4 +1,4 @@
-# Native protocol version 2
+# Native protocol version 3
 
 The TypeScript source of truth for this protocol is
 `packages/contracts/src/protocol.ts`. It exports the `SimViewMethodMap`,
@@ -37,7 +37,7 @@ The first request must be:
 ```json
 {
   "id": "uuid",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "method": "hello",
   "params": {
     "token": "32-byte random session token",
@@ -58,7 +58,7 @@ After the handshake, each request has the following shape:
 ```json
 {
   "id": "uuid",
-  "protocolVersion": 2,
+  "protocolVersion": 3,
   "method": "devices.list",
   "params": {}
 }
@@ -75,10 +75,12 @@ method's result shape.
 - `devices.list`
 - `device.describe`
 - `capture.start`
+- `capture.preview`
 - `capture.stop`
 - `capture.keyframe`
 - `capture.screenshot`
 - `input.touch`
+- `input.gesture`
 - `input.tap`
 - `input.longPress`
 - `input.swipe`
@@ -87,6 +89,7 @@ method's result shape.
 - `input.button`
 - `device.orientation.set`
 - `accessibility.snapshot`
+- `accessibility.observe`
 - `accessibility.elementAtPoint`
 - `accessibility.find`
 - `accessibility.wait`
@@ -106,19 +109,34 @@ namespaced identifier such as `ios:<uuid>` or `android:<adb-serial>`;
 CoreSimulator and ADB spelling. `capabilities` declares capture, touch, text,
 buttons, orientation, accessibility, Android context, and UIKit probe support.
 `input.rawTouch` distinguishes continuous contact injection from discrete
-tap/swipe shell fallbacks when present.
+tap/swipe shell fallbacks when present. `input.multiTouch` advertises support
+for two simultaneous pointer tracks.
 `udid` is present for iOS and `serial` for Android. Selected-device parameters
 use `deviceId`; `udid` remains an iOS compatibility alias for one release.
 
 Public coordinates are normalized from 0 to 1. `input.touch` carries
 `contactId`, `phase`, `x`, `y`, and may carry pressure and a monotonic timestamp.
-Version 2 injects the first contact; the stable shape reserves compatible
-multi-touch expansion.
+`input.gesture` carries one or two pointer tracks with bounded, monotonic
+timestamps. On iOS Simulator, two-track gestures use the private SimulatorKit
+legacy HID client and `IndigoHIDMessageForMouseNSEvent`; the capability is
+reported only when both are available in the active Xcode runtime. This is the
+same class of Simulator-only HID path used for pointer input and supports pinch
+gestures without synthesizing Option-key UI interaction. Android uses the
+packaged agent's multi-pointer `MotionEvent` injection.
 
 Accessibility responses carry `schemaVersion: 1` and generation-scoped
 `ax:<snapshot>:<ordinal>` references. References are not stable across
 navigation; semantic actions re-resolve identifiers, roles, and names before
 using existing physical HID input.
+
+`accessibility.observe` accepts an optional opaque `afterRevision`, a scope,
+node limit, quiet-settle window, and bounded maximum wait. It returns the
+settled snapshot together with `revision`, `eventChanged`, `stable`,
+`timedOut`, `strategy`, and settlement timestamps. iOS uses the AX observation
+path when available and snapshot diffing otherwise; Android prefers persistent
+`UiAutomation` events and direct root capture, falling back to a bounded
+`uiautomator dump`. Accessibility event callbacks only wake the coordinator;
+tree traversal stays off callback threads.
 
 Accessibility selectors must include at least one of `ref`, `identifier`,
 `role`, `name`, or `value`. `accessibility.wait` uses `state: "visible"` or
@@ -129,8 +147,10 @@ bundle before requesting context or changing it.
 At the MCP layer, `get_element_tree` and its app-only alias return a versioned
 element snapshot plus frame-scoped screen context. The snapshot source is
 `react-native-fiber` when a matching local Metro/Hermes development target can
-be inspected, otherwise `core-simulator-ax` on iOS or `android-uiautomator` on
-Android. React Native nodes use
+be inspected, otherwise `core-simulator-ax` on iOS or
+`android-agent-uiautomator` is used when the persistent Android agent is
+available; `android-uiautomator` is the bounded fallback when it is not.
+React Native nodes use
 generation-scoped `rn:<ordinal>` references and may include component ancestry,
 host type, test ID, visible text, measured bounds, and a project-relative source
 location. Native results from this unified layer include a bounded Metro
@@ -149,7 +169,7 @@ The native server supports multiple authenticated clients and broadcasts one
 H.264 or MJPEG stream to clients that requested that codec. `capture.stop` is a
 process-global capture operation in the current protocol; callers should treat
 device selection, orientation, physical input, and probe state as device-global
-rather than review-local. Protocol version 2 supports both the explicit
+rather than review-local. Protocol version 3 supports both the explicit
 ephemeral client path and the shared daemon client path; the latter is selected
 by `SimViewClient.acquire` and is keyed by platform plus native identifier and compatible
 binary/protocol identity. Review isolation is provided above the native

@@ -1,6 +1,7 @@
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
+import { assertNoRepowiseArtifacts, createPackagedMcpConfig } from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
 const stage = join(root, "artifacts", "plugin", "simview");
@@ -59,9 +60,15 @@ await rm(join(root, "artifacts", "plugin"), { recursive: true, force: true });
 await mkdir(join(stage, "bin"), { recursive: true });
 await mkdir(join(stage, "app"), { recursive: true });
 await mkdir(join(stage, "assets"), { recursive: true });
-await $`cp -R ${join(root, ".codex-plugin")} ${join(root, ".claude-plugin")} ${join(root, "skills")} ${stage}`;
+await mkdir(join(stage, "skills"), { recursive: true });
+await $`cp -R ${join(root, ".codex-plugin")} ${join(root, ".claude-plugin")} ${stage}`;
+await $`cp -R ${join(root, "skills", "simview")} ${join(stage, "skills", "simview")}`;
 await $`cp ${join(root, "assets/icon-512.png")} ${join(stage, "assets/icon-512.png")}`;
-await $`cp ${join(root, ".mcp.json")} ${join(root, "README.md")} ${join(root, "LICENSE")} ${join(root, "THIRD_PARTY_NOTICES.md")} ${stage}`;
+await $`cp ${join(root, "README.md")} ${join(root, "LICENSE")} ${join(root, "THIRD_PARTY_NOTICES.md")} ${stage}`;
+await writeFile(
+  join(stage, ".mcp.json"),
+  `${JSON.stringify(createPackagedMcpConfig(await Bun.file(join(root, ".mcp.json")).json()), null, 2)}\n`,
+);
 await $`cp -R ${join(root, "packages/app/dist")} ${join(stage, "app/dist")}`;
 await $`cp ${join(root, "packages/cli/dist/simview")} ${join(stage, "bin/simview")}`;
 await $`cp ${join(root, "packages/core/bin/simview-core")} ${join(stage, "bin/simview-core")}`;
@@ -71,6 +78,7 @@ await $`chmod +x ${join(stage, "bin/simview")} ${join(stage, "bin/simview-core")
 for (const path of new Bun.Glob("**/.DS_Store").scanSync({ cwd: stage, absolute: true })) {
   await rm(path, { force: true });
 }
+await assertNoRepowiseArtifacts(stage);
 await rm(output, { force: true });
 await $`ditto -c -k --norsrc --keepParent ${stage} ${output}`;
 console.log(output);

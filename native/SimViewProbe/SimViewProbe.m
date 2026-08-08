@@ -56,7 +56,7 @@ static NSDictionary *SVController(UIViewController *controller, NSString *relati
       [children addObject:presented];
   }
   if ([controller isKindOfClass:UINavigationController.class]) {
-    UINavigationController *navigation = (UINavigationController *)controller;
+    UINavigationController *navigation = (UINavigationController *) controller;
     for (UIViewController *child in navigation.viewControllers) {
       NSDictionary *item = SVController(
           child,
@@ -66,7 +66,7 @@ static NSDictionary *SVController(UIViewController *controller, NSString *relati
         [children addObject:item];
     }
   } else if ([controller isKindOfClass:UITabBarController.class]) {
-    UITabBarController *tabs = (UITabBarController *)controller;
+    UITabBarController *tabs = (UITabBarController *) controller;
     for (UIViewController *child in tabs.viewControllers) {
       NSDictionary *item =
           SVController(child, child == tabs.selectedViewController ? @"tab-selected" : @"tab-child",
@@ -75,7 +75,7 @@ static NSDictionary *SVController(UIViewController *controller, NSString *relati
         [children addObject:item];
     }
   } else if ([controller isKindOfClass:UISplitViewController.class]) {
-    for (UIViewController *child in ((UISplitViewController *)controller).viewControllers) {
+    for (UIViewController *child in ((UISplitViewController *) controller).viewControllers) {
       NSDictionary *item = SVController(child, @"split-child", child.view.window != nil, seen);
       if (item.count)
         [children addObject:item];
@@ -102,11 +102,11 @@ static NSArray *SVVisibleControllerPath(UIViewController *controller) {
     if (current.presentedViewController)
       current = current.presentedViewController;
     else if ([current isKindOfClass:UINavigationController.class]) {
-      current = ((UINavigationController *)current).visibleViewController;
+      current = ((UINavigationController *) current).visibleViewController;
     } else if ([current isKindOfClass:UITabBarController.class]) {
-      current = ((UITabBarController *)current).selectedViewController;
+      current = ((UITabBarController *) current).selectedViewController;
     } else if ([current isKindOfClass:UISplitViewController.class]) {
-      current = ((UISplitViewController *)current).viewControllers.lastObject;
+      current = ((UISplitViewController *) current).viewControllers.lastObject;
     } else {
       current = current.childViewControllers.lastObject;
     }
@@ -119,7 +119,7 @@ static NSArray *SVSceneContext(void) {
   for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
     if (![scene isKindOfClass:UIWindowScene.class])
       continue;
-    UIWindowScene *windowScene = (UIWindowScene *)scene;
+    UIWindowScene *windowScene = (UIWindowScene *) scene;
     NSMutableArray *windows = [NSMutableArray array];
     for (UIWindow *window in windowScene.windows) {
       NSMutableDictionary *item = [@{
@@ -162,7 +162,7 @@ static UIWindow *SVTargetWindow(CGPoint point) {
   for (UIScene *scene in scenes) {
     if (![scene isKindOfClass:UIWindowScene.class])
       continue;
-    NSArray *windows = [((UIWindowScene *)scene).windows
+    NSArray *windows = [((UIWindowScene *) scene).windows
         sortedArrayUsingComparator:^NSComparisonResult(UIWindow *a, UIWindow *b) {
           if (a.isKeyWindow != b.isKeyWindow)
             return a.isKeyWindow ? NSOrderedAscending : NSOrderedDescending;
@@ -305,7 +305,7 @@ static NSArray<UIWindow *> *SVAllWindows(void) {
   NSMutableArray *windows = [NSMutableArray array];
   for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
     if ([scene isKindOfClass:UIWindowScene.class]) {
-      [windows addObjectsFromArray:((UIWindowScene *)scene).windows];
+      [windows addObjectsFromArray:((UIWindowScene *) scene).windows];
     }
   }
   return windows;
@@ -329,7 +329,7 @@ static NSDictionary *SVFindViews(NSDictionary *params) {
     @"matches" : matches,
     @"count" : @(matches.count),
     @"visited" : @(visited),
-    @"truncated" : @((BOOL)(visited >= maxNodes)),
+    @"truncated" : @((BOOL) (visited >= maxNodes)),
   };
 }
 
@@ -351,7 +351,7 @@ static NSDictionary *SVFullHierarchy(NSDictionary *params) {
     @"roots" : roots,
     @"nodeCount" : @(count),
     @"maxDepth" : @(maxDepth),
-    @"truncated" : @((BOOL)(count >= maxNodes)),
+    @"truncated" : @((BOOL) (count >= maxNodes)),
   };
 }
 
@@ -377,7 +377,7 @@ static BOOL SVWriteLine(int socketFD, NSDictionary *object) {
   NSData *json = [NSJSONSerialization dataWithJSONObject:object options:0 error:nil];
   NSMutableData *line = [json mutableCopy];
   [line appendBytes:"\n" length:1];
-  return send(socketFD, line.bytes, line.length, 0) == (ssize_t)line.length;
+  return send(socketFD, line.bytes, line.length, 0) == (ssize_t) line.length;
 }
 
 static void SVRunProbe(void) {
@@ -390,9 +390,9 @@ static void SVRunProbe(void) {
   int fd = socket(AF_INET, SOCK_STREAM, 0);
   struct sockaddr_in address = {0};
   address.sin_family = AF_INET;
-  address.sin_port = htons((uint16_t)port);
+  address.sin_port = htons((uint16_t) port);
   address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-  if (connect(fd, (struct sockaddr *)&address, sizeof(address)) != 0) {
+  if (connect(fd, (struct sockaddr *) &address, sizeof(address)) != 0) {
     close(fd);
     return;
   }
@@ -408,12 +408,12 @@ static void SVRunProbe(void) {
     ssize_t count = recv(fd, bytes, sizeof(bytes), 0);
     if (count <= 0)
       break;
-    [buffer appendBytes:bytes length:(NSUInteger)count];
+    [buffer appendBytes:bytes length:(NSUInteger) count];
     while (true) {
       const void *newline = memchr(buffer.bytes, '\n', buffer.length);
       if (!newline)
         break;
-      NSUInteger length = (const uint8_t *)newline - (const uint8_t *)buffer.bytes;
+      NSUInteger length = (const uint8_t *) newline - (const uint8_t *) buffer.bytes;
       NSData *line = [buffer subdataWithRange:NSMakeRange(0, length)];
       [buffer replaceBytesInRange:NSMakeRange(0, length + 1) withBytes:NULL length:0];
       NSDictionary *request = [NSJSONSerialization JSONObjectWithData:line options:0 error:nil];

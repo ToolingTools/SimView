@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
-export const ANDROID_AGENT_PROTOCOL_VERSION = 2;
+export const ANDROID_AGENT_PROTOCOL_VERSION = 4;
 
 export async function validateAndroidAgentProtocol(root: string): Promise<void> {
   const mirrors = [

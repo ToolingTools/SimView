@@ -4,6 +4,11 @@
       "command": "./bin/simview",
       "args": ["mcp"],
       "cwd": "."
+    },
+    "repowise": {
+      "command": "repowise",
+      "args": ["mcp", "--transport", "stdio"],
+      "description": "repowise: codebase intelligence \u2014 docs, graph, git signals, dead code, decisions"
     }
   }
 }
