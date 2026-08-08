@@ -10,7 +10,6 @@
       "!!**/.simview",
       "!!**/artifacts",
       "!!**/coverage",
-      "!!**/graphify-out",
       "!!**/node_modules",
       "!!**/native/SimViewCore/.build",
       "!!**/native/SimViewProbe/build",

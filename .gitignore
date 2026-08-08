@@ -11,12 +11,11 @@ packages/core/bin/
 .simview/
 coverage/
 
-# Local agent tooling and generated knowledge graphs
+# Local agent tooling and generated indexes
 .codex/
 .claude/
 .repowise/
 .repowise-workspace/
-graphify-out/
 
 # Local signing credentials
 *.p12
