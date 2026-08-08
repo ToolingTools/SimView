@@ -55,12 +55,69 @@ const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
 const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 const BROWSER_FALLBACK_DELAY_MS = 5_000;
 const DEVICE_PAGE_LIMIT = 25;
+const DEVICE_INVENTORY_SNAPSHOT_TTL_MS = 30_000;
+const DEVICE_INVENTORY_SNAPSHOT_LIMIT = 4;
+const DEVICE_INVENTORY_RETAINED_LIMIT = 250;
 
 export interface DeviceListOptions {
   availableOnly?: boolean | undefined;
   platform?: "ios" | "android" | undefined;
   offset?: number | undefined;
   limit?: number | undefined;
+  cursor?: string | undefined;
+}
+
+type DeviceInventorySnapshot = {
+  devices: DeviceDescription[];
+  inventoryTotal: number;
+  total: number;
+  limit: number;
+  offset: number;
+  expiresAt: number;
+  truncated: boolean;
+};
+
+class DeviceInventorySnapshotCache {
+  readonly #entries = new Map<string, DeviceInventorySnapshot>();
+
+  constructor(
+    private readonly ttlMilliseconds: number,
+    private readonly now: () => number,
+  ) {}
+
+  clear() {
+    this.#entries.clear();
+  }
+
+  create(snapshot: Omit<DeviceInventorySnapshot, "expiresAt">): string {
+    this.#pruneExpired();
+    while (this.#entries.size >= DEVICE_INVENTORY_SNAPSHOT_LIMIT) {
+      const oldest = this.#entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.#entries.delete(oldest);
+    }
+    const cursor = randomBytes(32).toString("base64url");
+    this.#entries.set(cursor, {
+      ...snapshot,
+      expiresAt: this.now() + this.ttlMilliseconds,
+    });
+    return cursor;
+  }
+
+  continue(cursor: string): DeviceInventorySnapshot {
+    this.#pruneExpired();
+    const snapshot = this.#entries.get(cursor);
+    if (!snapshot) throw new Error("Device inventory cursor is invalid or expired");
+    this.#entries.delete(cursor);
+    return snapshot;
+  }
+
+  #pruneExpired() {
+    const now = this.now();
+    for (const [cursor, snapshot] of this.#entries) {
+      if (snapshot.expiresAt <= now) this.#entries.delete(cursor);
+    }
+  }
 }
 
 export function deviceListPage(inventory: DeviceDescription[], options: DeviceListOptions = {}) {
@@ -87,6 +144,20 @@ export function deviceListPage(inventory: DeviceDescription[], options: DeviceLi
     limit,
     hasMore: offset + devices.length < filtered.length,
   };
+}
+
+function sortedDeviceInventory(inventory: DeviceDescription[], options: DeviceListOptions) {
+  const availableOnly = options.availableOnly ?? true;
+  return inventory
+    .filter((device) => !availableOnly || device.available)
+    .filter((device) => !options.platform || device.platform === options.platform)
+    .toSorted(
+      (left, right) =>
+        Number(right.available) - Number(left.available) ||
+        left.platform.localeCompare(right.platform) ||
+        left.name.localeCompare(right.name) ||
+        left.id.localeCompare(right.id),
+    );
 }
 
 function resourceMetadata(reviewId: string) {
@@ -336,9 +407,16 @@ export function createServer(
   {
     browserFallbackDelayMs = BROWSER_FALLBACK_DELAY_MS,
     environment = process.env,
+    deviceProvider = () =>
+      import("@simview/client").then(({ SimViewClient }) => SimViewClient.listDevices()),
+    deviceInventorySnapshotTTLMS = DEVICE_INVENTORY_SNAPSHOT_TTL_MS,
+    now = Date.now,
   }: {
     browserFallbackDelayMs?: number;
     environment?: Readonly<Record<string, string | undefined>>;
+    deviceProvider?: () => Promise<DeviceDescription[]>;
+    deviceInventorySnapshotTTLMS?: number;
+    now?: () => number;
   } = {},
 ): McpServer {
   const server = new McpServer({ name: "simview", version: VERSION });
@@ -347,6 +425,7 @@ export function createServer(
   // so their resource read is the only reliable acknowledgement before fallback.
   let embeddedAppObserved = false;
   let browserFallback: ReturnType<typeof setTimeout> | undefined;
+  const inventorySnapshots = new DeviceInventorySnapshotCache(deviceInventorySnapshotTTLMS, now);
   const cancelBrowserFallback = () => {
     if (browserFallback) clearTimeout(browserFallback);
     browserFallback = undefined;
@@ -371,7 +450,10 @@ export function createServer(
     }, browserFallbackDelayMs);
     browserFallback.unref?.();
   };
-  server.server.onclose = cancelBrowserFallback;
+  server.server.onclose = () => {
+    cancelBrowserFallback();
+    inventorySnapshots.clear();
+  };
   const connectDevice = async (
     deviceId?: string,
     observationMode: "hybrid" | "semantic" = "semantic",
@@ -380,10 +462,75 @@ export function createServer(
     return toolResult(`SimView is connected to ${state.device?.name}.`, state);
   };
   const listDevices = async (options: DeviceListOptions = {}) => {
-    const inventory = await import("@simview/client").then(({ SimViewClient }) =>
-      SimViewClient.listDevices(),
-    );
-    const page = deviceListPage(inventory, options);
+    if (options.cursor) {
+      if (
+        options.availableOnly !== undefined ||
+        options.platform !== undefined ||
+        options.offset !== undefined ||
+        options.limit !== undefined
+      ) {
+        throw new Error("Continuing device inventory requires only its cursor");
+      }
+      const snapshot = inventorySnapshots.continue(options.cursor);
+      const devices = snapshot.devices.slice(snapshot.offset, snapshot.offset + snapshot.limit);
+      const nextOffset = snapshot.offset + devices.length;
+      const hasMore = nextOffset < snapshot.devices.length;
+      const nextCursor = hasMore
+        ? inventorySnapshots.create({ ...snapshot, offset: nextOffset })
+        : undefined;
+      const page = {
+        devices,
+        inventoryTotal: snapshot.inventoryTotal,
+        total: snapshot.total,
+        returned: devices.length,
+        offset: snapshot.offset,
+        limit: snapshot.limit,
+        hasMore,
+        ...(nextCursor ? { nextCursor } : {}),
+        ...(snapshot.truncated ? { snapshotTruncated: true } : {}),
+      };
+      return toolResult(
+        `Found ${page.total} matching device${page.total === 1 ? "" : "s"}; returned ${page.returned}.`,
+        page,
+      );
+    }
+    const inventory = await deviceProvider();
+    if ((options.offset ?? 0) > 0) {
+      const page = deviceListPage(inventory, options);
+      const label = options.availableOnly === false ? "matching" : "available";
+      return toolResult(
+        `Found ${page.total} ${label} device${page.total === 1 ? "" : "s"}; returned ${page.returned}.`,
+        page,
+      );
+    }
+    const sorted = sortedDeviceInventory(inventory, options);
+    const retained = sorted.slice(0, DEVICE_INVENTORY_RETAINED_LIMIT);
+    const limit = Math.max(1, Math.min(DEVICE_PAGE_LIMIT, options.limit ?? 10));
+    const devices = retained.slice(0, limit);
+    const nextOffset = devices.length;
+    const hasMore = nextOffset < retained.length;
+    const snapshotTruncated = retained.length < sorted.length;
+    const nextCursor = hasMore
+      ? inventorySnapshots.create({
+          devices: retained,
+          inventoryTotal: inventory.length,
+          total: sorted.length,
+          limit,
+          offset: nextOffset,
+          truncated: snapshotTruncated,
+        })
+      : undefined;
+    const page = {
+      devices,
+      inventoryTotal: inventory.length,
+      total: sorted.length,
+      returned: devices.length,
+      offset: 0,
+      limit,
+      hasMore,
+      ...(nextCursor ? { nextCursor } : {}),
+      ...(snapshotTruncated ? { snapshotTruncated: true } : {}),
+    };
     const label = options.availableOnly === false ? "matching" : "available";
     return toolResult(
       `Found ${page.total} ${label} device${page.total === 1 ? "" : "s"}; returned ${page.returned}.`,
@@ -714,12 +861,13 @@ export function createServer(
     {
       title: "List devices",
       description:
-        "List available local devices by default. Set availableOnly to false and page with offset/limit for shutdown or unavailable inventory.",
+        "List available local devices by default. Continue a stable first-page snapshot with nextCursor; offset remains available for compatibility.",
       inputSchema: {
-        availableOnly: z.boolean().default(true),
+        availableOnly: z.boolean().optional(),
         platform: z.enum(["ios", "android"]).optional(),
-        offset: z.number().int().nonnegative().default(0),
-        limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).default(10),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).optional(),
+        cursor: z.string().min(1).max(128).optional(),
       },
       outputSchema: deviceListSchema,
       _meta: metadata.modelOnly,
@@ -731,17 +879,22 @@ export function createServer(
     "app_list_devices",
     {
       title: "List devices",
-      description: "List one bounded page of devices for the open SimView preview.",
+      description:
+        "List one bounded snapshot page of devices for the open SimView preview and continue with its cursor.",
       inputSchema: {
-        availableOnly: z.boolean().default(false),
+        availableOnly: z.boolean().optional(),
         platform: z.enum(["ios", "android"]).optional(),
-        offset: z.number().int().nonnegative().default(0),
-        limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).default(DEVICE_PAGE_LIMIT),
+        offset: z.number().int().nonnegative().optional(),
+        limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).optional(),
+        cursor: z.string().min(1).max(128).optional(),
       },
       outputSchema: deviceListSchema,
       _meta: metadata.appOnly,
     },
-    (options) => listDevices(options),
+    (options) =>
+      listDevices(
+        options.cursor ? options : { ...options, availableOnly: options.availableOnly ?? false },
+      ),
   );
 
   registerInputTools(server, session);

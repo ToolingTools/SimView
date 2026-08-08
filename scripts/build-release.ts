@@ -2,6 +2,7 @@ import { cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 import { ANDROID_AGENT_PROTOCOL_VERSION } from "./android-agent-config";
+import { assertNoRepowiseArtifacts } from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
 const artifacts = join(root, "artifacts", "release");
@@ -81,6 +82,7 @@ await Promise.all([
   cp(join(root, "LICENSE"), join(archiveStage, "LICENSE")),
   cp(join(root, "THIRD_PARTY_NOTICES.md"), join(archiveStage, "THIRD_PARTY_NOTICES.md")),
 ]);
+await assertNoRepowiseArtifacts(archiveStage);
 await $`ditto -c -k --norsrc --keepParent ${archiveStage} ${join(artifacts, `simview-${version}-macos.zip`)}`;
 
 await $`bun ${join(root, "scripts/generate-sbom.ts")} ${join(artifacts, "sbom.cdx.json")}`;

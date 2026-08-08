@@ -28,6 +28,8 @@ export const deviceListSchema = z.object({
   offset: z.number().int().nonnegative().optional(),
   limit: z.number().int().positive().optional(),
   hasMore: z.boolean().optional(),
+  nextCursor: z.string().min(1).optional(),
+  snapshotTruncated: z.boolean().optional(),
 });
 
 export const semanticErrorSchema = z.object({

@@ -478,21 +478,19 @@ function SimView() {
       const devices = embedded
         ? await (async () => {
             const inventory: Device[] = [];
-            let offset = 0;
-            let hasMore = false;
+            let cursor: string | undefined;
             do {
               const result = await bridge.callServerTool({
                 name: "app_list_devices",
-                arguments: { availableOnly: false, offset, limit: 25 },
+                arguments: cursor ? { cursor } : { availableOnly: false, limit: 25 },
               });
               const page = deviceListSchema.parse(result.structuredContent);
               inventory.push(...page.devices);
-              offset += page.returned ?? page.devices.length;
-              hasMore = page.hasMore ?? false;
-              if (hasMore && page.devices.length === 0) {
+              cursor = page.nextCursor;
+              if (cursor && page.devices.length === 0) {
                 throw new Error("Device inventory pagination made no progress");
               }
-            } while (hasMore);
+            } while (cursor);
             return inventory;
           })()
         : await relayFetch("/devices")

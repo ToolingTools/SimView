@@ -19,9 +19,21 @@ struct PreparedObservation: @unchecked Sendable {
 }
 
 final class ObservationCoordinator: @unchecked Sendable {
+    enum ImagePreparationPolicy: Sendable {
+        case eagerOnChange
+        case onDemand
+    }
+
+    typealias PreparedImage = (data: Data, width: Int, height: Int)
+    typealias ImagePreparationHandler = @Sendable (CVPixelBuffer) throws -> PreparedImage
+
     private static let defaultQuietInterval: TimeInterval = 0.075
     private let condition = NSCondition()
     private let imageQueue = DispatchQueue(label: "dev.simview.observation.image", qos: .userInitiated)
+    private let prepareImage: ImagePreparationHandler
+    private let didAttemptImagePreparation: @Sendable () -> Void
+    private let didCompleteImagePreparation: @Sendable () -> Void
+    private var imagePreparationPolicy: ImagePreparationPolicy
     private var frame: CVPixelBuffer?
     private var frameID = "0"
     private var frameRevision: UInt64 = 0
@@ -31,12 +43,44 @@ final class ObservationCoordinator: @unchecked Sendable {
     private var firstChangedFrameAt: Date?
     private var signature: [UInt8]?
     private var preparedImage: Data?
+    private var currentWidth = 0
+    private var currentHeight = 0
     private var preparedWidth = 0
     private var preparedHeight = 0
     private var imageRevision: UInt64 = 0
     private var imageReadyAt: Date?
     private var encodeScheduled = false
     private var generation: UInt64 = 0
+
+    init(
+        imagePreparationPolicy: ImagePreparationPolicy = .eagerOnChange,
+        prepareImage: @escaping ImagePreparationHandler = { try ImageEncoder.preparedJPEG($0) },
+        didAttemptImagePreparation: @escaping @Sendable () -> Void = {},
+        didCompleteImagePreparation: @escaping @Sendable () -> Void = {}
+    ) {
+        self.imagePreparationPolicy = imagePreparationPolicy
+        self.prepareImage = prepareImage
+        self.didAttemptImagePreparation = didAttemptImagePreparation
+        self.didCompleteImagePreparation = didCompleteImagePreparation
+    }
+
+    func setImagePreparationPolicy(_ policy: ImagePreparationPolicy) {
+        condition.lock()
+        imagePreparationPolicy = policy
+        if policy == .onDemand, encodeScheduled {
+            encodeScheduled = false
+            generation &+= 1
+        }
+        let shouldSchedule =
+            policy == .eagerOnChange && frame != nil && imageRevision != changeRevision
+            && !encodeScheduled
+        if shouldSchedule { encodeScheduled = true }
+        let encodeGeneration = generation
+        condition.unlock()
+        if shouldSchedule {
+            scheduleEncode(after: Self.defaultQuietInterval, generation: encodeGeneration)
+        }
+    }
 
     func ingest(_ frame: CVPixelBuffer, frameID: String) {
         let nextSignature = Self.lumaSignature(frame)
@@ -45,6 +89,8 @@ final class ObservationCoordinator: @unchecked Sendable {
         let changed = signature.map { Self.hasMeaningfulDifference($0, nextSignature) } ?? true
         self.frame = frame
         self.frameID = frameID
+        currentWidth = CVPixelBufferGetWidth(frame)
+        currentHeight = CVPixelBufferGetHeight(frame)
         frameRevision &+= 1
         capturedAt = now
         signature = nextSignature
@@ -53,11 +99,15 @@ final class ObservationCoordinator: @unchecked Sendable {
             lastMeaningfulChange = now
             firstChangedFrameAt = firstChangedFrameAt ?? now
         }
-        let shouldSchedule = changed && !encodeScheduled
+        let shouldSchedule =
+            changed && imagePreparationPolicy == .eagerOnChange && !encodeScheduled
         if shouldSchedule { encodeScheduled = true }
+        let encodeGeneration = generation
         condition.broadcast()
         condition.unlock()
-        if shouldSchedule { scheduleEncode(after: Self.defaultQuietInterval) }
+        if shouldSchedule {
+            scheduleEncode(after: Self.defaultQuietInterval, generation: encodeGeneration)
+        }
     }
 
     func observe(
@@ -72,7 +122,7 @@ final class ObservationCoordinator: @unchecked Sendable {
         defer { condition.unlock() }
         if visual, (preparedImage == nil || imageRevision != changeRevision), !encodeScheduled {
             encodeScheduled = true
-            scheduleEncode(after: 0)
+            scheduleEncode(after: 0, generation: generation)
         }
         while true {
             let now = Date()
@@ -109,8 +159,8 @@ final class ObservationCoordinator: @unchecked Sendable {
             capturedAt: capturedAt,
             settledAt: now,
             stable: stable,
-            width: preparedWidth,
-            height: preparedHeight,
+            width: image == nil ? currentWidth : preparedWidth,
+            height: image == nil ? currentHeight : preparedHeight,
             image: image,
             cacheHit: image != nil && imageReadyAt.map { $0 < now } == true,
             firstChangedFrameAt: firstChangedFrameAt,
@@ -129,6 +179,8 @@ final class ObservationCoordinator: @unchecked Sendable {
         firstChangedFrameAt = nil
         signature = nil
         preparedImage = nil
+        currentWidth = 0
+        currentHeight = 0
         preparedWidth = 0
         preparedHeight = 0
         imageRevision = 0
@@ -139,16 +191,22 @@ final class ObservationCoordinator: @unchecked Sendable {
         condition.unlock()
     }
 
-    private func scheduleEncode(after delay: TimeInterval) {
-        imageQueue.asyncAfter(deadline: .now() + delay) { [weak self] in self?.encodeNewest() }
+    private func scheduleEncode(after delay: TimeInterval, generation: UInt64) {
+        imageQueue.asyncAfter(deadline: .now() + delay) { [weak self] in
+            self?.encodeNewest(generation: generation)
+        }
     }
 
-    private func encodeNewest() {
+    private func encodeNewest(generation scheduledGeneration: UInt64) {
         condition.lock()
+        guard scheduledGeneration == generation, encodeScheduled else {
+            condition.unlock()
+            return
+        }
         let remaining = Self.defaultQuietInterval - Date().timeIntervalSince(lastMeaningfulChange)
         if remaining > 0 {
             condition.unlock()
-            scheduleEncode(after: remaining)
+            scheduleEncode(after: remaining, generation: scheduledGeneration)
             return
         }
         guard let frame else {
@@ -157,11 +215,13 @@ final class ObservationCoordinator: @unchecked Sendable {
             return
         }
         let revision = changeRevision
-        let generation = generation
+        let encodeGeneration = generation
         condition.unlock()
-        let encoded = try? ImageEncoder.preparedJPEG(frame)
+        didAttemptImagePreparation()
+        let encoded = try? prepareImage(frame)
+        if encoded != nil { didCompleteImagePreparation() }
         condition.lock()
-        guard generation == self.generation else {
+        guard encodeGeneration == generation else {
             condition.unlock()
             return
         }
@@ -183,7 +243,7 @@ final class ObservationCoordinator: @unchecked Sendable {
             return
         }
         condition.unlock()
-        scheduleEncode(after: 0)
+        scheduleEncode(after: 0, generation: scheduledGeneration)
     }
 
     private static func lumaSignature(_ pixelBuffer: CVPixelBuffer) -> [UInt8] {

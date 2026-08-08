@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
   type AccessibilitySnapshot,
+  deviceListSchema,
   type ElementTreeOutput,
   type ElementTreePage,
   elementTreePageSchema,
@@ -94,6 +95,144 @@ describe("MCP app tools", () => {
     });
     expect(secondPage.returned).toBe(16);
     expect(secondPage.hasMore).toBe(false);
+  });
+
+  test("pages one stable device inventory snapshot and invalidates its cursors", async () => {
+    let now = 1_000;
+    let calls = 0;
+    let inventory = Array.from({ length: 55 }, (_, index) =>
+      iosDevice(`device-${String(index).padStart(3, "0")}`, `iPhone ${index}`),
+    );
+    const session = new SimViewSession();
+    const server = createServer(session, {
+      deviceProvider: async () => {
+        calls += 1;
+        return inventory;
+      },
+      deviceInventorySnapshotTTLMS: 30_000,
+      now: () => now,
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "device-pages", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const first = deviceListSchema.parse(
+        (
+          await client.callTool({
+            name: "app_list_devices",
+            arguments: { availableOnly: false, limit: 25 },
+          })
+        ).structuredContent,
+      );
+      inventory = [iosDevice("new-device", "New iPhone")];
+      const devices = [...first.devices];
+      let cursor = first.nextCursor;
+      let lastCursor: string | undefined;
+      while (cursor) {
+        lastCursor = cursor;
+        const page = deviceListSchema.parse(
+          (
+            await client.callTool({
+              name: "app_list_devices",
+              arguments: { cursor },
+            })
+          ).structuredContent,
+        );
+        devices.push(...page.devices);
+        cursor = page.nextCursor;
+      }
+      expect(calls).toBe(1);
+      expect(devices).toHaveLength(55);
+      expect(new Set(devices.map((device) => device.id)).size).toBe(55);
+
+      const reused = await client.callTool({
+        name: "app_list_devices",
+        arguments: { cursor: lastCursor },
+      });
+      expect(reused.isError).toBe(true);
+
+      const fresh = deviceListSchema.parse(
+        (
+          await client.callTool({
+            name: "app_list_devices",
+            arguments: { availableOnly: false, limit: 25 },
+          })
+        ).structuredContent,
+      );
+      expect(calls).toBe(2);
+      expect(fresh.devices.map((device) => device.id)).toEqual(["ios:new-device"]);
+
+      inventory = Array.from({ length: 30 }, (_, index) =>
+        iosDevice(`expiring-${index}`, `Expiring ${index}`),
+      );
+      const expiring = deviceListSchema.parse(
+        (
+          await client.callTool({
+            name: "app_list_devices",
+            arguments: { availableOnly: false, limit: 10 },
+          })
+        ).structuredContent,
+      );
+      const expiringCursor = expiring.nextCursor;
+      if (!expiringCursor) throw new Error("Expected a continuation cursor");
+      const changedOptions = await client.callTool({
+        name: "app_list_devices",
+        arguments: { cursor: expiringCursor, limit: 5 },
+      });
+      expect(changedOptions.isError).toBe(true);
+      now += 30_001;
+      const expired = await client.callTool({
+        name: "app_list_devices",
+        arguments: { cursor: expiringCursor },
+      });
+      expect(expired.isError).toBe(true);
+      const malformed = await client.callTool({
+        name: "app_list_devices",
+        arguments: { cursor: "not-a-private-cursor" },
+      });
+      expect(malformed.isError).toBe(true);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("bounds active inventory snapshots and retained devices", async () => {
+    const inventory = Array.from({ length: 300 }, (_, index) =>
+      iosDevice(`bounded-${index}`, `Bounded ${index}`),
+    );
+    const session = new SimViewSession();
+    const server = createServer(session, { deviceProvider: async () => inventory });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "bounded-device-pages", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const cursors: string[] = [];
+      for (let index = 0; index < 5; index += 1) {
+        const page = deviceListSchema.parse(
+          (
+            await client.callTool({
+              name: "app_list_devices",
+              arguments: { availableOnly: false, limit: 25 },
+            })
+          ).structuredContent,
+        );
+        expect(page.snapshotTruncated).toBe(true);
+        if (!page.nextCursor) throw new Error("Expected a bounded snapshot cursor");
+        cursors.push(page.nextCursor);
+      }
+      const evicted = await client.callTool({
+        name: "app_list_devices",
+        arguments: { cursor: cursors[0] },
+      });
+      expect(evicted.isError).toBe(true);
+      const retained = await client.callTool({
+        name: "app_list_devices",
+        arguments: { cursor: cursors[4] },
+      });
+      expect(retained.isError).not.toBe(true);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
   });
 
   test("recognizes the MCP App capability in modern and legacy capability locations", () => {

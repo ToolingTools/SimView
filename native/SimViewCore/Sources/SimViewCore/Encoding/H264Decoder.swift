@@ -5,86 +5,241 @@ import VideoToolbox
 
 final class H264Decoder: @unchecked Sendable {
     typealias FrameHandler = @Sendable (CVPixelBuffer, CMTime) -> Void
+    typealias FailureHandler = @Sendable (Error) -> Void
+    typealias RecoveryHandler = @Sendable () -> Void
 
+    enum Event: Sendable {
+        case received
+        case scheduled(workCount: Int)
+        case submitted
+        case callback(latencyMilliseconds: Double)
+        case dropped
+        case submissionFailure(submitted: Bool)
+        case callbackFailure
+        case recovery
+    }
+
+    private final class Submission: @unchecked Sendable {
+        let generation: UInt64
+        let submittedAt: DispatchTime
+
+        init(generation: UInt64) {
+            self.generation = generation
+            submittedAt = .now()
+        }
+    }
+
+    static let defaultMaximumWorkCount = 4
     private let queue = DispatchQueue(label: "dev.simview.h264.decoder", qos: .userInteractive)
+    private let stateLock = NSLock()
+    private let boundedSchedulingEnabled: Bool
+    private let eventHandler: @Sendable (Event) -> Void
+    private var schedulingPolicy: H264DecodeSchedulingPolicy
     private var formatDescription: CMVideoFormatDescription?
     private var session: VTDecompressionSession?
     private var handler: FrameHandler?
+    private var failureHandler: FailureHandler?
+    private var recoveryHandler: RecoveryHandler?
 
-    func configure(_ avcConfiguration: Data, handler: @escaping FrameHandler) throws {
+    init(
+        maximumWorkCount: Int = H264Decoder.defaultMaximumWorkCount,
+        boundedSchedulingEnabled: Bool = ProcessInfo.processInfo.environment[
+            "SIMVIEW_BOUNDED_ANDROID_OBSERVATION_DECODER"] != "0",
+        eventHandler: @escaping @Sendable (Event) -> Void = { _ in }
+    ) {
+        schedulingPolicy = H264DecodeSchedulingPolicy(maximumWorkCount: maximumWorkCount)
+        self.boundedSchedulingEnabled = boundedSchedulingEnabled
+        self.eventHandler = eventHandler
+    }
+
+    func configure(
+        _ avcConfiguration: Data,
+        handler: @escaping FrameHandler,
+        failureHandler: @escaping FailureHandler = { _ in },
+        recoveryHandler: @escaping RecoveryHandler = {}
+    ) throws {
         let parameterSets = try Self.parameterSets(from: avcConfiguration)
         let format = try Self.makeFormatDescription(parameterSets)
         try queue.sync {
             stopLocked()
             self.handler = handler
-            var callback = VTDecompressionOutputCallbackRecord(
-                decompressionOutputCallback: { reference, _, status, _, image, timestamp, _ in
-                    guard status == noErr, let reference, let image else { return }
-                    let decoder = Unmanaged<H264Decoder>.fromOpaque(reference).takeUnretainedValue()
-                    decoder.handler?(image, timestamp)
-                },
-                decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
-            )
-            let attributes: [CFString: Any] = [
-                kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
-                kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
-            ]
-            var created: VTDecompressionSession?
-            let status = VTDecompressionSessionCreate(
-                allocator: kCFAllocatorDefault,
-                formatDescription: format,
-                decoderSpecification: nil,
-                imageBufferAttributes: attributes as CFDictionary,
-                outputCallback: &callback,
-                decompressionSessionOut: &created
-            )
-            guard status == noErr, let created else {
-                throw SimViewError(
-                    "ANDROID_H264_DECODER_UNAVAILABLE",
-                    "VideoToolbox could not create an Android H.264 decoder (status \(status))"
-                )
-            }
+            self.failureHandler = failureHandler
+            self.recoveryHandler = recoveryHandler
             formatDescription = format
-            session = created
+            session = try makeSession(format: format)
         }
     }
 
-    func decode(_ accessUnit: Data, timestampMicros: UInt64) {
-        queue.async { [weak self] in
-            guard let self, let session, let formatDescription else { return }
-            do {
-                let block = try Self.makeBlockBuffer(accessUnit)
-                var timing = CMSampleTimingInfo(
-                    duration: .invalid,
-                    presentationTimeStamp: CMTime(
-                        value: CMTimeValue(timestampMicros), timescale: 1_000_000),
-                    decodeTimeStamp: .invalid
+    func decode(_ accessUnit: Data, timestampMicros: UInt64, keyframe: Bool = false) {
+        eventHandler(.received)
+        let decision: H264DecodeSchedulingPolicy.Decision
+        stateLock.lock()
+        if boundedSchedulingEnabled {
+            decision = schedulingPolicy.receive(isKeyframe: keyframe)
+        } else {
+            decision = .submit(generation: schedulingPolicy.generation)
+        }
+        let workCount = schedulingPolicy.workCount
+        stateLock.unlock()
+        switch decision {
+        case .drop:
+            eventHandler(.dropped)
+            return
+        case .resynchronize:
+            eventHandler(.dropped)
+            eventHandler(.recovery)
+            queue.async { [weak self] in self?.invalidateSessionLocked() }
+            recoveryHandler?()
+            return
+        case .submit(let generation):
+            eventHandler(.scheduled(workCount: workCount))
+            queue.async { [weak self] in
+                self?.submit(
+                    accessUnit,
+                    timestampMicros: timestampMicros,
+                    keyframe: keyframe,
+                    generation: generation
                 )
-                var size = accessUnit.count
-                var sample: CMSampleBuffer?
-                let status = CMSampleBufferCreateReady(
-                    allocator: kCFAllocatorDefault,
-                    dataBuffer: block,
-                    formatDescription: formatDescription,
-                    sampleCount: 1,
-                    sampleTimingEntryCount: 1,
-                    sampleTimingArray: &timing,
-                    sampleSizeEntryCount: 1,
-                    sampleSizeArray: &size,
-                    sampleBufferOut: &sample
-                )
-                guard status == noErr, let sample else { return }
-                VTDecompressionSessionDecodeFrame(
-                    session,
-                    sampleBuffer: sample,
-                    flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing],
-                    frameRefcon: nil,
-                    infoFlagsOut: nil
-                )
-            } catch {
-                return
             }
         }
+    }
+
+    private func submit(
+        _ accessUnit: Data,
+        timestampMicros: UInt64,
+        keyframe: Bool,
+        generation: UInt64
+    ) {
+        var submitted = false
+        do {
+            guard let formatDescription else {
+                throw SimViewError(
+                    "ANDROID_H264_DECODE_FAILED", "The Android H.264 decoder is not configured")
+            }
+            if session == nil, keyframe { session = try makeSession(format: formatDescription) }
+            guard let session else {
+                throw SimViewError(
+                    "ANDROID_H264_DECODE_FAILED",
+                    "The Android H.264 decoder is waiting for a recovery keyframe"
+                )
+            }
+            let block = try Self.makeBlockBuffer(accessUnit)
+            var timing = CMSampleTimingInfo(
+                duration: .invalid,
+                presentationTimeStamp: CMTime(
+                    value: CMTimeValue(timestampMicros), timescale: 1_000_000),
+                decodeTimeStamp: .invalid
+            )
+            var size = accessUnit.count
+            var sample: CMSampleBuffer?
+            let status = CMSampleBufferCreateReady(
+                allocator: kCFAllocatorDefault,
+                dataBuffer: block,
+                formatDescription: formatDescription,
+                sampleCount: 1,
+                sampleTimingEntryCount: 1,
+                sampleTimingArray: &timing,
+                sampleSizeEntryCount: 1,
+                sampleSizeArray: &size,
+                sampleBufferOut: &sample
+            )
+            guard status == noErr, let sample else {
+                throw SimViewError(
+                    "ANDROID_H264_DECODE_FAILED", "Could not create an H.264 sample (status \(status))")
+            }
+            let submission = Submission(generation: generation)
+            let sourceFrameRefcon = Unmanaged.passRetained(submission).toOpaque()
+            eventHandler(.submitted)
+            submitted = true
+            let decodeStatus = VTDecompressionSessionDecodeFrame(
+                session,
+                sampleBuffer: sample,
+                flags: [._EnableAsynchronousDecompression, ._EnableTemporalProcessing],
+                frameRefcon: sourceFrameRefcon,
+                infoFlagsOut: nil
+            )
+            guard decodeStatus == noErr else {
+                Unmanaged<Submission>.fromOpaque(sourceFrameRefcon).release()
+                throw SimViewError(
+                    "ANDROID_H264_DECODE_FAILED",
+                    "VideoToolbox rejected an Android H.264 frame (status \(decodeStatus))"
+                )
+            }
+        } catch {
+            finish(generation: generation)
+            eventHandler(.submissionFailure(submitted: submitted))
+            failureHandler?(error)
+        }
+    }
+
+    private func finish(generation: UInt64) {
+        stateLock.lock()
+        schedulingPolicy.complete(generation: generation)
+        stateLock.unlock()
+    }
+
+    private func receiveCallback(
+        submission: Submission,
+        status: OSStatus,
+        image: CVImageBuffer?,
+        timestamp: CMTime
+    ) {
+        finish(generation: submission.generation)
+        let latency =
+            Double(DispatchTime.now().uptimeNanoseconds - submission.submittedAt.uptimeNanoseconds)
+            / 1_000_000
+        eventHandler(.callback(latencyMilliseconds: latency))
+        guard status == noErr, let image else {
+            eventHandler(.callbackFailure)
+            failureHandler?(
+                SimViewError(
+                    "ANDROID_H264_DECODE_FAILED",
+                    "VideoToolbox failed an Android H.264 callback (status \(status))"
+                ))
+            return
+        }
+        handler?(image, timestamp)
+    }
+
+    private func makeSession(format: CMVideoFormatDescription) throws -> VTDecompressionSession {
+        var callback = VTDecompressionOutputCallbackRecord(
+            decompressionOutputCallback: { reference, sourceFrameRefcon, status, _, image, timestamp, _ in
+                guard let reference, let sourceFrameRefcon else { return }
+                let decoder = Unmanaged<H264Decoder>.fromOpaque(reference).takeUnretainedValue()
+                let submission = Unmanaged<Submission>.fromOpaque(sourceFrameRefcon).takeRetainedValue()
+                decoder.receiveCallback(
+                    submission: submission, status: status, image: image, timestamp: timestamp)
+            },
+            decompressionOutputRefCon: Unmanaged.passUnretained(self).toOpaque()
+        )
+        let attributes: [CFString: Any] = [
+            kCVPixelBufferPixelFormatTypeKey: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferIOSurfacePropertiesKey: [:] as CFDictionary,
+        ]
+        var created: VTDecompressionSession?
+        let status = VTDecompressionSessionCreate(
+            allocator: kCFAllocatorDefault,
+            formatDescription: format,
+            decoderSpecification: nil,
+            imageBufferAttributes: attributes as CFDictionary,
+            outputCallback: &callback,
+            decompressionSessionOut: &created
+        )
+        guard status == noErr, let created else {
+            throw SimViewError(
+                "ANDROID_H264_DECODER_UNAVAILABLE",
+                "VideoToolbox could not create an Android H.264 decoder (status \(status))"
+            )
+        }
+        return created
+    }
+
+    private func invalidateSessionLocked() {
+        if let session {
+            VTDecompressionSessionWaitForAsynchronousFrames(session)
+            VTDecompressionSessionInvalidate(session)
+        }
+        session = nil
     }
 
     func stop() {
@@ -92,13 +247,14 @@ final class H264Decoder: @unchecked Sendable {
     }
 
     private func stopLocked() {
-        if let session {
-            VTDecompressionSessionWaitForAsynchronousFrames(session)
-            VTDecompressionSessionInvalidate(session)
-        }
-        session = nil
+        invalidateSessionLocked()
+        stateLock.lock()
+        schedulingPolicy.reset()
+        stateLock.unlock()
         formatDescription = nil
         handler = nil
+        failureHandler = nil
+        recoveryHandler = nil
     }
 
     private static func parameterSets(from data: Data) throws -> [Data] {

@@ -5,6 +5,8 @@
       "**",
       "!!**/.claude",
       "!!**/.codex",
+      "!!**/.repowise",
+      "!!**/.repowise-workspace",
       "!!**/.simview",
       "!!**/artifacts",
       "!!**/coverage",

@@ -13,6 +13,9 @@ coverage/
 
 # Local agent tooling and generated knowledge graphs
 .codex/
+.claude/
+.repowise/
+.repowise-workspace/
 graphify-out/
 
 # Local signing credentials

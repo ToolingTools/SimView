@@ -180,9 +180,32 @@ final class SimViewServer: @unchecked Sendable {
     private let accessibility = AccessibilityService()
     private let probe = ProbeCoordinator()
     private let h264 = H264Encoder()
-    private let androidH264 = H264Decoder()
     private let metrics = Metrics()
-    private let observation = ObservationCoordinator()
+    private lazy var androidH264 = H264Decoder { [weak self] event in
+        guard let self else { return }
+        switch event {
+        case .received:
+            metrics.didReceiveAndroidDecodeAccessUnit()
+        case .scheduled(let workCount):
+            metrics.didScheduleAndroidDecode(workCount: workCount)
+        case .submitted:
+            metrics.didSubmitAndroidDecode()
+        case .callback(let latencyMilliseconds):
+            metrics.didCompleteAndroidDecodeCallback(latencyMilliseconds: latencyMilliseconds)
+        case .dropped:
+            metrics.didDropAndroidDecode()
+        case .submissionFailure(let submitted):
+            metrics.didFailAndroidDecodeSubmission(submitted: submitted)
+        case .callbackFailure:
+            metrics.didFailAndroidDecodeCallback()
+        case .recovery:
+            metrics.didRecoverAndroidDecode()
+        }
+    }
+    private lazy var observation = ObservationCoordinator(
+        didAttemptImagePreparation: { [weak self] in self?.metrics.didAttemptImageEncode() },
+        didCompleteImagePreparation: { [weak self] in self?.metrics.didCompleteImageEncode() }
+    )
     private var androidClient: ADBClient?
     private var androidCapture: AndroidFrameCapture?
     private var androidController: AndroidController?
@@ -190,6 +213,8 @@ final class SimViewServer: @unchecked Sendable {
     private var androidAgent: AndroidAgentConnection?
     private var androidAgentError: String?
     private var androidAgentRestartAttempts = 0
+    private var androidDecoderFailurePolicy = H264DecodeFailurePolicy(
+        maximumConsecutiveFailures: 3)
     private var androidAgentFrameSequence: UInt64 = 0
     private var androidInputWidth = 0
     private var androidInputHeight = 0
@@ -368,6 +393,9 @@ final class SimViewServer: @unchecked Sendable {
         case "capture.start":
             let device = try selectDevice(request.deviceIdentifier)
             observationMode = request.params["observationMode"]?.stringValue ?? "hybrid"
+            observation.setImagePreparationPolicy(
+                observationMode == "semantic" ? .onDemand : .eagerOnChange
+            )
             if observationMode == "hybrid" || device.platform == .android {
                 try startCapture(device)
             } else {
@@ -475,7 +503,6 @@ final class SimViewServer: @unchecked Sendable {
             }
             sendResult(result, requestID: request.id, to: connection)
             if let image { connection.send(WireFrame(kind: .preparedImage, payload: image)) }
-            if image != nil { metrics.didEncodeImage() }
             metrics.didReturnObservation()
         case "input.touch":
             if selectedDevice?.platform == .android {
@@ -782,6 +809,7 @@ final class SimViewServer: @unchecked Sendable {
         androidAgent = nil
         androidAgentError = nil
         androidAgentRestartAttempts = 0
+        androidDecoderFailurePolicy.reset()
         androidAgentFrameSequence = 0
         latestH264Configuration = nil
         selectedDevice = device
@@ -849,6 +877,7 @@ final class SimViewServer: @unchecked Sendable {
         androidClient = nil
         androidAgent = nil
         androidAgentRestartAttempts = 0
+        androidDecoderFailurePolicy.reset()
         androidAgentFrameSequence = 0
         androidInputWidth = 0
         androidInputHeight = 0
@@ -977,13 +1006,40 @@ final class SimViewServer: @unchecked Sendable {
                     server.queue.async {
                         guard server.captureActive, generation == server.captureGeneration else { return }
                         do {
-                            try server.androidH264.configure(configuration) { [weak server] frame, timestamp in
-                                guard let server else { return }
-                                server.observation.ingest(
-                                    frame,
-                                    frameID: "android-agent-\(timestamp.value)"
-                                )
-                            }
+                            try server.androidH264.configure(
+                                configuration,
+                                handler: { [weak server] frame, timestamp in
+                                    guard let server else { return }
+                                    server.observation.ingest(
+                                        frame,
+                                        frameID: "android-agent-\(timestamp.value)"
+                                    )
+                                    server.queue.async {
+                                        server.androidDecoderFailurePolicy.recordSuccess()
+                                    }
+                                },
+                                failureHandler: { [weak server] error in
+                                    guard let server else { return }
+                                    server.queue.async {
+                                        server.handleAndroidDecoderFailure(
+                                            error, generation: generation)
+                                    }
+                                },
+                                recoveryHandler: { [weak server] in
+                                    guard let server else { return }
+                                    server.queue.async {
+                                        guard server.captureActive,
+                                            generation == server.captureGeneration
+                                        else { return }
+                                        do {
+                                            try server.androidAgent?.requestKeyframe()
+                                        } catch {
+                                            server.handleAndroidDecoderFailure(
+                                                error, generation: generation)
+                                        }
+                                    }
+                                }
+                            )
                         } catch {
                             server.metrics.didFailAndroidDecoder()
                             server.handleAndroidAgentFailure(error, generation: generation)
@@ -1001,7 +1057,8 @@ final class SimViewServer: @unchecked Sendable {
                         server.androidAgentFrameSequence &+= 1
                         server.frameID = "android-agent-\(server.androidAgentFrameSequence)"
                         server.metrics.didCapture()
-                        server.androidH264.decode(bytes, timestampMicros: timestamp)
+                        server.androidH264.decode(
+                            bytes, timestampMicros: timestamp, keyframe: keyframe)
                         var payload = Data()
                         var micros = timestamp.bigEndian
                         withUnsafeBytes(of: &micros) { payload.append(contentsOf: $0) }
@@ -1068,6 +1125,7 @@ final class SimViewServer: @unchecked Sendable {
         if androidAgentRestartAttempts < 1, let client = androidClient, let device = selectedDevice {
             androidAgentRestartAttempts += 1
             if tryStartAndroidAgent(client: client, device: device, generation: generation) {
+                androidDecoderFailurePolicy.reset()
                 androidAccessibility = AndroidAccessibilityService(
                     client: client,
                     serial: device.nativeIdentifier,
@@ -1093,6 +1151,14 @@ final class SimViewServer: @unchecked Sendable {
             )
             self.queue.async { self.acceptCapturedFrame(pending) }
         }
+    }
+
+    private func handleAndroidDecoderFailure(_ error: Error, generation: UInt64) {
+        guard captureActive, generation == captureGeneration,
+            selectedDevice?.platform == .android
+        else { return }
+        guard androidDecoderFailurePolicy.recordFailure() else { return }
+        handleAndroidAgentFailure(error, generation: generation)
     }
 
     private func prepareHID() throws {
