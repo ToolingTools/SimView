@@ -117,8 +117,8 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
 - (void)dispatchNotification:(unsigned long long)notification
                         data:(id)data
             associatedObject:(id)associatedObject {
-  (void)notification;
-  (void)data;
+  (void) notification;
+  (void) data;
   NSString *token = nil;
   @try {
     if ([associatedObject respondsToSelector:NSSelectorFromString(@"bridgeDelegateToken")]) {
@@ -163,7 +163,7 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
                           dispatch_semaphore_signal(semaphore);
                         }];
     if (dispatch_semaphore_wait(
-            semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(5 * NSEC_PER_SEC))) != 0) {
+            semaphore, dispatch_time(DISPATCH_TIME_NOW, (int64_t) (5 * NSEC_PER_SEC))) != 0) {
       return nil;
     }
     return response;
@@ -172,12 +172,12 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
 
 - (CGRect)accessibilityTranslationConvertPlatformFrameToSystem:(CGRect)rect
                                                      withToken:(NSString *)token {
-  (void)token;
+  (void) token;
   return rect;
 }
 
 - (id)accessibilityTranslationRootParentWithToken:(NSString *)token {
-  (void)token;
+  (void) token;
   return nil;
 }
 
@@ -241,7 +241,7 @@ static id SVJSONValue(id value) {
 static void SVSetIfPresent(NSMutableDictionary *dictionary, NSString *key, id value) {
   if (!value)
     return;
-  if ([value isKindOfClass:NSString.class] && [(NSString *)value length] == 0)
+  if ([value isKindOfClass:NSString.class] && [(NSString *) value length] == 0)
     return;
   dictionary[key] = SVJSONValue(value);
 }
@@ -279,7 +279,7 @@ static NSDictionary *SVSerializeElement(SVAXPlatformElement *element, NSString *
   }
   NSUInteger current = (*ordinal)++;
   NSMutableDictionary *node = [NSMutableDictionary dictionary];
-  node[@"ref"] = [NSString stringWithFormat:@"ax:%@:%lu", snapshotID, (unsigned long)current];
+  node[@"ref"] = [NSString stringWithFormat:@"ax:%@:%lu", snapshotID, (unsigned long) current];
 
   element.translation.bridgeDelegateToken = bridgeToken;
   SVSetIfPresent(node, @"role", [element accessibilityRole]);
@@ -429,15 +429,15 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
   SEL getter = NSSelectorFromString(@"appNotificationTestingCallback");
   SEL setter = NSSelectorFromString(@"setAppNotificationTestingCallback:");
   if ([translator respondsToSelector:getter] && [translator respondsToSelector:setter]) {
-    id (*getCallback)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id (*getCallback)(id, SEL) = (id (*)(id, SEL)) objc_msgSend;
     id previous = getCallback(translator, getter);
     id callback = ^(unsigned long long notification, id data, id associatedObject) {
       if (previous) {
-        ((void (^)(unsigned long long, id, id))previous)(notification, data, associatedObject);
+        ((void (^)(unsigned long long, id, id)) previous)(notification, data, associatedObject);
       }
       [dispatcher dispatchNotification:notification data:data associatedObject:associatedObject];
     };
-    ((void (*)(id, SEL, id))objc_msgSend)(translator, setter, callback);
+    ((void (*)(id, SEL, id)) objc_msgSend)(translator, setter, callback);
     return YES;
   }
 
@@ -453,7 +453,7 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
   static dispatch_once_t onceToken;
   dispatch_once(&onceToken, ^{
     SVOriginalHandleNotification = method_getImplementation(method);
-    method_setImplementation(method, (IMP)SVSwizzledHandleNotification);
+    method_setImplementation(method, (IMP) SVSwizzledHandleNotification);
   });
   return SVOriginalHandleNotification != NULL;
 }
@@ -478,7 +478,7 @@ static void SVSwizzledHandleNotification(id object, SEL selector, unsigned long 
                                          id data, id associatedObject) {
   [SVDispatcher() dispatchNotification:notification data:data associatedObject:associatedObject];
   if (SVOriginalHandleNotification) {
-    ((void (*)(id, SEL, unsigned long long, id, id))SVOriginalHandleNotification)(
+    ((void (*)(id, SEL, unsigned long long, id, id)) SVOriginalHandleNotification)(
         object, selector, notification, data, associatedObject);
   }
 }
