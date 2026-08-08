@@ -429,7 +429,8 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
   SEL getter = NSSelectorFromString(@"appNotificationTestingCallback");
   SEL setter = NSSelectorFromString(@"setAppNotificationTestingCallback:");
   if ([translator respondsToSelector:getter] && [translator respondsToSelector:setter]) {
-    id previous = ((id (*)(id, SEL))objc_msgSend)(translator, getter);
+    id (*getCallback)(id, SEL) = (id (*)(id, SEL))objc_msgSend;
+    id previous = getCallback(translator, getter);
     id callback = ^(unsigned long long notification, id data, id associatedObject) {
       if (previous) {
         ((void (^)(unsigned long long, id, id))previous)(notification, data, associatedObject);
