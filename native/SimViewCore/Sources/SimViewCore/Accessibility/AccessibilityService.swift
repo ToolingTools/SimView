@@ -1,6 +1,64 @@
 import Foundation
 import SimViewAXShim
 
+private let accessibilityRootRetryAttempts = 3
+private let accessibilityRootRetryDelay: TimeInterval = 0.025
+
+func isTransientRootOnlyAccessibilitySnapshot(_ snapshot: [String: Any]) -> Bool {
+    guard
+        let root = snapshot["root"] as? [String: Any],
+        let stats = snapshot["stats"] as? [String: Any],
+        (stats["truncated"] as? Bool) != true,
+        (stats["nodeCount"] as? NSNumber)?.intValue == 1,
+        ((root["children"] as? [Any])?.isEmpty ?? true)
+    else { return false }
+
+    let role = (root["role"] as? String ?? "").lowercased()
+    guard role.contains("application") else { return false }
+
+    let meaningfulKeys = ["identifier", "label", "title", "value", "help", "placeholder"]
+    let hasMeaningfulText = meaningfulKeys.contains { key in
+        guard let value = root[key] as? String else { return false }
+        return !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+    let hasActions = (root["actions"] as? [Any])?.isEmpty == false
+    guard !hasMeaningfulText, !hasActions else { return false }
+
+    guard let points = (root["frame"] as? [String: Any])?["points"] as? [String: Any] else {
+        return true
+    }
+    let width = (points["width"] as? NSNumber)?.doubleValue ?? 0
+    let height = (points["height"] as? NSNumber)?.doubleValue ?? 0
+    return width <= 0 || height <= 0
+}
+
+func captureAccessibilitySnapshotWithRetry(
+    maximumAttempts: Int = accessibilityRootRetryAttempts,
+    delay: () -> Void = { Thread.sleep(forTimeInterval: accessibilityRootRetryDelay) },
+    capture: () throws -> [String: Any]
+) throws -> [String: Any] {
+    let attempts = max(1, maximumAttempts)
+    var lastTransientSnapshot: [String: Any]?
+    for attempt in 1...attempts {
+        let snapshot = try capture()
+        guard isTransientRootOnlyAccessibilitySnapshot(snapshot) else { return snapshot }
+        lastTransientSnapshot = snapshot
+        if attempt < attempts { delay() }
+    }
+
+    guard var snapshot = lastTransientSnapshot else {
+        throw SimViewError(
+            "ACCESSIBILITY_UNAVAILABLE",
+            "Accessibility translation did not produce a usable snapshot"
+        )
+    }
+    var stats = snapshot["stats"] as? [String: Any] ?? [:]
+    stats["quality"] = "degraded"
+    stats["reason"] = "root-only-application"
+    snapshot["stats"] = stats
+    return snapshot
+}
+
 func validateAccessibilitySelector(_ selector: [String: Any]) throws {
     let fields = ["ref", "identifier", "role", "name", "value"]
     let hasMatchingField = fields.contains { key in
@@ -67,10 +125,10 @@ final class AccessibilityService: @unchecked Sendable {
             throw SimViewError("DEVICE_NOT_BOOTED", "Simulator \(udid) is unavailable")
         }
         do {
-            var snapshot = try SVAccessibilityBridge.snapshot(
-                forDevice: device,
-                maxNodes: UInt(max(1, min(maxNodes, 5_000)))
-            )
+            let boundedMaxNodes = UInt(max(1, min(maxNodes, 5_000)))
+            var snapshot = try captureAccessibilitySnapshotWithRetry {
+                try SVAccessibilityBridge.snapshot(forDevice: device, maxNodes: boundedMaxNodes)
+            }
             if scope == "interactive", let root = snapshot["root"] as? [String: Any] {
                 snapshot["root"] = interactiveTree(root) ?? root
             }

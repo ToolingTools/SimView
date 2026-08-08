@@ -13,6 +13,9 @@
 #import <objc/runtime.h>
 
 static NSString *const SVAXErrorDomain = @"dev.simview.accessibility";
+static NSInteger const SVEmptyApplicationPlaceholderErrorCode = 7;
+static NSUInteger const SVAccessibilitySnapshotAttempts = 3;
+static NSTimeInterval const SVAccessibilitySnapshotRetryDelay = 0.025;
 
 @interface NSObject (SVSimDeviceAccessibility)
 - (void)sendAccessibilityRequestAsync:(id)request
@@ -263,6 +266,15 @@ static NSDictionary *SVFrameDictionary(NSRect frame, NSRect screenFrame) {
   };
 }
 
+static BOOL SVRootHasMeaningfulLeafSemantics(NSDictionary *root) {
+  for (NSString *key in @[ @"identifier", @"label", @"title", @"value", @"help", @"placeholder" ]) {
+    id value = root[key];
+    if ([value isKindOfClass:NSString.class] && [(NSString *) value length] > 0)
+      return YES;
+  }
+  return [root[@"actions"] isKindOfClass:NSArray.class] && [root[@"actions"] count] > 0;
+}
+
 static NSDictionary *SVSerializeElement(SVAXPlatformElement *element, NSString *snapshotID,
                                         NSString *bridgeToken, NSRect screenFrame,
                                         NSUInteger *ordinal, NSUInteger maxNodes, NSUInteger depth,
@@ -376,9 +388,11 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
     NSDictionary *root = SVSerializeElement(element, snapshotID, token, screenFrame, &ordinal,
                                             MAX(1, maxNodes), 0, &truncated);
     if (!point && ordinal == 1 && [element accessibilityChildren].count == 0 &&
-        NSEqualRects([element accessibilityFrame], NSZeroRect)) {
+        NSEqualRects([element accessibilityFrame], NSZeroRect) &&
+        !SVRootHasMeaningfulLeafSemantics(root)) {
       if (error)
-        *error = SVError(7, @"Accessibility translation returned an empty application placeholder");
+        *error = SVError(SVEmptyApplicationPlaceholderErrorCode,
+                         @"Accessibility translation returned an empty application placeholder");
       return nil;
     }
     return @{
@@ -416,7 +430,21 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
 + (NSDictionary *)snapshotForDevice:(NSObject *)device
                            maxNodes:(NSUInteger)maxNodes
                               error:(NSError **)error {
-  return SVResolve(device, NULL, NSZeroRect, maxNodes, error);
+  for (NSUInteger attempt = 0; attempt < SVAccessibilitySnapshotAttempts; attempt++) {
+    NSError *resolveError = nil;
+    NSDictionary *snapshot = SVResolve(device, NULL, NSZeroRect, maxNodes, &resolveError);
+    if (snapshot)
+      return snapshot;
+    BOOL retryable = [resolveError.domain isEqualToString:SVAXErrorDomain] &&
+                     resolveError.code == SVEmptyApplicationPlaceholderErrorCode;
+    if (!retryable || attempt + 1 == SVAccessibilitySnapshotAttempts) {
+      if (error)
+        *error = resolveError;
+      return nil;
+    }
+    [NSThread sleepForTimeInterval:SVAccessibilitySnapshotRetryDelay];
+  }
+  return nil;
 }
 
 + (BOOL)startObservingDevice:(NSObject *)device

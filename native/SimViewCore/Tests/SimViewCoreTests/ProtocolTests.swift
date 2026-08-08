@@ -26,6 +26,24 @@ private final class AccessibilitySnapshotBox: @unchecked Sendable {
     }
 }
 
+private final class AccessibilitySnapshotSequence: @unchecked Sendable {
+    private let lock = NSLock()
+    private let values: [[String: Any]]
+    private var index = 0
+
+    init(_ values: [[String: Any]]) {
+        self.values = values
+    }
+
+    func next() -> [String: Any] {
+        lock.withLock {
+            let value = values[min(index, values.count - 1)]
+            index += 1
+            return value
+        }
+    }
+}
+
 final class ProtocolTests: XCTestCase {
     private func pixelBuffer(red: UInt8, green: UInt8, blue: UInt8) throws -> CVPixelBuffer {
         var buffer: CVPixelBuffer?
@@ -84,6 +102,7 @@ final class ProtocolTests: XCTestCase {
 
     func testAccessibilityObservationSettlesAnEventBurstWithoutCapturingOnTheCallback() throws {
         let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
         let snapshot: [String: Any] = [
             "snapshotId": "snapshot-1",
             "capturedAt": "2026-08-08T10:00:00.000Z",
@@ -96,27 +115,41 @@ final class ProtocolTests: XCTestCase {
             maxNodes: 100,
             settleQuietMilliseconds: 75,
             maximumWaitMilliseconds: 0,
-            strategy: "snapshot-diff"
-        ) { _, _ in box.value }
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return box.value
+        }
         XCTAssertTrue(baseline.stable)
         XCTAssertEqual(baseline.revision, "1")
+        XCTAssertEqual(captures.value, 1)
 
         coordinator.markEvent()
+        coordinator.markEvent()
+        XCTAssertEqual(captures.value, 1)
         let settled = try coordinator.observe(
             afterRevision: baseline.revision,
             scope: "interactive",
             maxNodes: 100,
             settleQuietMilliseconds: 75,
             maximumWaitMilliseconds: 250,
-            strategy: "snapshot-diff"
-        ) { _, _ in box.value }
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return box.value
+        }
         XCTAssertTrue(settled.eventChanged)
         XCTAssertTrue(settled.stable)
         XCTAssertFalse(settled.timedOut)
+        XCTAssertFalse(settled.fallbackUsed)
+        XCTAssertEqual(settled.captureCount, 1)
+        XCTAssertEqual(settled.changeSource, "event")
+        XCTAssertEqual(captures.value, 2)
     }
 
     func testAccessibilityObservationReturnsAValidTimeoutForAnUnchangedTree() throws {
         let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
         let snapshot: [String: Any] = [
             "snapshotId": "snapshot-1",
             "capturedAt": "2026-08-08T10:00:00.000Z",
@@ -129,19 +162,263 @@ final class ProtocolTests: XCTestCase {
             maxNodes: 100,
             settleQuietMilliseconds: 75,
             maximumWaitMilliseconds: 0,
-            strategy: "snapshot-diff"
-        ) { _, _ in box.value }
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return box.value
+        }
         let timedOut = try coordinator.observe(
             afterRevision: baseline.revision,
             scope: "interactive",
             maxNodes: 100,
             settleQuietMilliseconds: 75,
-            maximumWaitMilliseconds: 30,
-            strategy: "snapshot-diff"
-        ) { _, _ in box.value }
+            maximumWaitMilliseconds: 350,
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return box.value
+        }
         XCTAssertFalse(timedOut.eventChanged)
         XCTAssertFalse(timedOut.stable)
         XCTAssertTrue(timedOut.timedOut)
+        XCTAssertTrue(timedOut.fallbackUsed)
+        XCTAssertEqual(timedOut.captureCount, 2)
+        XCTAssertEqual(timedOut.changeSource, "none")
+        XCTAssertEqual(captures.value, 3)
+    }
+
+    func testAccessibilityObservationSettlesAnEventFreeSnapshotDiff() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
+        let baselineSnapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "ax:1", "label": "Invoices"],
+        ]
+        let changedSnapshot: [String: Any] = [
+            "snapshotId": "snapshot-2",
+            "capturedAt": "2026-08-08T10:00:01.000Z",
+            "root": ["ref": "ax:2", "label": "Invoice 30363063"],
+        ]
+        let snapshots = AccessibilitySnapshotSequence([
+            baselineSnapshot, changedSnapshot, changedSnapshot,
+        ])
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 500,
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+
+        XCTAssertTrue(settled.eventChanged)
+        XCTAssertTrue(settled.stable)
+        XCTAssertFalse(settled.timedOut)
+        XCTAssertTrue(settled.fallbackUsed)
+        XCTAssertEqual(settled.captureCount, 2)
+        XCTAssertEqual(settled.changeSource, "snapshot-diff")
+        XCTAssertEqual(captures.value, 3)
+    }
+
+    func testAccessibilityObservationReportsContinuouslyChangingFallbackAsUnstable() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
+        let snapshots = AccessibilitySnapshotSequence([
+            ["snapshotId": "snapshot-1", "root": ["ref": "ax:1", "label": "Invoices"]],
+            ["snapshotId": "snapshot-2", "root": ["ref": "ax:2", "label": "Invoice A"]],
+            ["snapshotId": "snapshot-3", "root": ["ref": "ax:3", "label": "Invoice B"]],
+        ])
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+        let unsettled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 500,
+            strategy: "ios-axp"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+
+        XCTAssertTrue(unsettled.eventChanged)
+        XCTAssertFalse(unsettled.stable)
+        XCTAssertTrue(unsettled.fallbackUsed)
+        XCTAssertEqual(unsettled.captureCount, 2)
+        XCTAssertEqual(unsettled.changeSource, "snapshot-diff")
+        XCTAssertEqual(captures.value, 3)
+    }
+
+    func testShellAccessibilityObservationBacksOffAndSettlesWithoutRepeatedDumps() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
+        let baselineSnapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "android:1", "label": "Home"],
+        ]
+        let changedSnapshot: [String: Any] = [
+            "snapshotId": "snapshot-2",
+            "capturedAt": "2026-08-08T10:00:01.000Z",
+            "root": ["ref": "android:2", "label": "Invoices"],
+        ]
+        let baselineBox = AccessibilitySnapshotBox(baselineSnapshot)
+        let changedBox = AccessibilitySnapshotBox(changedSnapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return baselineBox.value
+        }
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 500,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return changedBox.value
+        }
+
+        XCTAssertTrue(settled.eventChanged)
+        XCTAssertTrue(settled.stable)
+        XCTAssertFalse(settled.timedOut)
+        XCTAssertEqual(captures.value, 2)
+    }
+
+    func testShellAccessibilityObservationBoundsUnchangedHierarchyDumps() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "android:1", "label": "Home"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return box.value
+        }
+        let timedOut = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 520,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return box.value
+        }
+
+        XCTAssertFalse(timedOut.eventChanged)
+        XCTAssertFalse(timedOut.stable)
+        XCTAssertTrue(timedOut.timedOut)
+        XCTAssertEqual(captures.value, 3)
+    }
+
+    func testAccessibilityObservationCanSettleAnUnchangedTreeForInteraction() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "ax:1", "label": "Continue"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 250,
+            requireChange: false,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+
+        XCTAssertFalse(settled.eventChanged)
+        XCTAssertTrue(settled.stable)
+        XCTAssertFalse(settled.timedOut)
+    }
+
+    func testAccessibilityObservationScopeChangeStillWaitsForQuiet() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "ios-axp"
+        ) { scope, _ in
+            _ = captures.increment()
+            return ["root": ["ref": "ax:root"], "scope": scope]
+        }
+        let startedAt = Date()
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "visible",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 250,
+            requireChange: false,
+            strategy: "ios-axp"
+        ) { scope, _ in
+            _ = captures.increment()
+            return ["root": ["ref": "ax:root"], "scope": scope]
+        }
+
+        XCTAssertTrue(settled.stable)
+        XCTAssertFalse(settled.timedOut)
+        XCTAssertGreaterThanOrEqual(Date().timeIntervalSince(startedAt), 0.035)
+        XCTAssertEqual(captures.value, 3)
     }
 
     func testAccessibilityObservationRejectsMalformedRevisions() throws {
@@ -299,7 +576,7 @@ final class ProtocolTests: XCTestCase {
         )
         coordinator.ingest(try pixelBuffer(red: 80, green: 90, blue: 100), frameID: "retry")
         let failed = try coordinator.observe(
-            visual: true, afterRevision: nil, maximumWaitMilliseconds: 150)
+            visual: true, afterRevision: nil, maximumWaitMilliseconds: 1_000)
         XCTAssertNil(failed.image)
         XCTAssertEqual(attempts.value, 1)
         let retried = try coordinator.observe(
@@ -555,6 +832,38 @@ final class ProtocolTests: XCTestCase {
         let root = try XCTUnwrap(snapshot["root"] as? [String: Any])
         let children = try XCTUnwrap(root["children"] as? [[String: Any]])
         XCTAssertEqual(children.first?["value"] as? String, "Welcome back")
+    }
+
+    func testAndroidAccessibilityRetriesADegradedRootOnlyHierarchyTwice() throws {
+        let state = FileManager.default.temporaryDirectory
+            .appendingPathComponent("simview-android-accessibility-\(UUID().uuidString).count")
+        addTeardownBlock { try? FileManager.default.removeItem(at: state) }
+        let executable = try temporaryExecutable(
+            """
+            if [ "$3" = "exec-out" ]; then
+              count=0
+              if [ -f "\(state.path)" ]; then count=$(cat "\(state.path)"); fi
+              count=$((count + 1))
+              printf '%s' "$count" > "\(state.path)"
+              if [ "$count" -lt 3 ]; then
+                printf '%s' "<hierarchy rotation='0'><node class='android.widget.FrameLayout' bounds='[0,0][0,0]' /></hierarchy>"
+              else
+                printf '%s' "<hierarchy rotation='0'><node class='android.widget.FrameLayout' bounds='[0,0][1080,2400]'><node text='Continue' class='android.widget.Button' clickable='true' enabled='true' bounds='[100,200][500,320]' /></node></hierarchy>"
+              fi
+            fi
+            exit 0
+            """
+        )
+        let service = AndroidAccessibilityService(
+            client: try ADBClient(executable: executable.path),
+            serial: "emulator-5554"
+        )
+
+        let snapshot = try service.snapshot(scope: "interactive", timeout: 3)
+        let stats = try XCTUnwrap(snapshot["stats"] as? [String: Any])
+        XCTAssertEqual(snapshot["source"] as? String, "android-uiautomator")
+        XCTAssertEqual(stats["quality"] as? String, "complete")
+        XCTAssertEqual(try String(contentsOf: state, encoding: .utf8), "3")
     }
 
     func testAndroidScreenshotRejectsUndecodablePNGPayload() throws {

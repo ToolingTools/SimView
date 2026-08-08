@@ -500,12 +500,187 @@ describe("React Native Fiber projection", () => {
       confidence: "exact",
     });
   });
+
+  test("keeps semantic tab siblings when an earlier branch exceeds a 240-node budget", async () => {
+    const root = fiber("Root", {});
+    const deepScene = fiber("View", {});
+    deepScene.type = "RCTView";
+    link(root, deepScene);
+    let parent = deepScene;
+    for (let index = 0; index < 300; index += 1) {
+      const wrapper = fiber("View", {});
+      wrapper.type = "RCTView";
+      link(parent, wrapper);
+      parent = wrapper;
+    }
+    const tabBar = fiber("TabBar", {});
+    deepScene.sibling = tabBar;
+    tabBar.return = root;
+    let previousTab: TestFiber | undefined;
+    for (const name of ["Home", "Branches", "Menu", "Invoices", "Settings"]) {
+      const tab = fiber("Pressable", {
+        testID: `tab-${name.toLocaleLowerCase()}`,
+        accessibilityLabel: name,
+        accessibilityRole: "tab",
+        onPress: () => {},
+      });
+      tab.type = "RCTView";
+      if (previousTab) {
+        previousTab.sibling = tab;
+        tab.return = tabBar;
+      } else {
+        link(tabBar, tab);
+      }
+      previousTab = tab;
+    }
+
+    const result = await inspectFibers([root], 240);
+    const serialized = JSON.stringify(result);
+
+    expect(result.nodeCount).toBe(240);
+    expect(result.truncated).toBe(true);
+    for (const name of ["home", "branches", "menu", "invoices", "settings"]) {
+      expect(serialized).toContain(`tab-${name}`);
+    }
+  });
+
+  test("fairly projects later roots and infers navigation outside the first root", async () => {
+    const firstRoot = fiber("FirstRoot", {});
+    let parent = firstRoot;
+    for (let index = 0; index < 300; index += 1) {
+      const host = fiber("View", {});
+      host.type = "RCTView";
+      link(parent, host);
+      parent = host;
+    }
+
+    const route = { key: "menu-key", name: "Menu" };
+    const secondRoot = fiber("SecondRoot", {});
+    const navigation = fiber("NavigationContainer", {});
+    navigation.memoizedState = {
+      memoizedState: { index: 0, routes: [route] },
+      next: null,
+    };
+    const scene = fiber("SceneView", { route });
+    const screen = fiber(
+      "MenuScreen",
+      { route, testID: "menu-screen" },
+      "/work/app/src/MenuScreen.tsx",
+    );
+    const menuTab = fiber("Pressable", {
+      testID: "menu-tab",
+      accessibilityLabel: "Menu",
+      accessibilityRole: "tab",
+      onPress: () => {},
+    });
+    menuTab.type = "RCTView";
+    link(secondRoot, navigation);
+    link(navigation, scene);
+    link(scene, screen);
+    link(screen, menuTab);
+
+    const result = await inspectFibers([firstRoot, secondRoot], 240);
+
+    expect(result.nodeCount).toBe(240);
+    expect(result.truncated).toBe(true);
+    expect(JSON.stringify(result)).toContain("menu-tab");
+    expect(result.screen).toMatchObject({
+      route: "Menu",
+      component: "MenuScreen",
+      testID: "menu-screen",
+      confidence: "exact",
+    });
+  });
+
+  test("drops unmeasured navigation ghosts and prefers the actual screen component", async () => {
+    const route = { key: "invoices-key", name: "Invoices" };
+    const root = fiber("Root", {});
+    const navigation = fiber("NavigationContainer", {});
+    navigation.memoizedState = {
+      memoizedState: { index: 0, routes: [route] },
+      next: null,
+    };
+    const scene = fiber("SceneView", { route });
+    const phantom = fiber(
+      "TabBarItemInternal",
+      { accessibilityLabel: "OrderConfirmationScreen, tab, 6 of 6", accessibilityRole: "tab" },
+      "/work/app/node_modules/navigation/TabBarItemInternal.tsx",
+    );
+    const screen = fiber(
+      "InvoicesScreen",
+      { route, testID: "invoices-screen" },
+      "/work/app/src/screens/InvoicesScreen.tsx",
+    );
+    const realTab = fiber("Pressable", {
+      accessibilityLabel: "Invoices, tab, 4 of 5",
+      accessibilityRole: "tab",
+      testID: "invoices-tab",
+      onPress: () => {},
+    });
+    realTab.type = "RCTView";
+    realTab.stateNode = {
+      measure(callback: (...values: number[]) => void) {
+        callback(0, 0, 80, 44, 240, 820);
+      },
+    };
+    link(root, navigation);
+    link(navigation, scene);
+    link(scene, phantom);
+    phantom.sibling = screen;
+    screen.return = scene;
+    link(screen, realTab);
+
+    const result = await inspectFiber(root);
+    const serialized = JSON.stringify(result);
+
+    expect(serialized).not.toContain("OrderConfirmationScreen, tab, 6 of 6");
+    expect(serialized).toContain("Invoices, tab, 4 of 5");
+    expect(result.screen).toMatchObject({
+      route: "Invoices",
+      component: "InvoicesScreen",
+      testID: "invoices-screen",
+    });
+  });
+
+  test("does not report bottom-tab navigation chrome as an exact screen", async () => {
+    const route = { key: "invoices-key", name: "Invoices" };
+    const root = fiber("Root", {});
+    const navigation = fiber("NavigationContainer", {});
+    navigation.memoizedState = {
+      memoizedState: { index: 0, routes: [route] },
+      next: null,
+    };
+    const scene = fiber("SceneView", { route });
+    const tabItem = fiber(
+      "TabBarItemInternal",
+      { route },
+      "/work/app/src/navigation/BottomTabsNavigator.tsx",
+    );
+    const genericView = fiber(
+      "View",
+      { route },
+      "/work/app/src/navigation/BottomTabsNavigator.tsx",
+    );
+    link(root, navigation);
+    link(navigation, scene);
+    link(scene, tabItem);
+    link(tabItem, genericView);
+
+    const result = await inspectFiber(root);
+
+    expect(result.screen).toMatchObject({
+      route: "Invoices",
+      confidence: "none",
+    });
+    expect(result.screen.component).toBeNull();
+  });
 });
 
 type InspectionResult = {
   renderer: string;
   root: { children?: Array<Record<string, unknown>> };
   screen: Record<string, unknown>;
+  nodeCount: number;
   truncated: boolean;
 };
 
@@ -513,9 +688,18 @@ async function inspectFiber(
   root: TestFiber,
   globals: Record<string, unknown> = {},
 ): Promise<InspectionResult> {
-  return (await runInNewContext(fiberInspectionExpression(430, 932, 100), {
+  return inspectFibers([root], 100, globals);
+}
+
+async function inspectFibers(
+  roots: TestFiber[],
+  maxNodes: number,
+  globals: Record<string, unknown> = {},
+): Promise<InspectionResult> {
+  return (await runInNewContext(fiberInspectionExpression(430, 932, maxNodes), {
     __REACT_DEVTOOLS_GLOBAL_HOOK__: {
-      getFiberRoots: (id: number) => (id === 1 ? new Set([{ current: root }]) : new Set()),
+      getFiberRoots: (id: number) =>
+        roots[id - 1] ? new Set([{ current: roots[id - 1] }]) : new Set(),
       renderers: new Map(),
     },
     setTimeout,

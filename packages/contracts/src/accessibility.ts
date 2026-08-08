@@ -100,7 +100,12 @@ export const accessibilitySnapshotSchema = z
     schemaVersion: z.literal(1),
     snapshotId: z.string(),
     capturedAt: z.string(),
-    source: z.enum(["core-simulator-ax", "android-uiautomator", "android-agent-shell"]),
+    source: z.enum([
+      "core-simulator-ax",
+      "android-uiautomator",
+      "android-agent-uiautomation",
+      "android-agent-shell",
+    ]),
     scope: z.enum(["interactive", "visible", "full"]),
     screen: normalizedRectSchema,
     root: accessibilityNodeSchema,
@@ -134,6 +139,7 @@ export const accessibilityObserveParamsSchema = z
     maxNodes: z.number().int().min(1).max(5_000).default(1_200),
     settleQuietMs: z.number().int().min(20).max(500).default(75),
     maxWaitMs: z.number().int().min(0).max(5_000).default(500),
+    requireChange: z.boolean().default(true),
   })
   .passthrough();
 
@@ -149,6 +155,9 @@ export const accessibilityObserveResultSchema = z
     strategy: accessibilityObservationStrategySchema,
     firstChangedAt: z.string().optional(),
     settledAt: z.string(),
+    fallbackUsed: z.boolean().optional(),
+    captureCount: z.number().int().nonnegative().optional(),
+    changeSource: z.enum(["event", "snapshot-diff", "none"]).optional(),
   })
   .passthrough();
 
@@ -314,6 +323,16 @@ export const elementSearchMatchSchema = z.object({
   score: z.number().min(0).max(1),
   matchedFields: z.array(z.string()),
   exact: z.boolean(),
+  // Search results can combine native and Fiber projections. Provenance keeps
+  // a partial projection from being mistaken for a degraded native snapshot.
+  source: z.enum([
+    "core-simulator-ax",
+    "android-uiautomator",
+    "android-agent-uiautomation",
+    "android-agent-shell",
+    "react-native-fiber",
+  ]),
+  snapshotId: z.string().min(1),
 });
 
 export type ElementSearchMatch = z.infer<typeof elementSearchMatchSchema>;

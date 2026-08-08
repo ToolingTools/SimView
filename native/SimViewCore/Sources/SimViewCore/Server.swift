@@ -1467,6 +1467,7 @@ final class SimViewServer: @unchecked Sendable {
         let quiet = params["settleQuietMs"]?.intValue ?? 75
         let maximumWait = params["maxWaitMs"]?.intValue ?? 500
         let afterRevision = params["afterRevision"]?.stringValue
+        let requireChange = params["requireChange"] != .bool(false)
         if device.platform == .ios {
             startIOSAccessibilityObservation(for: device)
         }
@@ -1480,6 +1481,7 @@ final class SimViewServer: @unchecked Sendable {
             maxNodes: maxNodes,
             settleQuietMilliseconds: quiet,
             maximumWaitMilliseconds: maximumWait,
+            requireChange: requireChange,
             strategy: strategy
         ) { [weak self] scope, maxNodes in
             guard let self else {
@@ -1506,6 +1508,9 @@ final class SimViewServer: @unchecked Sendable {
             "timedOut": result.timedOut,
             "strategy": result.strategy,
             "settledAt": formatter.string(from: result.settledAt),
+            "fallbackUsed": result.fallbackUsed,
+            "captureCount": result.captureCount,
+            "changeSource": result.changeSource,
         ]
         if let firstChangedAt = result.firstChangedAt {
             value["firstChangedAt"] = formatter.string(from: firstChangedAt)

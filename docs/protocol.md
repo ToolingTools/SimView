@@ -130,13 +130,27 @@ navigation; semantic actions re-resolve identifiers, roles, and names before
 using existing physical HID input.
 
 `accessibility.observe` accepts an optional opaque `afterRevision`, a scope,
-node limit, quiet-settle window, and bounded maximum wait. It returns the
-settled snapshot together with `revision`, `eventChanged`, `stable`,
-`timedOut`, `strategy`, and settlement timestamps. iOS uses the AX observation
-path when available and snapshot diffing otherwise; Android prefers persistent
-`UiAutomation` events and direct root capture, falling back to a bounded
-`uiautomator dump`. Accessibility event callbacks only wake the coordinator;
-tree traversal stays off callback threads.
+node limit, quiet-settle window, bounded maximum wait, and `requireChange`.
+`requireChange` defaults to true for change observation; interaction
+re-resolution sets it to false so an unchanged fresh tree becomes stable only
+after the requested quiet period. The result includes `revision`,
+`eventChanged`, `stable`, `timedOut`, `strategy`, and settlement timestamps.
+Additive diagnostics report `fallbackUsed`, `captureCount`, and `changeSource`
+(`event`, `snapshot-diff`, or `none`) without changing the protocol version.
+iOS keeps AXP event-first. When no event arrives, it probes after 150 ms with at
+most two snapshot captures: a changed first probe is confirmed once after the
+quiet window, while an unchanged first probe reserves its second capture for
+the deadline. A stable fallback diff is reported as a changed, settled result;
+a still-changing confirmation is unstable.
+Transient root-only iOS trees are retried three times with a 25 ms delay;
+persistent root-only application placeholders are returned as degraded rather
+than complete. Event-backed observation debounces before one post-event capture.
+The current Android agent runs a bounded shell `uiautomator dump` and reports
+`android-agent-shell`; without the agent the host reports
+`android-uiautomator`. Shell observation polls from 150 ms with backoff to
+500 ms, and root-only/zero-sized results receive at most two retries. A future
+direct agent `UiAutomation` capture is reserved as
+`android-agent-uiautomation`, but is not currently advertised.
 
 Accessibility selectors must include at least one of `ref`, `identifier`,
 `role`, `name`, or `value`. `accessibility.wait` uses `state: "visible"` or
@@ -148,8 +162,8 @@ At the MCP layer, `get_element_tree` and its app-only alias return a versioned
 element snapshot plus frame-scoped screen context. The snapshot source is
 `react-native-fiber` when a matching local Metro/Hermes development target can
 be inspected, otherwise `core-simulator-ax` on iOS or
-`android-agent-uiautomator` is used when the persistent Android agent is
-available; `android-uiautomator` is the bounded fallback when it is not.
+`android-agent-shell` is used when the persistent Android agent is available;
+`android-uiautomator` is the bounded host fallback when it is not.
 React Native nodes use
 generation-scoped `rn:<ordinal>` references and may include component ancestry,
 host type, test ID, visible text, measured bounds, and a project-relative source
@@ -158,6 +172,32 @@ fallback reason. The native protocol, CLI `ax-tree`, and
 `get_accessibility_tree` bypass Metro but retain their compatibility names.
 Screen context is platform-qualified; Android context may include the
 foreground package, activity, process, and task.
+
+MCP semantic taps always return the successful physical-input receipt under
+`interaction`. Destination verification mismatch is a hard-stop MCP error with
+`accepted: false`, `safeToContinue: false`, `inputDispatched: true`, and
+`code: "destination_mismatch"`; unstable or unavailable verification uses
+`destination_unconfirmed` and is retryable. Multiple native matches use the
+non-retryable hard-stop code `destination_ambiguous`. Failed checks may include up to
+three native-derived selector `suggestions`, never refs or indexes. Search
+keeps ordinary `matches` visible and actionable while reporting bounded
+`excludedCandidates` with exclusion reasons and swipe guidance.
+Destination selectors use exact matching by default. Callers that know only a
+stable fragment of a composite native AX label must set `exact: false`; they
+must not assume an identifier fragment is a complete accessible name. When a
+later destination-verification snapshot proves the native tree settled, its
+revision and fallback diagnostics supersede an earlier embedded post-action
+timeout in the returned observation receipt.
+`verifyDestination.timeoutMs` is bounded to 100–5000 milliseconds.
+`verifyDestination.identity` must match exactly one native node, while each
+optional `verifyDestination.assertions` selector must be present at least once.
+An identity count above one returns the hard-stop code `destination_ambiguous`, `inputDispatched: true`,
+`safeToContinue: false`, and `retryable: false`; callers must strengthen the
+identity without repeating the accepted tap. Assertions may match multiple nodes,
+for example when an amount is displayed in both total and outstanding fields.
+When React Native supplies screen context while native AX supplies the
+rendered semantic nodes, compact text reports both as
+`context=react-native-fiber ... elements=core-simulator-ax`.
 
 `health.get` is a diagnostic response. It reports server status, native PID,
 instance ID, configured device ID, selected device, capture state, idle deadline,

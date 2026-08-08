@@ -236,13 +236,31 @@ a relay, preview window, encoder subscription, or preview packet ring.
 
 Agents navigate with the warm semantic loop: call `observe_screen` in
 `semantic` mode, pass `sinceObservationId` on subsequent calls, use
-`search_elements` for bounded ranked discovery, and pass the chosen stable ref
-to `tap_element`. Prefer `perform_actions` with `observe: "semantic"` for
-ordered input plus a coherent post-action observation. Images are never an
-automatic fallback; use explicit `visual` mode only when the user requests
-visual inspection. iOS input uses SimulatorKit HID; Android uses the
-SimView agent with ADB shell input as a reduced-capability fallback. Pixel
-coordinates remain an explicit last resort for inaccessible targets.
+`search_elements` for bounded ranked discovery, and pass the chosen ref to
+`tap_element`. Physical semantic taps always settle and re-resolve a fresh
+native accessibility target, then hit-test it before input; React Native Fiber
+is discovery-only fallback and never supplies tap coordinates. Fiber-only test
+IDs require a unique exact native accessible-name corroboration before input.
+Offscreen ranked results appear under `excludedCandidates` with swipe guidance.
+For invoices, orders, payments, accounts, or other entity-sensitive navigation, pass
+`verifyDestination.identity` for the exact destination identifier and optional
+`verifyDestination.assertions` for amount, status, or other supporting facts.
+Selectors are exact by default; use a native label fragment with
+`exact: false` when the destination exposes a composite label such as
+`Invoice #30363063`. `isError` or `safeToContinue: false` is a hard stop even though
+the nested `interaction` receipt confirms that input was dispatched. Prefer
+an identity that uniquely establishes the entity, such as an invoice number;
+the verification timeout is bounded to 100–5000 ms. Identity must match exactly
+one native node. Assertions only need to be present and may match multiple nodes,
+such as an amount repeated in total and outstanding fields. An ambiguous identity
+hard-stops as `destination_ambiguous` with `safeToContinue: false`; strengthen it
+without repeating the already accepted tap. Prefer
+`perform_actions` with `observe: "semantic"` for ordered input plus a coherent post-action
+observation. Images are never an automatic fallback; use explicit `visual`
+mode only when the user requests visual inspection. iOS input uses SimulatorKit
+HID; Android uses the SimView agent with ADB shell input as a reduced-capability
+fallback. Pixel coordinates remain an explicit last resort for inaccessible
+targets.
 Android currently declares ASCII text support; iOS supports the full Unicode
 typing path. Callers should inspect the selected device capability before typing.
 

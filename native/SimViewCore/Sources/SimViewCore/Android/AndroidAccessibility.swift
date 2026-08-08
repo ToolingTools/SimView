@@ -24,9 +24,24 @@ final class AndroidAccessibilityService: @unchecked Sendable {
         scope: String = "interactive", maxNodes: Int = 1_200, timeout: TimeInterval = 15
     ) throws -> [String: Any] {
         let deadline = Date().addingTimeInterval(max(0.1, timeout))
+        var latestSnapshot: [String: Any]?
+        for attempt in 0..<3 {
+            let (xml, source) = try captureHierarchy(deadline: deadline)
+            let snapshot = try parsedSnapshot(
+                xml, scope: scope, maxNodes: maxNodes, source: source)
+            latestSnapshot = snapshot
+            guard shouldRetry(snapshot), attempt < 2 else { return snapshot }
+            let delay = min(0.15, 0.05 * pow(2, Double(attempt)))
+            guard deadline.timeIntervalSinceNow > delay else { return snapshot }
+            Thread.sleep(forTimeInterval: delay)
+        }
+        return latestSnapshot!
+    }
+
+    private func captureHierarchy(deadline: Date) throws -> (xml: Data, source: String) {
         if let agent {
             let xml = try agent.accessibilitySnapshot(timeout: max(0.1, deadline.timeIntervalSinceNow))
-            return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-agent-shell")
+            return (xml, "android-agent-shell")
         }
         let remotePath = "/data/local/tmp/simview-\(UUID().uuidString.lowercased()).xml"
         defer {
@@ -51,7 +66,13 @@ final class AndroidAccessibilityService: @unchecked Sendable {
         guard xml.count <= 8 * 1024 * 1024 else {
             throw SimViewError("ACCESSIBILITY_RESPONSE_TOO_LARGE", "UIAutomator hierarchy exceeds 8 MiB")
         }
-        return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-uiautomator")
+        return (xml, "android-uiautomator")
+    }
+
+    private func shouldRetry(_ snapshot: [String: Any]) -> Bool {
+        guard let stats = snapshot["stats"] as? [String: Any] else { return false }
+        return stats["quality"] as? String == "degraded"
+            && stats["reason"] as? String == "root-only-or-zero-sized-hierarchy"
     }
 
     private func parsedSnapshot(

@@ -50,6 +50,10 @@ final class ObservationCoordinator: @unchecked Sendable {
     private var imageRevision: UInt64 = 0
     private var imageReadyAt: Date?
     private var encodeScheduled = false
+    // A failed on-demand preparation is terminal for this visual revision.
+    // Without this marker every waiter re-schedules the same failed work,
+    // which both spins and makes a completed observation unnecessarily wait.
+    private var failedImageRevision: UInt64?
     private var generation: UInt64 = 0
 
     init(
@@ -96,6 +100,7 @@ final class ObservationCoordinator: @unchecked Sendable {
         signature = nextSignature
         if changed {
             changeRevision &+= 1
+            failedImageRevision = nil
             lastMeaningfulChange = now
             firstChangedFrameAt = firstChangedFrameAt ?? now
         }
@@ -120,7 +125,18 @@ final class ObservationCoordinator: @unchecked Sendable {
         let deadline = Date().addingTimeInterval(TimeInterval(maximumWaitMilliseconds) / 1_000)
         condition.lock()
         defer { condition.unlock() }
-        if visual, (preparedImage == nil || imageRevision != changeRevision), !encodeScheduled {
+        // Only a request which arrives after a completed failure may retry it.
+        // A waiter which scheduled the failed attempt must return that failure
+        // as an image-less, stable observation instead of immediately looping.
+        let retryFailedPreparation = visual && failedImageRevision == changeRevision
+        if retryFailedPreparation {
+            failedImageRevision = nil
+        }
+        if visual,
+            (preparedImage == nil || imageRevision != changeRevision),
+            (failedImageRevision != changeRevision || retryFailedPreparation),
+            !encodeScheduled
+        {
             encodeScheduled = true
             scheduleEncode(after: 0, generation: generation)
         }
@@ -133,7 +149,9 @@ final class ObservationCoordinator: @unchecked Sendable {
                 postAction = frameRevision > 0
             }
             let stable = postAction && now.timeIntervalSince(lastMeaningfulChange) >= quiet
-            let imageReady = !visual || (preparedImage != nil && imageRevision == changeRevision)
+            let imageReady =
+                !visual || (preparedImage != nil && imageRevision == changeRevision)
+                || failedImageRevision == changeRevision
             if stable && imageReady { break }
             if now >= deadline { break }
             condition.wait(until: min(deadline, now.addingTimeInterval(0.025)))
@@ -186,6 +204,7 @@ final class ObservationCoordinator: @unchecked Sendable {
         imageRevision = 0
         imageReadyAt = nil
         encodeScheduled = false
+        failedImageRevision = nil
         generation &+= 1
         condition.broadcast()
         condition.unlock()
@@ -231,6 +250,7 @@ final class ObservationCoordinator: @unchecked Sendable {
             preparedHeight = encoded.height
             imageRevision = revision
             imageReadyAt = Date()
+            failedImageRevision = nil
             encodeScheduled = false
             condition.broadcast()
             condition.unlock()
@@ -238,6 +258,7 @@ final class ObservationCoordinator: @unchecked Sendable {
         }
         if revision == changeRevision {
             encodeScheduled = false
+            failedImageRevision = revision
             condition.broadcast()
             condition.unlock()
             return

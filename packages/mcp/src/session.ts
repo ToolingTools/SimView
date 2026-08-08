@@ -92,6 +92,70 @@ export interface WarmObservation {
 
 export type AccessibilityObservation = z.output<typeof accessibilityObserveResultSchema>;
 
+export type NativeTapResolution = {
+  accepted: boolean;
+  code:
+    | "stale_ref"
+    | "target_not_found"
+    | "ambiguous_target"
+    | "target_offscreen"
+    | "target_disabled"
+    | "unstable_snapshot"
+    | "native_target_unconfirmed"
+    | "hit_target_mismatch"
+    | "ready";
+  retryable: boolean;
+  discoverySource?: string;
+  discoverySnapshotId?: string;
+  interactionSource?: string;
+  interactionSnapshotId?: string;
+  fingerprint?: SemanticFingerprint;
+  target?: AccessibilityNode;
+  point?: { x: number; y: number };
+  rawFrame?: AccessibilityNode["frame"];
+  viewport?: AccessibilitySnapshot["screen"];
+  scrollRequired?: boolean;
+  suggestedScrollDirection?: "up" | "down" | "left" | "right";
+  corroboratedBy?: Array<"identifier" | "name" | "role" | "value">;
+  stable?: boolean;
+  hitTest?: boolean;
+};
+
+export type DestinationVerification = {
+  status: "matched" | "mismatch" | "ambiguous" | "unstable" | "unavailable";
+  verified: boolean;
+  source?: AccessibilitySnapshot["source"];
+  snapshotId?: string;
+  revision?: string;
+  settledAt?: string;
+  strategy?: AccessibilityObservation["strategy"];
+  eventChanged?: boolean;
+  timedOut?: boolean;
+  fallbackUsed?: boolean;
+  captureCount?: number;
+  changeSource?: AccessibilityObservation["changeSource"];
+  stable: boolean;
+  checks: Array<{
+    kind: "identity" | "assertion";
+    selector: AccessibilitySelector;
+    count: number;
+    suggestions?: DestinationSelectorSuggestion[];
+  }>;
+};
+
+export type DestinationVerificationRequest = {
+  identity: AccessibilitySelector;
+  assertions?: AccessibilitySelector[];
+};
+
+type DestinationSelectorSuggestion = {
+  identifier?: string;
+  role?: string;
+  name?: string;
+  value?: string;
+  exact: true;
+};
+
 const PREVIEW_PACKET_LIMIT = 120;
 const PREVIEW_MAX_LAG_PACKETS = 30;
 
@@ -136,7 +200,7 @@ export class SimViewSession {
   }
 
   get accessibilityRevision(): string | undefined {
-    return this.#latestAccessibilityObservation?.revision ?? this.lastAccessibility?.snapshotId;
+    return this.#latestAccessibilityObservation?.revision;
   }
 
   get accessibilityStrategy(): AccessibilityObservation["strategy"] | undefined {
@@ -483,8 +547,7 @@ export class SimViewSession {
       this.lastAccessibility = snapshot;
       this.#rememberAccessibilitySnapshot(snapshot, {
         revision: snapshot.snapshotId,
-        strategy:
-          snapshot.source === "android-agent-shell" ? "android-shell-dump" : "snapshot-diff",
+        strategy: strategyForSnapshot(snapshot),
         stable: true,
         settledAt: snapshot.capturedAt,
       });
@@ -498,12 +561,14 @@ export class SimViewSession {
     maxNodes = 1_200,
     settleQuietMs = 75,
     maxWaitMs = 500,
+    requireChange = true,
   }: {
     afterRevision?: string | undefined;
     scope?: "interactive" | "visible" | "full" | undefined;
     maxNodes?: number | undefined;
     settleQuietMs?: number | undefined;
     maxWaitMs?: number | undefined;
+    requireChange?: boolean | undefined;
   } = {}): Promise<AccessibilityObservation> {
     const semanticGeneration = this.#semanticGeneration;
     this.requireCapability("accessibility", "Accessibility inspection");
@@ -515,6 +580,7 @@ export class SimViewSession {
         maxNodes,
         settleQuietMs,
         maxWaitMs,
+        requireChange,
       }),
     );
     if (semanticGeneration === this.#semanticGeneration) {
@@ -680,25 +746,11 @@ export class SimViewSession {
 
   async resolveActionableElement(selector: AccessibilitySelector) {
     const snapshots = await this.#semanticTargetSnapshots(selector.ref);
-    let fallback:
-      | {
-          snapshotId: string;
-          selector: AccessibilitySelector;
-          matches: AccessibilityNode[];
-          count: number;
-        }
-      | undefined;
     for (const snapshot of snapshots) {
       const matches = matchingElements(snapshot, selector);
       if (matches.length === 0) continue;
       const selected =
         selector.index === undefined ? matches : [matches[selector.index]].filter(isDefined);
-      fallback ??= {
-        snapshotId: snapshot.snapshotId,
-        selector,
-        matches: selected,
-        count: selected.length,
-      };
       const actionable = selected.filter(isTappableElement);
       if (actionable.length > 0) {
         return {
@@ -709,14 +761,318 @@ export class SimViewSession {
         };
       }
     }
-    return (
-      fallback ?? {
-        snapshotId: snapshots[0]?.snapshotId ?? "unavailable",
-        selector,
-        matches: [],
-        count: 0,
-      }
+    return {
+      snapshotId: snapshots[0]?.snapshotId ?? "unavailable",
+      selector,
+      matches: [],
+      count: 0,
+    };
+  }
+
+  /**
+   * Resolve a semantic discovery result into a fresh, native-only target. Refs
+   * and coordinates belong to the snapshot that produced them, so neither is
+   * allowed to cross this boundary into physical input.
+   */
+  async resolveNativeTap(selector: AccessibilitySelector): Promise<NativeTapResolution> {
+    const cachedSnapshots = await this.#semanticTargetSnapshots(selector.ref);
+    const cachedNative = cachedSnapshots.find(
+      (snapshot) => snapshot.source !== "react-native-fiber",
     );
+    const cachedFiber = cachedSnapshots.find(
+      (snapshot) => snapshot.source === "react-native-fiber",
+    );
+    let discoverySource: ElementSnapshot | undefined;
+    let discovery: AccessibilityNode | undefined;
+
+    // A ref is meaningful only in the snapshot which issued it. Preserve its
+    // semantic identity before taking the fresh native action snapshot.
+    if (selector.ref) {
+      const refSource = selector.ref.startsWith("rn:") ? cachedFiber : cachedNative;
+      const refMatches = refSource ? matchingElements(refSource, selector) : [];
+      if (refMatches.length === 0) {
+        return { accepted: false, code: "stale_ref", retryable: true };
+      }
+      if (refMatches.length !== 1 && selector.index === undefined) {
+        return { accepted: false, code: "ambiguous_target", retryable: false };
+      }
+      discoverySource = refSource;
+      discovery = selector.index === undefined ? refMatches[0] : refMatches[selector.index];
+      if (!discovery) return { accepted: false, code: "stale_ref", retryable: true };
+    } else if (selector.index !== undefined && cachedNative) {
+      // Index chooses an entity from the discovery generation only. Preserve
+      // that entity's fingerprint before refresh so reordered repeated rows
+      // cannot silently redirect the tap to the same numeric index.
+      const cachedMatches = matchingElements(cachedNative, selector);
+      discovery = cachedMatches[selector.index];
+      if (discovery) discoverySource = cachedNative;
+    }
+
+    let settleAfterRevision = this.accessibilityRevision;
+    if (!settleAfterRevision) {
+      const baseline = await this.accessibilityObserve({
+        scope: "interactive",
+        maxWaitMs: 0,
+      });
+      settleAfterRevision = baseline.revision;
+    }
+    let observation = await this.accessibilityObserve({
+      afterRevision: settleAfterRevision,
+      scope: "interactive",
+      maxWaitMs: 500,
+      requireChange: false,
+    });
+    if (!observation.stable) {
+      observation = await this.accessibilityObserve({
+        afterRevision: observation.revision,
+        scope: "interactive",
+        maxWaitMs: 500,
+        requireChange: false,
+      });
+    }
+    if (!observation.stable) {
+      return {
+        accepted: false,
+        code: "unstable_snapshot",
+        retryable: true,
+        ...(discoverySource ? { discoverySource: discoverySource.source } : {}),
+        ...(discoverySource ? { discoverySnapshotId: discoverySource.snapshotId } : {}),
+        interactionSource: observation.snapshot.source,
+        interactionSnapshotId: observation.snapshot.snapshotId,
+        stable: false,
+      };
+    }
+
+    // Field selectors resolve directly against the fresh native tree. Fiber is
+    // consulted only when native has no candidate, or when the caller supplied
+    // a generation-scoped rn: ref. Fiber coordinates never reach input.
+    if (!discovery) {
+      const freshMatches = matchingElements(observation.snapshot, selector);
+      const selected =
+        selector.index === undefined
+          ? freshMatches
+          : [freshMatches[selector.index]].filter(isDefined);
+      if (selected.length > 0) {
+        if (selected.length !== 1 && selector.index === undefined) {
+          return { accepted: false, code: "ambiguous_target", retryable: false };
+        }
+        discoverySource = observation.snapshot;
+        discovery = selected[0];
+      } else if (cachedFiber) {
+        const fiberMatches = matchingElements(cachedFiber, selector);
+        const fiberSelected =
+          selector.index === undefined
+            ? fiberMatches
+            : [fiberMatches[selector.index]].filter(isDefined);
+        if (fiberSelected.length !== 1) {
+          return {
+            accepted: false,
+            code: fiberSelected.length > 1 ? "ambiguous_target" : "target_not_found",
+            retryable: fiberSelected.length === 0,
+          };
+        }
+        discoverySource = cachedFiber;
+        discovery = fiberSelected[0];
+      } else {
+        return { accepted: false, code: "target_not_found", retryable: true };
+      }
+    }
+
+    if (!discovery || !discoverySource) {
+      return { accepted: false, code: "target_not_found", retryable: true };
+    }
+    const fingerprint = semanticFingerprint(discovery);
+    if (!fingerprint.identifier && !fingerprint.name && !fingerprint.value) {
+      return { accepted: false, code: "native_target_unconfirmed", retryable: false };
+    }
+    const corroboration =
+      discoverySource.source === "react-native-fiber"
+        ? corroborateFiberTarget(observation.snapshot, fingerprint)
+        : {
+            matches: flattenAccessibilityTree(observation.snapshot.root).filter((node) =>
+              matchesFingerprint(node, fingerprint),
+            ),
+            fields: Object.keys(fingerprint) as Array<"identifier" | "name" | "role" | "value">,
+          };
+    const nativeMatches = corroboration.matches;
+    if (nativeMatches.length === 0) {
+      return {
+        accepted: false,
+        code: "native_target_unconfirmed",
+        retryable: true,
+        discoverySource: discoverySource.source,
+        discoverySnapshotId: discoverySource.snapshotId,
+        interactionSource: observation.snapshot.source,
+        interactionSnapshotId: observation.snapshot.snapshotId,
+        fingerprint,
+        corroboratedBy: corroboration.fields,
+        stable: true,
+      };
+    }
+    if (nativeMatches.length !== 1) {
+      return {
+        accepted: false,
+        code: "ambiguous_target",
+        retryable: false,
+        fingerprint,
+        corroboratedBy: corroboration.fields,
+      };
+    }
+    const target = nativeMatches[0];
+    if (!target) {
+      return { accepted: false, code: "target_not_found", retryable: true };
+    }
+    const frame = target.frame?.normalized;
+    if (target.enabled === false || target.hidden === true) {
+      return {
+        accepted: false,
+        code: "target_disabled",
+        retryable: false,
+        fingerprint,
+        target,
+      };
+    }
+    if (!frame || frame.width <= 0 || frame.height <= 0) {
+      return {
+        accepted: false,
+        code: "native_target_unconfirmed",
+        retryable: false,
+        fingerprint,
+        target,
+        rawFrame: target.frame,
+        viewport: observation.snapshot.screen,
+      };
+    }
+    const point = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
+    if (point.x < 0 || point.x > 1 || point.y < 0 || point.y > 1) {
+      return {
+        accepted: false,
+        code: "target_offscreen",
+        retryable: true,
+        fingerprint,
+        target,
+        rawFrame: target.frame,
+        viewport: observation.snapshot.screen,
+        scrollRequired: true,
+        suggestedScrollDirection: suggestedScrollDirection(frame),
+        stable: true,
+      };
+    }
+    if (!isActionableSearchCandidate(target)) {
+      return {
+        accepted: false,
+        code: "native_target_unconfirmed",
+        retryable: false,
+        fingerprint,
+        target,
+        rawFrame: target.frame,
+        viewport: observation.snapshot.screen,
+      };
+    }
+    const hit = (await this.inspectPoint(point.x, point.y)) as AccessibilityNode;
+    const nativeFingerprint = semanticFingerprint(target);
+    if (!matchesFingerprint(hit, nativeFingerprint)) {
+      return {
+        accepted: false,
+        code: "hit_target_mismatch",
+        retryable: true,
+        fingerprint,
+        target,
+        point,
+        hitTest: false,
+      };
+    }
+    return {
+      accepted: true,
+      code: "ready",
+      retryable: false,
+      discoverySource: discoverySource.source,
+      discoverySnapshotId: discoverySource.snapshotId,
+      interactionSource: observation.snapshot.source,
+      interactionSnapshotId: observation.snapshot.snapshotId,
+      fingerprint,
+      corroboratedBy: corroboration.fields,
+      target,
+      point,
+      stable: true,
+      hitTest: true,
+    };
+  }
+
+  async verifyNativeDestination(
+    request: DestinationVerificationRequest,
+    {
+      afterRevision,
+      settleQuietMs = 75,
+      maxWaitMs = 1_000,
+    }: {
+      afterRevision?: string | undefined;
+      settleQuietMs?: number | undefined;
+      maxWaitMs?: number | undefined;
+    } = {},
+  ): Promise<DestinationVerification> {
+    let observation: AccessibilityObservation;
+    try {
+      observation = await this.accessibilityObserve({
+        afterRevision,
+        scope: "visible",
+        settleQuietMs,
+        maxWaitMs,
+      });
+      if (!observation.stable) {
+        observation = await this.accessibilityObserve({
+          afterRevision,
+          scope: "visible",
+          settleQuietMs,
+          maxWaitMs,
+        });
+      }
+    } catch {
+      return { status: "unavailable", verified: false, stable: false, checks: [] };
+    }
+    const candidates = [
+      { kind: "identity" as const, selector: request.identity },
+      ...(request.assertions ?? []).map((selector) => ({
+        kind: "assertion" as const,
+        selector,
+      })),
+    ];
+    const checks = candidates.map(({ kind, selector: candidate }) => {
+      const count = matchingElements(observation.snapshot, candidate).length;
+      return {
+        kind,
+        selector: candidate,
+        count,
+        ...(count === 0
+          ? { suggestions: destinationSelectorSuggestions(observation.snapshot, candidate) }
+          : {}),
+      };
+    });
+    const identityCount = checks[0]?.count ?? 0;
+    const assertionsPresent = checks.slice(1).every((check) => check.count > 0);
+    const verified = observation.stable && identityCount === 1 && assertionsPresent;
+    return {
+      status: !observation.stable
+        ? "unstable"
+        : verified
+          ? "matched"
+          : identityCount > 1
+            ? "ambiguous"
+            : "mismatch",
+      verified,
+      source: observation.snapshot.source,
+      snapshotId: observation.snapshot.snapshotId,
+      revision: observation.revision,
+      settledAt: observation.settledAt,
+      strategy: observation.strategy,
+      eventChanged: observation.eventChanged,
+      timedOut: observation.timedOut,
+      ...(observation.fallbackUsed !== undefined ? { fallbackUsed: observation.fallbackUsed } : {}),
+      ...(observation.captureCount !== undefined ? { captureCount: observation.captureCount } : {}),
+      ...(observation.changeSource ? { changeSource: observation.changeSource } : {}),
+      stable: observation.stable,
+      checks,
+    };
   }
 
   async searchElements(search: ElementSearchQuery) {
@@ -724,33 +1080,125 @@ export class SimViewSession {
     const snapshots = await this.#semanticTargetSnapshots();
     const snapshot = snapshots[0];
     const ranked: Array<{ match: ElementSearchMatch; source: ElementSnapshot }> = [];
+    const excluded: Array<{
+      match: ElementSearchMatch;
+      source: ElementSnapshot;
+      reasons: Array<"visibility" | "actionability">;
+      scrollRequired: boolean;
+      suggestedScrollDirection?: "up" | "down" | "left" | "right";
+    }> = [];
+    const sourceDiagnostics: Array<{
+      source: ElementSnapshot["source"];
+      snapshotId: string;
+      quality: "complete" | "partial" | "degraded";
+      reason?: string;
+      truncated: boolean;
+      nodeCount: number;
+      capturedBudget?: number;
+      exactMatchCount: number;
+      excludedExactMatchCount: number;
+      excludedExactMatches: { visibility: number; actionability: number };
+    }> = [];
+    const excludedExactMatchKeys = new Set<string>();
     for (const candidateSnapshot of snapshots) {
-      const candidates = flattenAccessibilityTree(candidateSnapshot.root)
-        .filter((node) => !search.visibleOnly || isVisibleSearchCandidate(node))
-        .filter((node) => !search.actionableOnly || isActionableSearchCandidate(node))
+      const candidates = flattenAccessibilityTree(candidateSnapshot.root).filter(
+        (node) =>
+          !roles?.length ||
+          roles.some((role) => normalizeSearchText(node.role ?? "").includes(role)),
+      );
+      const rankedCandidates = candidates
+        .map((element) => ({ element, match: rankElementSearchMatch(element, search.query) }))
         .filter(
-          (node) =>
-            !roles?.length ||
-            roles.some((role) => normalizeSearchText(node.role ?? "").includes(role)),
+          (
+            candidate,
+          ): candidate is {
+            element: AccessibilityNode;
+            match: Omit<ElementSearchMatch, "source" | "snapshotId">;
+          } => candidate.match !== undefined,
         );
+      const exactCandidates = rankedCandidates.filter((candidate) => candidate.match.exact);
+      const excludedByVisibility = search.visibleOnly
+        ? exactCandidates.filter((candidate) => !isVisibleSearchCandidate(candidate.element)).length
+        : 0;
+      const excludedByActionability = search.actionableOnly
+        ? exactCandidates.filter((candidate) => !isActionableSearchCandidate(candidate.element))
+            .length
+        : 0;
+      const excludedExact = exactCandidates.filter(
+        (candidate) =>
+          (search.visibleOnly && !isVisibleSearchCandidate(candidate.element)) ||
+          (search.actionableOnly && !isActionableSearchCandidate(candidate.element)),
+      ).length;
+      for (const candidate of exactCandidates) {
+        if (
+          (search.visibleOnly && !isVisibleSearchCandidate(candidate.element)) ||
+          (search.actionableOnly && !isActionableSearchCandidate(candidate.element))
+        ) {
+          excludedExactMatchKeys.add(elementSearchDedupeKey(candidate.element));
+        }
+      }
+      sourceDiagnostics.push({
+        source: candidateSnapshot.source,
+        snapshotId: candidateSnapshot.snapshotId,
+        quality: candidateSnapshot.stats.quality ?? "complete",
+        ...(candidateSnapshot.stats.reason ? { reason: candidateSnapshot.stats.reason } : {}),
+        truncated: candidateSnapshot.stats.truncated,
+        nodeCount: candidateSnapshot.stats.nodeCount,
+        ...(candidateSnapshot.stats.capturedBudget !== undefined
+          ? { capturedBudget: candidateSnapshot.stats.capturedBudget }
+          : {}),
+        exactMatchCount: exactCandidates.length,
+        excludedExactMatchCount: excludedExact,
+        excludedExactMatches: {
+          visibility: excludedByVisibility,
+          actionability: excludedByActionability,
+        },
+      });
       ranked.push(
-        ...candidates
-          .map((element) => rankElementSearchMatch(element, search.query))
-          .filter((match): match is ElementSearchMatch => match !== undefined)
-          .map((match) => ({ match, source: candidateSnapshot })),
+        ...rankedCandidates
+          .filter(({ element }) => !search.visibleOnly || isVisibleSearchCandidate(element))
+          .filter(({ element }) => !search.actionableOnly || isActionableSearchCandidate(element))
+          .map(({ match }) => ({
+            match: {
+              ...match,
+              source: candidateSnapshot.source,
+              snapshotId: candidateSnapshot.snapshotId,
+            },
+            source: candidateSnapshot,
+          })),
+      );
+      excluded.push(
+        ...rankedCandidates.flatMap(({ element, match }) => {
+          const reasons: Array<"visibility" | "actionability"> = [];
+          if (search.visibleOnly && !isVisibleSearchCandidate(element)) reasons.push("visibility");
+          if (search.actionableOnly && !isActionableSearchCandidate(element)) {
+            reasons.push("actionability");
+          }
+          if (reasons.length === 0) return [];
+          const frame = element.frame?.normalized;
+          const offscreen = frame !== undefined && isFrameOffscreen(frame);
+          return [
+            {
+              match: {
+                ...match,
+                source: candidateSnapshot.source,
+                snapshotId: candidateSnapshot.snapshotId,
+              },
+              source: candidateSnapshot,
+              reasons,
+              scrollRequired: reasons.includes("visibility") && offscreen,
+              ...(reasons.includes("visibility") && offscreen && frame
+                ? { suggestedScrollDirection: suggestedScrollDirection(frame) }
+                : {}),
+            },
+          ];
+        }),
       );
     }
     const deduplicated = new Map<string, { match: ElementSearchMatch; source: ElementSnapshot }>();
     for (const candidate of ranked) {
       const node = candidate.match.element;
-      const frame = node.frame?.normalized;
-      const key = [
-        normalizeSearchText(node.identifier ?? node.label ?? node.title ?? node.ref),
-        normalizeSearchText(node.role ?? ""),
-        frame
-          ? `${Math.round(frame.x * 100)}:${Math.round(frame.y * 100)}:${Math.round(frame.width * 100)}:${Math.round(frame.height * 100)}`
-          : node.ref,
-      ].join("|");
+      const key = elementSearchDedupeKey(node);
       const existing = deduplicated.get(key);
       const nativeActionable =
         candidate.source.source !== "react-native-fiber" && isActionableSearchCandidate(node);
@@ -772,6 +1220,26 @@ export class SimViewSession {
         Number(right.match.exact) - Number(left.match.exact) ||
         left.match.element.ref.localeCompare(right.match.element.ref),
     );
+    const deduplicatedExcluded = new Map<string, (typeof excluded)[number]>();
+    for (const candidate of excluded) {
+      const key = elementSearchDedupeKey(candidate.match.element);
+      const existing = deduplicatedExcluded.get(key);
+      const candidateIsNative = candidate.source.source !== "react-native-fiber";
+      const existingIsNative = existing?.source.source !== "react-native-fiber";
+      if (
+        !existing ||
+        (candidateIsNative && !existingIsNative) ||
+        candidate.match.score > existing.match.score
+      ) {
+        deduplicatedExcluded.set(key, candidate);
+      }
+    }
+    const orderedExcluded = [...deduplicatedExcluded.values()].sort(
+      (left, right) =>
+        right.match.score - left.match.score ||
+        Number(right.match.exact) - Number(left.match.exact) ||
+        left.match.element.ref.localeCompare(right.match.element.ref),
+    );
     return {
       snapshotId: snapshot?.snapshotId ?? "unavailable",
       query: search,
@@ -780,6 +1248,17 @@ export class SimViewSession {
       total: ordered.length,
       truncated: ordered.length > search.limit,
       sourceTruncated: snapshots.some((candidate) => candidate.stats.truncated),
+      excludedExactMatchCount: excludedExactMatchKeys.size,
+      excludedCandidateCount: orderedExcluded.length,
+      excludedCandidates: orderedExcluded.slice(0, search.limit).map((candidate) => ({
+        match: candidate.match,
+        reasons: candidate.reasons,
+        scrollRequired: candidate.scrollRequired,
+        ...(candidate.suggestedScrollDirection
+          ? { suggestedScrollDirection: candidate.suggestedScrollDirection }
+          : {}),
+      })),
+      sources: sourceDiagnostics,
     };
   }
 
@@ -1535,6 +2014,20 @@ function semanticHashForSnapshot(snapshot: AccessibilitySnapshot): string {
   return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
 }
 
+function strategyForSnapshot(
+  snapshot: AccessibilitySnapshot,
+): AccessibilityObservation["strategy"] {
+  switch (snapshot.source) {
+    case "core-simulator-ax":
+      return "ios-axp";
+    case "android-agent-shell":
+      return "android-shell-dump";
+    case "android-uiautomator":
+    case "android-agent-uiautomation":
+      return "android-uiautomation";
+  }
+}
+
 function normalizeSearchText(value: string): string {
   return value
     .normalize("NFKD")
@@ -1558,11 +2051,76 @@ function matchingElements(
   return flattenAccessibilityTree(snapshot.root).filter(
     (node) =>
       matches(node.ref, selector.ref) &&
-      matches(node.identifier, selector.identifier) &&
+      matches(node.testID ?? node.identifier, selector.identifier) &&
       matches(node.role, selector.role) &&
       matchesAccessibleName(node.label ?? node.title, selector.name, exact) &&
       matches(node.value, selector.value),
   );
+}
+
+function destinationSelectorSuggestions(
+  snapshot: AccessibilitySnapshot,
+  selector: AccessibilitySelector,
+): DestinationSelectorSuggestion[] {
+  const requested = [selector.identifier, selector.name, selector.value, selector.role]
+    .filter(isDefined)
+    .map(normalizeSearchText)
+    .filter(Boolean);
+  const requestedTokens = new Set(requested.flatMap((value) => value.split(" ").filter(Boolean)));
+  if (requestedTokens.size === 0) return [];
+
+  const ranked = flattenAccessibilityTree(snapshot.root)
+    .filter(isVisibleSearchCandidate)
+    .map((node) => {
+      const identifier = node.testID ?? node.identifier;
+      const name = node.label ?? node.title;
+      const value = node.valueRedacted ? undefined : node.value;
+      const role = node.role ?? node.roleDescription;
+      const fields = [identifier, name, value, role]
+        .filter(isDefined)
+        .map(normalizeSearchText)
+        .filter(Boolean);
+      const candidateTokens = new Set(fields.flatMap((field) => field.split(" ").filter(Boolean)));
+      const overlap = [...requestedTokens].filter((token) => candidateTokens.has(token)).length;
+      if (overlap === 0) return undefined;
+      const options = [
+        identifier
+          ? { suggestion: { identifier, exact: true } as DestinationSelectorSuggestion, weight: 3 }
+          : undefined,
+        name
+          ? { suggestion: { name, exact: true } as DestinationSelectorSuggestion, weight: 2 }
+          : undefined,
+        value
+          ? { suggestion: { value, exact: true } as DestinationSelectorSuggestion, weight: 1 }
+          : undefined,
+      ].filter(isDefined);
+      const best = options
+        .map((option) => {
+          const raw =
+            option.suggestion.identifier ?? option.suggestion.name ?? option.suggestion.value;
+          const normalized = normalizeSearchText(raw ?? "");
+          const optionTokens = new Set(normalized.split(" ").filter(Boolean));
+          const optionOverlap = [...requestedTokens].filter((token) =>
+            optionTokens.has(token),
+          ).length;
+          return {
+            suggestion: option.suggestion,
+            score: (requested.includes(normalized) ? 100 : 0) + optionOverlap * 10 + option.weight,
+          };
+        })
+        .sort((left, right) => right.score - left.score)[0];
+      return best;
+    })
+    .filter(isDefined)
+    .sort((left, right) => right.score - left.score);
+
+  const deduplicated = new Map<string, DestinationSelectorSuggestion>();
+  for (const candidate of ranked) {
+    const key = JSON.stringify(candidate.suggestion);
+    if (!deduplicated.has(key)) deduplicated.set(key, candidate.suggestion);
+    if (deduplicated.size === 3) break;
+  }
+  return [...deduplicated.values()];
 }
 
 function matchesAccessibleName(
@@ -1586,7 +2144,126 @@ function isDefined<T>(value: T | undefined): value is T {
 }
 
 function isTappableElement(node: AccessibilityNode): boolean {
-  return node.enabled !== false && isVisibleSearchCandidate(node);
+  return isActionableSearchCandidate(node) && isVisibleSearchCandidate(node);
+}
+
+type SemanticFingerprint = {
+  identifier?: string | undefined;
+  role?: string | undefined;
+  name?: string | undefined;
+  value?: string | undefined;
+};
+
+function semanticFingerprint(node: AccessibilityNode): SemanticFingerprint {
+  return {
+    ...((node.testID ?? node.identifier) ? { identifier: node.testID ?? node.identifier } : {}),
+    ...((node.role ?? node.roleDescription) ? { role: node.role ?? node.roleDescription } : {}),
+    ...((node.label ?? node.title) ? { name: node.label ?? node.title } : {}),
+    ...(!node.valueRedacted && node.value ? { value: node.value } : {}),
+  };
+}
+
+function matchesFingerprint(node: AccessibilityNode, fingerprint: SemanticFingerprint): boolean {
+  const nodeRole = node.role ?? node.roleDescription;
+  return (
+    (!fingerprint.identifier ||
+      node.testID === fingerprint.identifier ||
+      node.identifier === fingerprint.identifier) &&
+    (!fingerprint.role ||
+      (nodeRole !== undefined &&
+        normalizeFingerprintRole(nodeRole) === normalizeFingerprintRole(fingerprint.role))) &&
+    (!fingerprint.name ||
+      matchesAccessibleName(node.label ?? node.title, fingerprint.name, true)) &&
+    (!fingerprint.value || (!node.valueRedacted && node.value === fingerprint.value))
+  );
+}
+
+function corroborateFiberTarget(
+  snapshot: AccessibilitySnapshot,
+  fingerprint: SemanticFingerprint,
+): {
+  matches: AccessibilityNode[];
+  fields: Array<"identifier" | "name" | "role" | "value">;
+} {
+  const nodes = flattenAccessibilityTree(snapshot.root);
+  if (fingerprint.identifier) {
+    const matches = nodes.filter(
+      (node) =>
+        hasActionSemantics(node) &&
+        (node.testID === fingerprint.identifier || node.identifier === fingerprint.identifier),
+    );
+    if (matches.length > 0) return { matches, fields: ["identifier"] };
+  }
+
+  // React Native testIDs are not guaranteed to be exported through iOS AX.
+  // When that happens, an exact accessible name may bridge discovery to the
+  // native target, but only if optional role/value evidence does not conflict.
+  if (!fingerprint.name) return { matches: [], fields: [] };
+  const fields: Array<"identifier" | "name" | "role" | "value"> = ["name"];
+  const matches = nodes.filter((node) => {
+    if (!hasActionSemantics(node)) return false;
+    if (!matchesAccessibleName(node.label ?? node.title, fingerprint.name, true)) return false;
+    const nodeRole = node.role ?? node.roleDescription;
+    if (
+      fingerprint.role &&
+      nodeRole &&
+      isSpecificFingerprintRole(fingerprint.role) &&
+      isSpecificFingerprintRole(nodeRole) &&
+      normalizeFingerprintRole(nodeRole) !== normalizeFingerprintRole(fingerprint.role)
+    ) {
+      return false;
+    }
+    if (
+      fingerprint.value &&
+      !node.valueRedacted &&
+      node.value &&
+      node.value !== fingerprint.value
+    ) {
+      return false;
+    }
+    return true;
+  });
+  if (
+    fingerprint.role &&
+    matches.some((node) => {
+      const role = node.role ?? node.roleDescription;
+      return (
+        role !== undefined &&
+        isSpecificFingerprintRole(role) &&
+        normalizeFingerprintRole(role) === normalizeFingerprintRole(fingerprint.role ?? "")
+      );
+    })
+  ) {
+    fields.push("role");
+  }
+  if (
+    fingerprint.value &&
+    matches.some((node) => !node.valueRedacted && node.value === fingerprint.value)
+  ) {
+    fields.push("value");
+  }
+  return { matches, fields };
+}
+
+function isSpecificFingerprintRole(role: string): boolean {
+  return !["", "element", "genericelement", "view"].includes(normalizeFingerprintRole(role));
+}
+
+function normalizeFingerprintRole(role: string): string {
+  return normalizeSearchText(role).replace(/^ax/u, "").replaceAll(" ", "");
+}
+
+function suggestedScrollDirection(
+  frame: NonNullable<AccessibilityNode["frame"]>["normalized"],
+): "up" | "down" | "left" | "right" {
+  const centerX = frame.x + frame.width / 2;
+  const centerY = frame.y + frame.height / 2;
+  const horizontalOverflow = centerX < 0 ? centerX : centerX > 1 ? centerX - 1 : 0;
+  const verticalOverflow = centerY < 0 ? centerY : centerY > 1 ? centerY - 1 : 0;
+  if (Math.abs(verticalOverflow) >= Math.abs(horizontalOverflow)) {
+    return centerY > 1 ? "up" : "down";
+  }
+  return centerX > 1 ? "left" : "right";
 }
 
 function isVisibleSearchCandidate(node: AccessibilityNode): boolean {
@@ -1603,17 +2280,36 @@ function isVisibleSearchCandidate(node: AccessibilityNode): boolean {
   );
 }
 
+function isFrameOffscreen(frame: NonNullable<AccessibilityNode["frame"]>["normalized"]): boolean {
+  return frame.x + frame.width <= 0 || frame.y + frame.height <= 0 || frame.x >= 1 || frame.y >= 1;
+}
+
 function isActionableSearchCandidate(node: AccessibilityNode): boolean {
   if (node.enabled === false || node.hidden === true) return false;
+  return hasActionSemantics(node);
+}
+
+function hasActionSemantics(node: AccessibilityNode): boolean {
   if (node.interactive === true || (node.actions?.length ?? 0) > 0) return true;
   const role = normalizeSearchText(node.role ?? "").replaceAll(" ", "");
   return ACTIONABLE_ROLE_MARKERS.some((marker) => role.includes(marker));
 }
 
+function elementSearchDedupeKey(node: AccessibilityNode): string {
+  const frame = node.frame?.normalized;
+  return [
+    normalizeSearchText(node.identifier ?? node.label ?? node.title ?? node.ref),
+    normalizeSearchText(node.role ?? ""),
+    frame
+      ? `${Math.round(frame.x * 100)}:${Math.round(frame.y * 100)}:${Math.round(frame.width * 100)}:${Math.round(frame.height * 100)}`
+      : node.ref,
+  ].join("|");
+}
+
 function rankElementSearchMatch(
   element: AccessibilityNode,
   query: string,
-): ElementSearchMatch | undefined {
+): Omit<ElementSearchMatch, "source" | "snapshotId"> | undefined {
   const normalizedQuery = normalizeSearchText(query);
   const queryTokens = normalizedQuery.split(" ").filter(Boolean);
   const fields = [
@@ -1629,11 +2325,16 @@ function rankElementSearchMatch(
   ] as const;
   let score = 0;
   let exact = false;
-  const matchedFields: string[] = [];
+  const matchedFields = new Set<string>();
+  const aggregateTokens = new Set<string>();
   for (const [field, rawValue, weight] of fields) {
     if (!rawValue) continue;
     const value = normalizeSearchText(rawValue);
     if (!value) continue;
+    const valueTokens = new Set(value.split(" ").filter(Boolean));
+    for (const token of queryTokens) {
+      if (valueTokens.has(token)) aggregateTokens.add(token);
+    }
     let fieldScore = 0;
     if (value === normalizedQuery) {
       fieldScore = 1;
@@ -1643,7 +2344,6 @@ function rankElementSearchMatch(
     } else if (value.includes(normalizedQuery)) {
       fieldScore = 0.84;
     } else {
-      const valueTokens = new Set(value.split(" ").filter(Boolean));
       const matchedTokenCount = queryTokens.filter((token) => valueTokens.has(token)).length;
       if (matchedTokenCount === queryTokens.length) {
         fieldScore = 0.45 + 0.3 * (matchedTokenCount / queryTokens.length);
@@ -1651,14 +2351,26 @@ function rankElementSearchMatch(
     }
     const weightedScore = fieldScore * weight;
     if (weightedScore <= 0) continue;
-    matchedFields.push(field);
+    matchedFields.add(field);
     score = Math.max(score, weightedScore);
+  }
+  if (queryTokens.length >= 2) {
+    const coverage = aggregateTokens.size / queryTokens.length;
+    const minimumCoverage = queryTokens.length === 2 ? 1 : 0.5;
+    if (aggregateTokens.size >= 2 && coverage >= minimumCoverage) {
+      score = Math.max(score, 0.35 + 0.35 * coverage);
+      for (const [field, rawValue] of fields) {
+        if (!rawValue) continue;
+        const valueTokens = new Set(normalizeSearchText(rawValue).split(" ").filter(Boolean));
+        if ([...aggregateTokens].some((token) => valueTokens.has(token))) matchedFields.add(field);
+      }
+    }
   }
   if (score === 0) return undefined;
   return {
     element: summarizeAccessibilityNode(element),
     score: Math.round(score * 1_000) / 1_000,
-    matchedFields,
+    matchedFields: [...matchedFields],
     exact,
   };
 }

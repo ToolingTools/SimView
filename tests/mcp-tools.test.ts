@@ -377,6 +377,21 @@ describe("MCP app tools", () => {
       const listed = await client.listTools();
       const byName = new Map(listed.tools.map((tool) => [tool.name, tool]));
       expect(listed.tools.every((tool) => tool.outputSchema?.type === "object")).toBe(true);
+      const tapElementTool = byName.get("tap_element");
+      const performActionsTool = byName.get("perform_actions");
+      expect(tapElementTool?.description).toContain("maximum 5000");
+      expect(tapElementTool?.description).toContain("stable identifier");
+      expect(tapElementTool?.description).toContain("Assertions such as amount/status");
+      expect(performActionsTool?.description).toContain("maximum 5000");
+      expect(JSON.stringify(tapElementTool?.inputSchema)).toContain(
+        "Verification timeout in milliseconds: 100-5000 inclusive; maximum 5000.",
+      );
+      expect(JSON.stringify(tapElementTool?.inputSchema)).toContain(
+        "It must match exactly one node",
+      );
+      expect(JSON.stringify(tapElementTool?.inputSchema)).toContain(
+        "may legitimately match multiple nodes",
+      );
       const linkedTools = listed.tools.filter((tool) => {
         const meta = tool._meta as
           | {
@@ -727,17 +742,41 @@ describe("MCP app tools", () => {
       imageIncluded: false,
       cacheHit: true,
     });
+    const fiberSnapshot: ElementTreeOutput["snapshot"] = {
+      ...snapshot,
+      snapshotId: "rn-verbose",
+      source: "react-native-fiber",
+      root: {
+        ref: "rn:root",
+        children: [
+          {
+            ref: "rn:ghost",
+            label: "OrderConfirmationScreen, tab, 6 of 6",
+            role: "tab",
+          },
+        ],
+      },
+      stats: { nodeCount: 240, truncated: true, quality: "partial" },
+      metro: {
+        host: "127.0.0.1",
+        port: 8081,
+        targetId: "target-1",
+        targetTitle: "Shop",
+        renderer: "fabric",
+      },
+    };
     session.preparedElementSnapshot = async () => ({
-      snapshot,
+      snapshot: fiberSnapshot,
       screenContext: {
         schemaVersion: 1,
-        kind: "uikit",
-        platform: "ios",
+        kind: "react-native",
         capturedAt: snapshot.capturedAt,
         frameId: "frame-1",
-        simulatorName: "iPhone 17 Pro",
-        viewport: { x: 0, y: 0, width: 402, height: 874 },
-        orientation: "portrait",
+        renderer: "fabric",
+        target: "Shop",
+        route: "Invoices",
+        screenComponent: "InvoicesScreen",
+        confidence: "exact",
       },
     });
     const server = createServer(session);
@@ -756,6 +795,14 @@ describe("MCP app tools", () => {
       const nodes = (result.structuredContent as { semantic: { nodes: Array<unknown> } }).semantic
         .nodes;
       expect(nodes[0]).not.toHaveProperty("children");
+      const text = (result.content as Array<{ type: string; text?: string }>).find(
+        (item) => item.type === "text",
+      )?.text;
+      expect(text).toContain(
+        "context=react-native-fiber renderer=fabric elements=core-simulator-ax",
+      );
+      expect(text).toContain("Shop");
+      expect(text).not.toContain("OrderConfirmationScreen");
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }
@@ -848,8 +895,14 @@ describe("MCP app tools", () => {
         total: 1,
         truncated: false,
       }) as never;
-    session.resolveActionableElement = async (selector) =>
-      ({ snapshotId: "ax-1", selector, matches: [element], count: 1 }) as never;
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: element,
+        point: { x: 0.35, y: 0.275 },
+      }) as never;
     let dispatched: unknown;
     session.dispatchInput = async (input) => {
       dispatched = input;
@@ -902,6 +955,27 @@ describe("MCP app tools", () => {
       stats: { nodeCount: 2, truncated: false },
     };
     session.lastAccessibility = snapshot;
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot,
+        revision: "4",
+        eventChanged: false,
+        stable: false,
+        timedOut: true,
+        strategy: "ios-axp",
+        settledAt: snapshot.capturedAt,
+        fallbackUsed: true,
+        captureCount: 2,
+        changeSource: "snapshot-diff",
+      }) as never;
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: element,
+        point: { x: 0.35, y: 0.275 },
+      }) as never;
     session.findElements = async (selector) =>
       ({ snapshotId: snapshot.snapshotId, selector, matches: [element], count: 1 }) as never;
     session.warmObservation = async () => ({
@@ -934,22 +1008,53 @@ describe("MCP app tools", () => {
       },
     });
     session.dispatchInput = async () => ({ accepted: true });
+    session.verifyNativeDestination = async () => ({
+      status: "matched",
+      verified: true,
+      source: "core-simulator-ax",
+      snapshotId: snapshot.snapshotId,
+      revision: "5",
+      settledAt: "2026-08-08T10:00:00.150Z",
+      strategy: "ios-axp",
+      eventChanged: true,
+      timedOut: false,
+      fallbackUsed: true,
+      captureCount: 1,
+      changeSource: "snapshot-diff",
+      stable: true,
+      checks: [{ kind: "identity", selector: { name: "Continue", exact: true }, count: 1 }],
+    });
     const server = createServer(session);
     const client = new Client({ name: "observed-tap-test", version: "1.0.0" });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
     try {
       const result = await client.callTool({
         name: "tap_element",
-        arguments: { ref: element.ref, observe: "semantic" },
+        arguments: {
+          ref: element.ref,
+          observe: "semantic",
+          verifyDestination: { identity: { name: "Continue", exact: true } },
+        },
       });
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent).toMatchObject({
         receipt: { accepted: true },
         observation: {
-          frameId: "frame-observed",
+          sourceRevisions: { accessibility: "5" },
+          stability: { stable: true },
           semantic: { status: "full", nodeCount: 2 },
           vision: { included: false, returnedBytes: 0 },
+          postAction: {
+            accessibility: {
+              stable: true,
+              revision: "5",
+              fallbackUsed: true,
+              captureCount: 1,
+              changeSource: "snapshot-diff",
+            },
+          },
         },
+        destinationVerification: { status: "matched", verified: true, revision: "5" },
       });
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
@@ -989,8 +1094,14 @@ describe("MCP app tools", () => {
         total: 2,
         truncated: false,
       }) as never;
-    session.resolveActionableElement = async (selector) =>
-      ({ snapshotId: "ax-ranked", selector, matches: [target], count: 1 }) as never;
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target,
+        point: { x: 0.30000000000000004, y: 0.935 },
+      }) as never;
     let dispatched: unknown;
     session.dispatchInput = async (input) => {
       dispatched = input;
@@ -1131,6 +1242,14 @@ describe("MCP app tools", () => {
         renderer: "fabric",
       },
     };
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: { ref: "ax:search", identifier: "branch-search", role: "AXButton" },
+        point: { x: 0.5, y: 0.915 },
+      }) as never;
     let dispatched: unknown;
     session.dispatchInput = async (input) => {
       dispatched = input;
@@ -1152,6 +1271,768 @@ describe("MCP app tools", () => {
         method: "input.tap",
         params: { x: 0.5, y: 0.915 },
       });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("re-resolves a generation-scoped ref and taps only the fresh native frame", async () => {
+    const session = new SimViewSession();
+    const oldTarget = interactionNode("ax:old", "Invoice #30363063", 0.1, 0.2);
+    const freshTarget = interactionNode("ax:new", "Invoice #30363063", 0.55, 0.6);
+    session.lastAccessibility = interactionSnapshot("ax-old", oldTarget);
+    const observationRequests: Array<{ afterRevision: string | undefined }> = [];
+    session.accessibilityObserve = async (request = {}) => {
+      observationRequests.push({ afterRevision: request.afterRevision });
+      if (request.afterRevision && !/^\d+$/u.test(request.afterRevision)) {
+        throw new Error("Observation revision must be numeric");
+      }
+      return {
+        snapshot: interactionSnapshot("ax-fresh", freshTarget),
+        revision: "2",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      } as never;
+    };
+    const inspected: Array<{ x: number; y: number }> = [];
+    session.inspectPoint = async (x, y) => {
+      inspected.push({ x, y });
+      return freshTarget;
+    };
+
+    const resolution = await session.resolveNativeTap({ ref: oldTarget.ref, exact: true });
+
+    expect(resolution).toMatchObject({
+      accepted: true,
+      code: "ready",
+      discoverySnapshotId: "ax-old",
+      interactionSnapshotId: "ax-fresh",
+      fingerprint: { identifier: "invoice-card", name: "Invoice #30363063" },
+      target: { ref: "ax:new" },
+      point: { x: 0.65, y: 0.625 },
+      hitTest: true,
+    });
+    expect(inspected).toEqual([{ x: 0.65, y: 0.625 }]);
+    expect(observationRequests).toEqual([{ afterRevision: undefined }, { afterRevision: "2" }]);
+  });
+
+  test("preserves indexed row identity when repeated invoices reorder during refresh", async () => {
+    const session = new SimViewSession();
+    const oldFirst = interactionNode("ax:old-a", "Invoice #30363063", 0.1, 0.2);
+    const oldSecond = interactionNode("ax:old-b", "Invoice #30363506", 0.1, 0.3);
+    const freshSecond = interactionNode("ax:new-b", "Invoice #30363506", 0.5, 0.4);
+    const freshFirst = interactionNode("ax:new-a", "Invoice #30363063", 0.5, 0.5);
+    session.lastAccessibility = interactionSnapshot("ax-before-reorder", oldFirst, oldSecond);
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: interactionSnapshot("ax-after-reorder", freshSecond, freshFirst),
+        revision: "7",
+        eventChanged: true,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+    session.inspectPoint = async () => freshSecond;
+
+    const resolution = await session.resolveNativeTap({
+      identifier: "invoice-card",
+      index: 1,
+      exact: true,
+    });
+    expect(resolution).toMatchObject({
+      accepted: true,
+      discoverySnapshotId: "ax-before-reorder",
+      interactionSnapshotId: "ax-after-reorder",
+      fingerprint: { name: "Invoice #30363506" },
+      target: { ref: "ax:new-b" },
+    });
+    expect(resolution.point?.x).toBeCloseTo(0.6);
+    expect(resolution.point?.y).toBeCloseTo(0.425);
+  });
+
+  test("rejects a freshly offscreen target with scroll guidance before hit-testing", async () => {
+    const session = new SimViewSession();
+    const oldTarget = interactionNode("ax:old", "Invoice #30363063", 0.1, 0.2);
+    const offscreenTarget = interactionNode("ax:new", "Invoice #30363063", 0.55, 1.1);
+    session.lastAccessibility = interactionSnapshot("ax-old", oldTarget);
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: interactionSnapshot("ax-scrolled", offscreenTarget),
+        revision: "3",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+    let inspected = 0;
+    session.inspectPoint = async () => {
+      inspected += 1;
+      return offscreenTarget;
+    };
+
+    const resolution = await session.resolveNativeTap({ ref: oldTarget.ref, exact: true });
+
+    expect(resolution).toMatchObject({
+      accepted: false,
+      code: "target_offscreen",
+      retryable: true,
+      rawFrame: offscreenTarget.frame,
+      scrollRequired: true,
+      suggestedScrollDirection: "up",
+    });
+    expect(inspected).toBe(0);
+  });
+
+  test("rejects a native target when the pre-tap hit-test identifies another invoice", async () => {
+    const session = new SimViewSession();
+    const target = interactionNode("ax:intended", "Invoice #30363063", 0.2, 0.3);
+    const other = interactionNode("ax:other", "Invoice #30363506", 0.2, 0.3);
+    session.lastAccessibility = interactionSnapshot("ax-old", {
+      ...target,
+      ref: "ax:old",
+    });
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: interactionSnapshot("ax-fresh", target),
+        revision: "4",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+    session.inspectPoint = async () => other;
+
+    expect(await session.resolveNativeTap({ ref: "ax:old", exact: true })).toMatchObject({
+      accepted: false,
+      code: "hit_target_mismatch",
+      hitTest: false,
+      target: { ref: "ax:intended" },
+    });
+  });
+
+  test("prefers a native query candidate over a higher-scoring Fiber candidate", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("native-query", "Native Query");
+    const nativeTarget = interactionNode("ax:branches", "Branches", 0.2, 0.8);
+    const fiberTarget = { ...nativeTarget, ref: "rn:branches" };
+    session.searchElements = async () =>
+      ({
+        snapshotId: "ax-search",
+        query: {
+          query: "Branches",
+          actionableOnly: true,
+          visibleOnly: true,
+          limit: 5,
+        },
+        matches: [
+          {
+            element: fiberTarget,
+            score: 1,
+            matchedFields: ["name"],
+            exact: true,
+            source: "react-native-fiber",
+            snapshotId: "rn-search",
+          },
+          {
+            element: nativeTarget,
+            score: 0.8,
+            matchedFields: ["name"],
+            exact: true,
+            source: "core-simulator-ax",
+            snapshotId: "ax-search",
+          },
+        ],
+        count: 2,
+        total: 2,
+        truncated: false,
+        sourceTruncated: false,
+        excludedExactMatchCount: 0,
+        excludedCandidateCount: 0,
+        excludedCandidates: [],
+        sources: [],
+      }) as never;
+    let resolvedRef: string | undefined;
+    session.resolveNativeTap = async (selector) => {
+      resolvedRef = selector.ref;
+      return {
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: nativeTarget,
+        point: { x: 0.3, y: 0.825 },
+      } as never;
+    };
+    session.dispatchInput = async () => ({ accepted: true });
+    const server = createServer(session);
+    const client = new Client({ name: "native-query-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      await client.callTool({
+        name: "tap_element",
+        arguments: { query: "Branches", observe: "none" },
+      });
+      expect(resolvedRef).toBe("ax:branches");
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("maps a Fiber-only testID to one fresh native node by unique accessible name", async () => {
+    const session = new SimViewSession();
+    const fiberTarget = {
+      ...interactionNode("rn:invoice", "Invoice #30363063", 0.2, 0.3),
+      identifier: "fiber-only-invoice",
+      role: "button",
+      interactive: true,
+    };
+    const { identifier: _nativeIdentifier, ...nativeTarget } = {
+      ...interactionNode("ax:invoice", "Invoice #30363063", 0.4, 0.5),
+      role: "AXButton",
+    };
+    session.lastAccessibility = {
+      ...interactionSnapshot("ax-complete"),
+      stats: { nodeCount: 1, truncated: false, quality: "complete" },
+    };
+    session.lastElements = {
+      ...interactionSnapshot("rn-source", fiberTarget),
+      source: "react-native-fiber",
+      metro: {
+        host: "127.0.0.1",
+        port: 8081,
+        targetId: "target-1",
+        targetTitle: "Invoice",
+        renderer: "fabric",
+      },
+    };
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: {
+          ...interactionSnapshot("ax-fresh"),
+          root: { ref: "ax:root", children: [nativeTarget] },
+        },
+        revision: "6",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+    session.inspectPoint = async () => nativeTarget;
+
+    expect(await session.resolveNativeTap({ ref: "rn:invoice", exact: true })).toMatchObject({
+      accepted: true,
+      discoverySource: "react-native-fiber",
+      discoverySnapshotId: "rn-source",
+      interactionSource: "core-simulator-ax",
+      interactionSnapshotId: "ax-fresh",
+      target: { ref: "ax:invoice" },
+      corroboratedBy: ["name", "role"],
+      point: { x: 0.5, y: 0.525 },
+    });
+  });
+
+  test("fails closed when Fiber name corroboration is ambiguous or absent", async () => {
+    const ambiguousSession = new SimViewSession();
+    const fiberTarget = {
+      ...interactionNode("rn:invoice", "Invoice", 0.2, 0.3),
+      identifier: "fiber-only-invoice",
+    };
+    const first = interactionNode("ax:first", "Invoice", 0.2, 0.3);
+    const second = interactionNode("ax:second", "Invoice", 0.2, 0.4);
+    delete (first as Partial<typeof first>).identifier;
+    delete (second as Partial<typeof second>).identifier;
+    ambiguousSession.lastElements = {
+      ...interactionSnapshot("rn-source", fiberTarget),
+      source: "react-native-fiber",
+      metro: {
+        host: "127.0.0.1",
+        port: 8081,
+        targetId: "target-1",
+        targetTitle: "Invoice",
+        renderer: "fabric",
+      },
+    };
+    ambiguousSession.accessibilityObserve = async () =>
+      ({
+        snapshot: interactionSnapshot("ax-fresh", first, second),
+        revision: "7",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+    let inspected = 0;
+    ambiguousSession.inspectPoint = async () => {
+      inspected += 1;
+      return first;
+    };
+    expect(
+      await ambiguousSession.resolveNativeTap({ ref: "rn:invoice", exact: true }),
+    ).toMatchObject({ accepted: false, code: "ambiguous_target" });
+    expect(inspected).toBe(0);
+
+    const nameLessSession = new SimViewSession();
+    nameLessSession.lastElements = {
+      ...ambiguousSession.lastElements,
+      snapshotId: "rn-nameless",
+      root: {
+        ref: "rn:root",
+        children: [
+          {
+            ref: "rn:nameless",
+            identifier: "fiber-only-id",
+            role: "button",
+            interactive: true,
+          },
+        ],
+      },
+    };
+    nameLessSession.accessibilityObserve = ambiguousSession.accessibilityObserve;
+    expect(
+      await nameLessSession.resolveNativeTap({ ref: "rn:nameless", exact: true }),
+    ).toMatchObject({ accepted: false, code: "native_target_unconfirmed" });
+  });
+
+  test("reports exact semantic matches excluded because they are offscreen", async () => {
+    const session = new SimViewSession();
+    const offscreen = interactionNode("ax:pay", "Pay now", 0.2, 1.1);
+    session.lastAccessibility = interactionSnapshot("ax-search", offscreen);
+
+    const search = await session.searchElements({
+      query: "Pay now",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 5,
+    });
+
+    expect(search).toMatchObject({
+      count: 0,
+      total: 0,
+      excludedExactMatchCount: 1,
+      excludedCandidateCount: 1,
+      excludedCandidates: [
+        {
+          match: { element: { ref: "ax:pay" } },
+          reasons: ["visibility"],
+          scrollRequired: true,
+          suggestedScrollDirection: "up",
+        },
+      ],
+      sources: [
+        {
+          source: "core-simulator-ax",
+          exactMatchCount: 1,
+          excludedExactMatchCount: 1,
+          excludedExactMatches: { visibility: 1 },
+        },
+      ],
+    });
+  });
+
+  test("finds a multi-field overdue invoice under excluded candidates", async () => {
+    const session = new SimViewSession();
+    const offscreen = {
+      ...interactionNode("ax:overdue", "Overdue · Unpaid", 0.2, 1.1),
+      identifier: "invoice-card",
+    };
+    session.lastAccessibility = interactionSnapshot("ax-overdue", offscreen);
+
+    const search = await session.searchElements({
+      query: "overdue unpaid invoice",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 5,
+    });
+
+    expect(search).toMatchObject({
+      count: 0,
+      total: 0,
+      excludedCandidateCount: 1,
+      excludedCandidates: [
+        {
+          match: {
+            element: { ref: "ax:overdue" },
+          },
+          reasons: ["visibility"],
+          suggestedScrollDirection: "up",
+        },
+      ],
+    });
+    expect(search.excludedCandidates[0]?.match.matchedFields).toEqual(
+      expect.arrayContaining(["identifier", "name"]),
+    );
+
+    const twoTokenSearch = await session.searchElements({
+      query: "overdue invoice",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 5,
+    });
+    expect(twoTokenSearch).toMatchObject({
+      count: 0,
+      excludedCandidateCount: 1,
+      excludedCandidates: [
+        {
+          match: { element: { ref: "ax:overdue" } },
+          reasons: ["visibility"],
+          suggestedScrollDirection: "up",
+        },
+      ],
+    });
+  });
+
+  test("verifies destination identity and amount using separate native nodes", async () => {
+    const session = new SimViewSession();
+    const destination = interactionSnapshot(
+      "ax-destination",
+      interactionNode("ax:invoice", "Invoice #30363063", 0.1, 0.1),
+      interactionNode("ax:amount", "£15.13", 0.1, 0.2),
+    );
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: destination,
+        revision: "5",
+        eventChanged: true,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+
+    expect(
+      await session.verifyNativeDestination({
+        identity: { name: "#30363063", exact: false },
+        assertions: [{ name: "£15.13", exact: false }],
+      }),
+    ).toMatchObject({
+      status: "matched",
+      verified: true,
+      checks: [
+        { kind: "identity", count: 1 },
+        { kind: "assertion", count: 1 },
+      ],
+    });
+    expect(
+      await session.verifyNativeDestination({
+        identity: { name: "#30363063", exact: false },
+        assertions: [{ name: "£99.99", exact: false }],
+      }),
+    ).toMatchObject({ status: "mismatch", verified: false, checks: [{ count: 1 }, { count: 0 }] });
+    expect(
+      await session.verifyNativeDestination({
+        identity: { value: "£15.13", exact: true },
+      }),
+    ).toMatchObject({
+      status: "mismatch",
+      checks: [{ count: 0, suggestions: [{ name: "£15.13", exact: true }] }],
+    });
+    const composite = await session.verifyNativeDestination({
+      identity: { value: "Invoice #30363063 £15.13", exact: false },
+    });
+    expect(composite.status).toBe("mismatch");
+    expect(composite.checks[0]?.suggestions).toEqual(
+      expect.arrayContaining([
+        { name: "Invoice #30363063", exact: true },
+        { name: "£15.13", exact: true },
+      ]),
+    );
+    expect(
+      await session.verifyNativeDestination({
+        identity: { role: "button", exact: true },
+      }),
+    ).toMatchObject({
+      status: "ambiguous",
+      verified: false,
+      checks: [{ kind: "identity", count: 2 }],
+    });
+
+    const repeatedAmount = interactionSnapshot(
+      "ax-repeated-amount",
+      interactionNode("ax:invoice", "Invoice #30363063", 0.1, 0.1),
+      interactionNode("ax:total", "£15.13", 0.1, 0.2),
+      interactionNode("ax:outstanding", "£15.13", 0.1, 0.3),
+    );
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: repeatedAmount,
+        revision: "6",
+        eventChanged: true,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.150Z",
+      }) as never;
+    expect(
+      await session.verifyNativeDestination({
+        identity: { name: "#30363063", exact: false },
+        assertions: [{ name: "£15.13", exact: true }],
+      }),
+    ).toMatchObject({
+      status: "matched",
+      verified: true,
+      checks: [
+        { kind: "identity", count: 1 },
+        { kind: "assertion", count: 2 },
+      ],
+    });
+  });
+
+  test("returns a hard-stop error after a dispatched standalone tap fails verification", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("verified-tap", "Verified Tap");
+    const invoice = interactionNode("ax:invoice", "Invoice #30363063", 0.2, 0.3);
+    session.lastAccessibility = interactionSnapshot("ax-before", invoice);
+    mockAccessibilityObservation(session, session.lastAccessibility);
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        fingerprint: { identifier: "invoice-card", name: "Invoice #30363063" },
+        interactionSnapshotId: "ax-fresh",
+        target: invoice,
+        point: { x: 0.3, y: 0.325 },
+        hitTest: true,
+      }) as never;
+    session.dispatchInput = async () => ({ accepted: true });
+    session.verifyNativeDestination = async () => ({
+      status: "mismatch",
+      verified: false,
+      stable: true,
+      snapshotId: "ax-wrong-destination",
+      checks: [
+        {
+          kind: "identity",
+          selector: { value: "£15.13", exact: true },
+          count: 0,
+          suggestions: [{ name: "£15.13", exact: true }],
+        },
+      ],
+    });
+    const server = createServer(session);
+    const client = new Client({ name: "verified-tap-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: {
+          ref: "ax:invoice",
+          observe: "none",
+          verifyDestination: { identity: { value: "£15.13", exact: true } },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        accepted: false,
+        safeToContinue: false,
+        code: "destination_mismatch",
+        inputDispatched: true,
+        retryable: false,
+        interaction: {
+          accepted: true,
+          fingerprint: { name: "Invoice #30363063" },
+          interactionSnapshotId: "ax-fresh",
+          hitTest: true,
+        },
+        destinationVerification: {
+          snapshotId: "ax-wrong-destination",
+          checks: [{ suggestions: [{ name: "£15.13", exact: true }] }],
+        },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("hard-stops a standalone tap when destination verification is ambiguous", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("matched-tap", "Matched Tap");
+    const invoice = interactionNode("ax:invoice", "Invoice #30363063", 0.2, 0.3);
+    session.lastAccessibility = interactionSnapshot("ax-before", invoice);
+    mockAccessibilityObservation(session, session.lastAccessibility);
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        interactionSnapshotId: "ax-fresh",
+        target: invoice,
+        point: { x: 0.3, y: 0.325 },
+        hitTest: true,
+      }) as never;
+    session.dispatchInput = async () => ({ accepted: true });
+    session.verifyNativeDestination = async () => ({
+      status: "ambiguous",
+      verified: false,
+      stable: true,
+      snapshotId: "ax-destination",
+      checks: [
+        {
+          kind: "identity",
+          selector: { name: "Invoice #30363063", exact: true },
+          count: 2,
+        },
+      ],
+    });
+    const server = createServer(session);
+    const client = new Client({ name: "matched-tap-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: {
+          ref: "ax:invoice",
+          observe: "none",
+          verifyDestination: { identity: { name: "Invoice #30363063", exact: true } },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toContain(
+        "matched multiple native nodes",
+      );
+      expect(result.structuredContent).toMatchObject({
+        accepted: false,
+        safeToContinue: false,
+        code: "destination_ambiguous",
+        retryable: false,
+        inputDispatched: true,
+        interaction: { accepted: true, interactionSnapshotId: "ax-fresh" },
+        destinationVerification: { status: "ambiguous", verified: false },
+        verificationWarnings: [expect.stringContaining("distinctive identifier")],
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("treats unavailable destination verification as a retryable hard stop", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("unconfirmed-tap", "Unconfirmed Tap");
+    const target = interactionNode("ax:invoice", "Invoice #30363063", 0.2, 0.3);
+    session.lastAccessibility = interactionSnapshot("ax-before", target);
+    mockAccessibilityObservation(session, session.lastAccessibility);
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target,
+        point: { x: 0.3, y: 0.325 },
+      }) as never;
+    session.dispatchInput = async () => ({ accepted: true });
+    session.verifyNativeDestination = async () => ({
+      status: "unavailable",
+      verified: false,
+      stable: false,
+      checks: [],
+    });
+    const server = createServer(session);
+    const client = new Client({ name: "unconfirmed-tap-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: {
+          ref: "ax:invoice",
+          observe: "none",
+          verifyDestination: { identity: { name: "Invoice #30363063", exact: true } },
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        accepted: false,
+        safeToContinue: false,
+        code: "destination_unconfirmed",
+        inputDispatched: true,
+        retryable: true,
+        interaction: { accepted: true },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("stops a batch before a consequential action when destination verification fails", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("verified-batch", "Verified Batch");
+    const invoice = interactionNode("ax:invoice", "Invoice #30363063", 0.2, 0.3);
+    session.lastAccessibility = interactionSnapshot("ax-before", invoice);
+    mockAccessibilityObservation(session, session.lastAccessibility);
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: invoice,
+        point: { x: 0.3, y: 0.325 },
+      }) as never;
+    session.verifyNativeDestination = async () => ({
+      status: "mismatch",
+      verified: false,
+      stable: true,
+      checks: [
+        {
+          kind: "assertion",
+          selector: { name: "£15.13", exact: true },
+          count: 0,
+        },
+      ],
+    });
+    let dispatches = 0;
+    session.dispatchInput = async () => {
+      dispatches += 1;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "verified-batch-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          observe: "none",
+          actions: [
+            {
+              type: "tap_element",
+              ref: "ax:invoice",
+              verifyDestination: {
+                identity: { name: "#30363063", exact: false },
+                assertions: [{ name: "£15.13", exact: false }],
+              },
+            },
+            { type: "tap_element", name: "Pay", exact: true },
+          ],
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        actionCount: 2,
+        completedActionCount: 0,
+        failedActionIndex: 0,
+        receipts: [
+          {
+            accepted: false,
+            code: "destination_mismatch",
+            inputDispatched: true,
+            safeToContinue: false,
+            interaction: { accepted: true },
+            destinationVerification: { verified: false },
+          },
+        ],
+      });
+      expect(dispatches).toBe(1);
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }
@@ -1399,4 +2280,51 @@ function resourceSnapshot(snapshotId: string, ref: string, label: string): Acces
     },
     stats: { nodeCount: 2, truncated: false },
   };
+}
+
+function interactionNode(ref: string, label: string, x: number, y: number) {
+  return {
+    ref,
+    identifier: "invoice-card",
+    role: "button",
+    label,
+    enabled: true,
+    actions: ["press"],
+    frame: {
+      points: { x: x * 402, y: y * 874, width: 80.4, height: 43.7 },
+      normalized: { x, y, width: 0.2, height: 0.05 },
+    },
+  };
+}
+
+function interactionSnapshot(
+  snapshotId: string,
+  ...nodes: ReturnType<typeof interactionNode>[]
+): AccessibilitySnapshot {
+  return {
+    schemaVersion: 1,
+    snapshotId,
+    capturedAt: "2026-08-08T10:00:00.000Z",
+    source: "core-simulator-ax",
+    scope: "interactive",
+    screen: { x: 0, y: 0, width: 402, height: 874 },
+    root: { ref: "ax:root", children: nodes },
+    stats: { nodeCount: nodes.length + 1, truncated: false, quality: "complete" },
+  };
+}
+
+function mockAccessibilityObservation(
+  session: SimViewSession,
+  snapshot: AccessibilitySnapshot,
+): void {
+  session.accessibilityObserve = async () =>
+    ({
+      snapshot,
+      revision: "1",
+      eventChanged: false,
+      stable: true,
+      timedOut: false,
+      strategy: "ios-axp",
+      settledAt: snapshot.capturedAt,
+    }) as never;
 }

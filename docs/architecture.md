@@ -90,7 +90,17 @@ The process model has two layers:
   an image; only explicit `visual` mode requests the prepared JPEG.
   `search_elements` ranks bounded current-snapshot matches across accessible
   names, identifiers, values, roles, placeholders, and React Native metadata;
-  its winning generation-scoped ref can be passed to `tap_element`.
+  its winning generation-scoped ref can be passed to `tap_element`. Interaction
+  then settles a fresh native accessibility snapshot, rematches the semantic
+  fingerprint, and verifies the native hit target before dispatch. Fiber is a
+  discovery-only fallback for interaction and never authorizes coordinates. A
+  Fiber-only identifier can map to native AX only through one exact accessible
+  name with non-conflicting role/value evidence; ambiguous or nameless mappings
+  fail closed. Ranked offscreen candidates remain available separately with a
+  suggested swipe direction. Optional destination selectors verify entity
+  identity and amount/value after navigation. Failure is a hard stop for
+  standalone and batched taps, preserves the dispatched interaction receipt,
+  and prevents later batch actions.
   `perform_actions` combines up to 20 ordered inputs, post-action settling, and
   one semantic observation in a single MCP round trip by default.
 - Element inspection first captures the native accessibility snapshot as a
@@ -100,7 +110,10 @@ The process model has two layers:
   or be the sole unambiguous target. React Native inspection returns only a
   bounded visual Fiber projection and whitelisted semantic fields; component
   props, route params, raw Fiber objects, external paths, and dependencies are
-  not returned. If Metro MCP owns the older single-client Hermes connection,
+  not returned. Fiber projection scans renderer roots fairly and selects
+  semantic/actionable candidates before spending the output budget, so a deep
+  first scene cannot starve later roots or bottom navigation tabs.
+  If Metro MCP owns the older single-client Hermes connection,
   SimView validates and reuses its loopback CDP multiplexer record; newer
   multi-debugger targets connect directly. Any discovery, CDP, measurement, or
   validation failure returns the complete native snapshot with a bounded fallback

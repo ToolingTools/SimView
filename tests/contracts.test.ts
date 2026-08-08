@@ -77,6 +77,7 @@ describe("shared protocol contracts", () => {
       maxNodes: 1_200,
       settleQuietMs: 75,
       maxWaitMs: 500,
+      requireChange: true,
     });
     const observation = accessibilityObserveResultSchema.parse({
       snapshot,
@@ -85,6 +86,9 @@ describe("shared protocol contracts", () => {
       stable: true,
       timedOut: false,
       strategy: "snapshot-diff",
+      fallbackUsed: true,
+      captureCount: 2,
+      changeSource: "snapshot-diff",
       settledAt: snapshot.capturedAt,
     });
     const resource = accessibilityResourceSchema.parse({
@@ -96,6 +100,11 @@ describe("shared protocol contracts", () => {
       snapshot,
     });
     expect(resource.snapshot.snapshotId).toBe("ax-1");
+    expect(observation).toMatchObject({
+      fallbackUsed: true,
+      captureCount: 2,
+      changeSource: "snapshot-diff",
+    });
   });
 
   test("keeps semantic identities stable when snapshot refs are regenerated", () => {

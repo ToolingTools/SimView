@@ -52,7 +52,12 @@ import {
 import { z } from "zod";
 import { resolveAppRoot } from "./app-assets";
 import { inlineAppModule } from "./app-html";
-import { type AccessibilityObservation, SimViewSession, type WarmObservation } from "./session";
+import {
+  type AccessibilityObservation,
+  type DestinationVerification,
+  SimViewSession,
+  type WarmObservation,
+} from "./session";
 
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? SIMVIEW_VERSION;
 const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
@@ -204,6 +209,17 @@ function unambiguousSearchMatch({
   return winner.score - runnerUp.score >= UNAMBIGUOUS_SEARCH_SCORE_GAP ? winner : undefined;
 }
 
+function unambiguousInteractionSearchMatch(search: {
+  matches: ElementSearchMatch[];
+  total: number;
+}): ElementSearchMatch | undefined {
+  const nativeMatches = search.matches.filter((match) => match.source !== "react-native-fiber");
+  if (nativeMatches.length > 0) {
+    return unambiguousSearchMatch({ matches: nativeMatches, total: nativeMatches.length });
+  }
+  return unambiguousSearchMatch(search);
+}
+
 type ObservationBaseline = {
   afterRevision: string | undefined;
   beforeSemanticHash: string | undefined;
@@ -211,7 +227,7 @@ type ObservationBaseline = {
 };
 
 async function captureObservationBaseline(session: SimViewSession): Promise<ObservationBaseline> {
-  if (!session.lastAccessibility) await session.accessibilityObserve({ maxWaitMs: 0 });
+  if (!session.accessibilityRevision) await session.accessibilityObserve({ maxWaitMs: 0 });
   return {
     afterRevision: session.accessibilityRevision,
     beforeSemanticHash: session.lastAccessibility
@@ -237,12 +253,23 @@ const fallbackMessages = {
   "metro-inspection-failed": "React Native inspection failed; retrying can reconnect Hermes.",
 } as const;
 
-function compactElementTree(result: ElementTreeOutput): string {
+function compactElementTree(
+  result: ElementTreeOutput,
+  preferredSnapshot?: z.output<typeof accessibilitySnapshotSchema>,
+): string {
   const context = result.screenContext;
+  const usesPreferredSnapshot = Boolean(
+    preferredSnapshot &&
+      preferredSnapshot.stats.quality !== "degraded" &&
+      preferredSnapshot.stats.nodeCount > 1,
+  );
+  const snapshot = usesPreferredSnapshot ? (preferredSnapshot ?? result.snapshot) : result.snapshot;
   const summary =
     context.kind === "react-native"
       ? [
-          `source=react-native-fiber renderer=${context.renderer}`,
+          usesPreferredSnapshot
+            ? `context=react-native-fiber renderer=${context.renderer} elements=${snapshot.source}`
+            : `source=react-native-fiber renderer=${context.renderer}`,
           context.navigationPath?.length
             ? `screen=${context.navigationPath.join(" > ")}`
             : context.route
@@ -254,7 +281,7 @@ function compactElementTree(result: ElementTreeOutput): string {
           .join(" ")
       : `source=${result.snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
   const fallback = result.fallback ? fallbackMessages[result.fallback.reason] : undefined;
-  return [summary, fallback, compactAccessibilityTree(result.snapshot)].filter(Boolean).join("\n");
+  return [summary, fallback, compactAccessibilityTree(snapshot)].filter(Boolean).join("\n");
 }
 
 type SemanticIndex = Map<string, { hash: string; ref: string }>;
@@ -334,6 +361,33 @@ const searchElementsOutputSchema = z.object({
   total: z.number().int().nonnegative(),
   truncated: z.boolean(),
   sourceTruncated: z.boolean(),
+  excludedExactMatchCount: z.number().int().nonnegative(),
+  excludedCandidateCount: z.number().int().nonnegative(),
+  excludedCandidates: z.array(
+    z.object({
+      match: elementSearchMatchSchema,
+      reasons: z.array(z.enum(["visibility", "actionability"])),
+      scrollRequired: z.boolean(),
+      suggestedScrollDirection: z.enum(["up", "down", "left", "right"]).optional(),
+    }),
+  ),
+  sources: z.array(
+    z.object({
+      source: z.string(),
+      snapshotId: z.string(),
+      quality: z.enum(["complete", "partial", "degraded"]),
+      reason: z.string().optional(),
+      truncated: z.boolean(),
+      nodeCount: z.number().int().nonnegative(),
+      capturedBudget: z.number().int().positive().optional(),
+      exactMatchCount: z.number().int().nonnegative(),
+      excludedExactMatchCount: z.number().int().nonnegative(),
+      excludedExactMatches: z.object({
+        visibility: z.number().int().nonnegative(),
+        actionability: z.number().int().nonnegative(),
+      }),
+    }),
+  ),
 });
 const waitOutputSchema = z.object({
   durationMs: z.number().nonnegative(),
@@ -357,6 +411,9 @@ const postActionAccessibilitySchema = z.object({
   stable: z.boolean(),
   forcedRetry: z.boolean(),
   visualChanged: z.boolean().optional(),
+  fallbackUsed: z.boolean().optional(),
+  captureCount: z.number().int().nonnegative().optional(),
+  changeSource: z.enum(["event", "snapshot-diff", "none"]).optional(),
   resourceUri: z.string().optional(),
 });
 const postActionObservationSchema = z.object({ accessibility: postActionAccessibilitySchema });
@@ -404,6 +461,121 @@ const observeOutputSchema = z.object({
   postAction: postActionObservationSchema.optional(),
 });
 
+function reconcileObservationWithDestination(
+  observation: z.output<typeof observeOutputSchema>,
+  verification: DestinationVerification | undefined,
+): z.output<typeof observeOutputSchema> {
+  if (!verification?.stable) return observation;
+  const postAction = observation.postAction?.accessibility;
+  return {
+    ...observation,
+    sourceRevisions: {
+      ...observation.sourceRevisions,
+      ...(verification.revision ? { accessibility: verification.revision } : {}),
+    },
+    timestamps: {
+      ...observation.timestamps,
+      ...(verification.settledAt
+        ? {
+            settledAt: verification.settledAt,
+            accessibilityReadyAt: verification.settledAt,
+          }
+        : {}),
+    },
+    stability: { ...observation.stability, stable: true },
+    ...(postAction
+      ? {
+          postAction: {
+            accessibility: {
+              ...postAction,
+              event: postAction.semantic === "changed" ? "changed" : postAction.event,
+              stable: true,
+              ...(verification.revision ? { revision: verification.revision } : {}),
+              ...(verification.strategy ? { strategy: verification.strategy } : {}),
+              ...(verification.fallbackUsed !== undefined
+                ? { fallbackUsed: verification.fallbackUsed }
+                : {}),
+              ...(verification.captureCount !== undefined
+                ? { captureCount: verification.captureCount }
+                : {}),
+              ...(verification.changeSource ? { changeSource: verification.changeSource } : {}),
+            },
+          },
+        }
+      : {}),
+  };
+}
+
+const destinationSelectorSchema = z
+  .object({
+    identifier: z
+      .string()
+      .min(1)
+      .describe("Stable native AX identifier expected on the destination screen.")
+      .optional(),
+    role: z
+      .string()
+      .min(1)
+      .describe("Native AX role used to narrow another destination field; avoid using role alone.")
+      .optional(),
+    name: z
+      .string()
+      .min(1)
+      .describe(
+        "Native accessible label expected on the destination. Prefer a distinctive complete label; avoid generic labels such as Card.",
+      )
+      .optional(),
+    value: z
+      .string()
+      .min(1)
+      .describe(
+        "Native AX value expected on the destination. Use only when observe/search exposed it as a value; visible text is often an accessible name instead.",
+      )
+      .optional(),
+    exact: z
+      .boolean()
+      .default(true)
+      .describe(
+        "Exact matching is the default. Set false only for a known fragment of a composite native label, such as #30363063 within Invoice #30363063.",
+      ),
+  })
+  .refine(
+    (selector) => Boolean(selector.identifier || selector.role || selector.name || selector.value),
+    { message: "A destination selector requires identifier, role, name, or value" },
+  );
+
+const destinationVerificationInputSchema = z.object({
+  identity: destinationSelectorSchema.describe(
+    "The stable native destination identity. It must match exactly one node; prefer a unique identifier or complete entity label.",
+  ),
+  assertions: z
+    .array(destinationSelectorSchema)
+    .max(4)
+    .default([])
+    .describe(
+      "Up to four supporting destination conditions such as amount or status. Each must be present, but may legitimately match multiple nodes.",
+    ),
+  timeoutMs: z
+    .number()
+    .int()
+    .min(100)
+    .max(5_000)
+    .default(1_000)
+    .describe("Verification timeout in milliseconds: 100-5000 inclusive; maximum 5000."),
+});
+
+function destinationVerificationWarnings(
+  verification: DestinationVerification | undefined,
+): string[] {
+  const broadChecks =
+    verification?.checks.filter((check) => check.kind === "identity" && check.count > 1) ?? [];
+  return broadChecks.length
+    ? [
+        "The destination identity matched multiple native nodes. Use a distinctive identifier or complete entity label; supporting assertions cannot disambiguate identity.",
+      ]
+    : [];
+}
+
 const actionSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("tap"), x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
   z.object({
@@ -441,6 +613,7 @@ const actionSchema = z.discriminatedUnion("type", [
     exact: z.boolean().default(true),
     index: z.number().int().min(0).optional(),
     query: z.string().trim().min(1).max(200).optional(),
+    verifyDestination: destinationVerificationInputSchema.optional(),
   }),
   z.object({
     type: z.literal("wait_for_element"),
@@ -822,7 +995,7 @@ export function createServer(
         : semanticStatus === "delta"
           ? `Semantic delta: +${delta?.added.length ?? 0} -${delta?.removed.length ?? 0} ~${delta?.changed.length ?? 0}.`
           : result
-            ? compactElementTree(result)
+            ? compactElementTree(result, snapshot)
             : "No semantic state is available.";
     const changedRefs = new Set([...(delta?.added ?? []), ...(delta?.changed ?? [])]);
     const semanticNodes = snapshot
@@ -887,6 +1060,15 @@ export function createServer(
                 stable: accessibilityObservation?.stable ?? false,
                 forcedRetry,
                 ...(visualChanged ? { visualChanged: true } : {}),
+                ...(accessibilityObservation?.fallbackUsed !== undefined
+                  ? { fallbackUsed: accessibilityObservation.fallbackUsed }
+                  : {}),
+                ...(accessibilityObservation?.captureCount !== undefined
+                  ? { captureCount: accessibilityObservation.captureCount }
+                  : {}),
+                ...(accessibilityObservation?.changeSource
+                  ? { changeSource: accessibilityObservation.changeSource }
+                  : {}),
                 ...(hash ? { resourceUri: session.accessibilityResourceUri } : {}),
               },
             },
@@ -952,11 +1134,17 @@ export function createServer(
             visibleOnly: true,
             limit: 5,
           });
-          const winner = unambiguousSearchMatch(search);
+          const winner = unambiguousInteractionSearchMatch(search);
           if (!winner) {
-            throw new Error(
-              `Semantic query matched ${search.total} elements; refine it before using tap_element in an action batch`,
-            );
+            return {
+              accepted: false,
+              code: "ambiguous_target",
+              retryable: false,
+              candidates: search.matches,
+              excludedExactMatchCount: search.excludedExactMatchCount,
+              excludedCandidateCount: search.excludedCandidateCount,
+              excludedCandidates: search.excludedCandidates,
+            };
           }
           selector = accessibilitySelectorSchema.parse({
             ref: winner.element.ref,
@@ -964,24 +1152,46 @@ export function createServer(
         } else {
           selector = accessibilitySelectorSchema.parse(action);
         }
-        const matches = await session.resolveActionableElement(selector);
-        const element = matches.matches[0];
-        const frame = element?.frame?.normalized;
-        if (
-          !element ||
-          !frame ||
-          frame.width <= 0 ||
-          frame.height <= 0 ||
-          element.enabled === false
-        ) {
-          throw new Error(
-            "The semantic tap target is unavailable, disabled, or has no visible frame",
-          );
+        const resolution = await session.resolveNativeTap(selector);
+        if (!resolution.accepted || !resolution.point) {
+          return { ...resolution, interaction: resolution };
         }
-        return session.dispatchInput({
+        const verificationBaseline = action.verifyDestination
+          ? await captureObservationBaseline(session)
+          : undefined;
+        const receipt = await session.dispatchInput({
           method: "input.tap",
-          params: { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 },
+          params: resolution.point,
         });
+        const destinationVerification = action.verifyDestination
+          ? await session.verifyNativeDestination(action.verifyDestination, {
+              afterRevision: verificationBaseline?.afterRevision,
+              maxWaitMs: action.verifyDestination.timeoutMs,
+            })
+          : undefined;
+        const verificationWarnings = destinationVerificationWarnings(destinationVerification);
+        return {
+          ...receipt,
+          accepted: destinationVerification ? destinationVerification.verified : true,
+          safeToContinue: destinationVerification ? destinationVerification.verified : true,
+          inputDispatched: true,
+          ...(destinationVerification && !destinationVerification.verified
+            ? {
+                code:
+                  destinationVerification.status === "mismatch"
+                    ? "destination_mismatch"
+                    : destinationVerification.status === "ambiguous"
+                      ? "destination_ambiguous"
+                      : "destination_unconfirmed",
+                retryable:
+                  destinationVerification.status === "unstable" ||
+                  destinationVerification.status === "unavailable",
+              }
+            : {}),
+          interaction: resolution,
+          ...(destinationVerification ? { destinationVerification } : {}),
+          ...(verificationWarnings.length ? { verificationWarnings } : {}),
+        };
       }
       case "wait_for_element": {
         const selector = accessibilitySelectorSchema.parse(action);
@@ -1124,7 +1334,7 @@ export function createServer(
     {
       title: "Perform actions",
       description:
-        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation.",
+        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation. For entity-sensitive tap_element actions, verifyDestination requires one unique native identity and accepts up to four supporting assertions plus a 100-5000 ms timeout (maximum 5000). Assertions must be present but may match more than one node; an ambiguous identity hard-stops later actions.",
       inputSchema: {
         actions: z.array(actionSchema).min(1).max(20),
         observe: z.enum(["auto", "semantic", "visual", "none"]).default("semantic"),
@@ -1133,6 +1343,8 @@ export function createServer(
       },
       outputSchema: z.object({
         actionCount: z.number().int().min(1).max(20),
+        completedActionCount: z.number().int().min(0).max(20),
+        failedActionIndex: z.number().int().min(0).max(19).optional(),
         durationMs: z.number().nonnegative(),
         receipts: z.array(genericObjectOutputSchema),
         observation: observeOutputSchema.optional(),
@@ -1142,14 +1354,52 @@ export function createServer(
       const started = performance.now();
       const baseline =
         observationMode === "none" ? undefined : await captureObservationBaseline(session);
-      const receipts = [];
-      for (const action of actions) receipts.push(await dispatchAction(action));
+      const receipts: unknown[] = [];
+      let failedActionIndex: number | undefined;
+      for (const [index, action] of actions.entries()) {
+        try {
+          const receipt = await dispatchAction(action);
+          receipts.push(receipt);
+          if (
+            receipt !== null &&
+            typeof receipt === "object" &&
+            "accepted" in receipt &&
+            receipt.accepted === false
+          ) {
+            failedActionIndex = index;
+            break;
+          }
+        } catch (error) {
+          failedActionIndex = index;
+          receipts.push({
+            accepted: false,
+            code: error instanceof Error ? error.message : "action_rejected",
+            retryable: false,
+          });
+          break;
+        }
+      }
+      const hardStop = receipts.some(
+        (receipt) =>
+          receipt !== null &&
+          typeof receipt === "object" &&
+          "safeToContinue" in receipt &&
+          receipt.safeToContinue === false,
+      );
       if (observationMode === "none") {
-        return toolResult("Ordered actions completed.", {
-          actionCount: actions.length,
-          durationMs: performance.now() - started,
-          receipts,
-        });
+        return toolResult(
+          failedActionIndex === undefined
+            ? "Ordered actions completed."
+            : "Action batch stopped after a rejected action.",
+          {
+            actionCount: actions.length,
+            completedActionCount: failedActionIndex ?? receipts.length,
+            ...(failedActionIndex !== undefined ? { failedActionIndex } : {}),
+            durationMs: performance.now() - started,
+            receipts,
+          },
+          hardStop,
+        );
       }
       const observed = await observe({
         mode: observationMode,
@@ -1159,12 +1409,29 @@ export function createServer(
         settleQuietMs,
         maxWaitMs,
       });
-      return toolResultWithContent(observed.content, {
-        actionCount: actions.length,
-        durationMs: performance.now() - started,
-        receipts,
-        observation: observed.structuredContent,
-      });
+      const finalReceipt = receipts.at(-1);
+      const finalVerification =
+        finalReceipt !== null &&
+        typeof finalReceipt === "object" &&
+        "destinationVerification" in finalReceipt
+          ? (finalReceipt.destinationVerification as DestinationVerification)
+          : undefined;
+      const reconciledObservation = reconcileObservationWithDestination(
+        observeOutputSchema.parse(observed.structuredContent),
+        finalVerification,
+      );
+      return toolResultWithContent(
+        observed.content,
+        {
+          actionCount: actions.length,
+          completedActionCount: failedActionIndex ?? receipts.length,
+          ...(failedActionIndex !== undefined ? { failedActionIndex } : {}),
+          durationMs: performance.now() - started,
+          receipts,
+          observation: reconciledObservation,
+        },
+        hardStop,
+      );
     },
   );
   registerAppBridgeTools(server, session, metadata);
@@ -1333,6 +1600,7 @@ function registerAccessibilityTools(
   const tapElementInputSchema = {
     ...selectorSchema,
     query: z.string().trim().min(1).max(200).optional(),
+    verifyDestination: destinationVerificationInputSchema.optional(),
     observe: z.enum(["semantic", "visual", "none"]).default("semantic"),
     settleQuietMs: z.number().int().min(20).max(500).default(75),
     maxWaitMs: z.number().int().min(0).max(5_000).default(500),
@@ -1426,11 +1694,14 @@ function registerAccessibilityTools(
         visibleOnly: true,
         limit: 5,
       });
-      const winner = unambiguousSearchMatch(search);
+      const winner = unambiguousInteractionSearchMatch(search);
       if (!winner) {
         return toolResult("The semantic query is ambiguous; no tap was sent.", {
           candidates: search.matches,
           count: search.total,
+          excludedExactMatchCount: search.excludedExactMatchCount,
+          excludedCandidateCount: search.excludedCandidateCount,
+          excludedCandidates: search.excludedCandidates,
           tapped: false,
         });
       }
@@ -1440,49 +1711,88 @@ function registerAccessibilityTools(
     } else {
       parsedSelector = accessibilitySelectorSchema.parse(input);
     }
-    const result = await session.resolveActionableElement(parsedSelector);
-    if (result.count !== 1 && parsedSelector.index === undefined) {
-      throw new Error(
-        `Selector matched ${result.count} elements; refine the selector or pass index`,
-      );
+    const resolution = await session.resolveNativeTap(parsedSelector);
+    if (!resolution.accepted || !resolution.point || !resolution.target) {
+      const message =
+        resolution.code === "target_offscreen"
+          ? `The target is offscreen. Scroll ${resolution.suggestedScrollDirection ?? "toward it"}, then search and resolve it again; no tap was sent.`
+          : "The semantic target was not confirmed natively; no tap was sent.";
+      return toolResult(message, { ...resolution, selector: parsedSelector });
     }
-    const match = result.matches[0];
-    const frame = match?.frame?.normalized;
-    if (!match) throw new Error("The selected element does not exist");
-    if (match.enabled === false) throw new Error("The selected element is disabled");
-    if (!frame || frame.width <= 0 || frame.height <= 0) {
-      throw new Error("The selected element has no visible frame");
-    }
-    const point = { x: frame.x + frame.width / 2, y: frame.y + frame.height / 2 };
     if (!session.device?.capabilities.input.touch) {
       throw new Error("Tap is not supported by the selected device");
     }
     const baseline =
-      input.observe === "none" ? undefined : await captureObservationBaseline(session);
-    const receipt = await session.dispatchInput({ method: "input.tap", params: point });
-    if (input.observe === "none") {
-      return toolResult("Physical element tap accepted.", {
-        selector: parsedSelector,
-        element: match,
-        point,
-        receipt,
-      });
-    }
-    const observed = await observe({
-      mode: input.observe,
-      afterRevision: baseline?.afterRevision,
-      afterVisualRevision: baseline?.afterVisualRevision,
-      postAction: { beforeSemanticHash: baseline?.beforeSemanticHash },
-      settleQuietMs: input.settleQuietMs,
-      maxWaitMs: input.maxWaitMs,
-    });
-    return toolResultWithContent(observed.content, {
+      input.observe === "none" && !input.verifyDestination
+        ? undefined
+        : await captureObservationBaseline(session);
+    const receipt = await session.dispatchInput({ method: "input.tap", params: resolution.point });
+    const observed =
+      input.observe === "none"
+        ? undefined
+        : await observe({
+            mode: input.observe,
+            afterRevision: baseline?.afterRevision,
+            afterVisualRevision: baseline?.afterVisualRevision,
+            postAction: { beforeSemanticHash: baseline?.beforeSemanticHash },
+            settleQuietMs: input.settleQuietMs,
+            maxWaitMs: input.maxWaitMs,
+          });
+    const destinationVerification = input.verifyDestination
+      ? await session.verifyNativeDestination(input.verifyDestination, {
+          afterRevision: baseline?.afterRevision,
+          settleQuietMs: input.settleQuietMs,
+          maxWaitMs: input.verifyDestination.timeoutMs,
+        })
+      : undefined;
+    const verificationFailed = destinationVerification && !destinationVerification.verified;
+    const verificationWarnings = destinationVerificationWarnings(destinationVerification);
+    const verificationCode =
+      destinationVerification?.status === "mismatch"
+        ? "destination_mismatch"
+        : destinationVerification?.status === "ambiguous"
+          ? "destination_ambiguous"
+          : "destination_unconfirmed";
+    const reconciledObservation = observed
+      ? reconcileObservationWithDestination(
+          observeOutputSchema.parse(observed.structuredContent),
+          destinationVerification,
+        )
+      : undefined;
+    const structured = {
+      ...resolution,
+      accepted: !verificationFailed,
+      code: verificationFailed ? verificationCode : resolution.code,
+      retryable: verificationFailed
+        ? destinationVerification?.status === "unstable" ||
+          destinationVerification?.status === "unavailable"
+        : false,
+      inputDispatched: true,
+      safeToContinue: !verificationFailed,
+      interaction: resolution,
       selector: parsedSelector,
-      element: match,
-      point,
       receipt,
-      observation: observed.structuredContent,
-    });
+      ...(reconciledObservation ? { observation: reconciledObservation } : {}),
+      ...(destinationVerification ? { destinationVerification } : {}),
+      ...(verificationWarnings.length ? { verificationWarnings } : {}),
+    };
+    const text = destinationVerification
+      ? destinationVerification.verified
+        ? "Physical element tap accepted and destination identity verified."
+        : destinationVerification.status === "ambiguous"
+          ? `Physical element tap was sent, but destination verification was ambiguous. ${verificationWarnings[0] ?? "Use a more specific selector."} Do not continue with consequential actions.`
+          : "Physical element tap was sent, but the requested destination identity was not verified. Do not continue with consequential actions."
+      : "Physical element tap accepted.";
+    return observed
+      ? toolResultWithContent(
+          [
+            ...observed.content.filter((item) => item.type !== "text"),
+            { type: "text" as const, text },
+          ],
+          structured,
+          Boolean(verificationFailed),
+        )
+      : toolResult(text, structured, Boolean(verificationFailed));
   };
   const inspectPoint = async (x: number, y: number) => {
     const accessibility = await session.inspectPoint(x, y);
@@ -1621,7 +1931,7 @@ function registerAccessibilityTools(
     {
       title: "Tap element",
       description:
-        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through device input.",
+        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through native device input. For entity-sensitive navigation, verifyDestination requires a unique native identity, accepts up to four supporting assertions, and has a 100-5000 ms timeout (maximum 5000). Assertions such as amount/status must be present but may match multiple nodes. Prefer a stable identifier or complete entity label for identity, and use exact:false only for a known composite-label fragment.",
       inputSchema: tapElementInputSchema,
       outputSchema: genericObjectOutputSchema,
       _meta: metadata.modelOnly,
@@ -2018,14 +2328,19 @@ function structuredJson(structuredContent: unknown) {
   return json;
 }
 
-function toolResultWithContent<T>(content: T, structuredContent: unknown) {
-  return { content, structuredContent: structuredJson(structuredContent) };
+function toolResultWithContent<T>(content: T, structuredContent: unknown, isError = false) {
+  return {
+    content,
+    structuredContent: structuredJson(structuredContent),
+    ...(isError ? { isError: true } : {}),
+  };
 }
 
-function toolResult(text: string, structuredContent: unknown) {
+function toolResult(text: string, structuredContent: unknown, isError = false) {
   return {
     content: [{ type: "text" as const, text }],
     structuredContent: structuredJson(structuredContent),
+    ...(isError ? { isError: true } : {}),
   };
 }
 
