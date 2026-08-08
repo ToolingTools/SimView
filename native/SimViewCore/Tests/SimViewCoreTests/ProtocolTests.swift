@@ -18,6 +18,14 @@ private final class LockedCounter: @unchecked Sendable {
     }
 }
 
+private final class AccessibilitySnapshotBox: @unchecked Sendable {
+    let value: [String: Any]
+
+    init(_ value: [String: Any]) {
+        self.value = value
+    }
+}
+
 final class ProtocolTests: XCTestCase {
     private func pixelBuffer(red: UInt8, green: UInt8, blue: UInt8) throws -> CVPixelBuffer {
         var buffer: CVPixelBuffer?
@@ -72,6 +80,84 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(request.protocolVersion, SimViewVersion.protocolVersion)
         XCTAssertEqual(request.method, "hello")
         XCTAssertEqual(request.params["codecs"]?.arrayValue?.compactMap(\.stringValue), ["h264", "mjpeg"])
+    }
+
+    func testAccessibilityObservationSettlesAnEventBurstWithoutCapturingOnTheCallback() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "ax:1", "label": "Continue"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 0,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        XCTAssertTrue(baseline.stable)
+        XCTAssertEqual(baseline.revision, "1")
+
+        coordinator.markEvent()
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 250,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        XCTAssertTrue(settled.eventChanged)
+        XCTAssertTrue(settled.stable)
+        XCTAssertFalse(settled.timedOut)
+    }
+
+    func testAccessibilityObservationReturnsAValidTimeoutForAnUnchangedTree() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "capturedAt": "2026-08-08T10:00:00.000Z",
+            "root": ["ref": "ax:1"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 0,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        let timedOut = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 75,
+            maximumWaitMilliseconds: 30,
+            strategy: "snapshot-diff"
+        ) { _, _ in box.value }
+        XCTAssertFalse(timedOut.eventChanged)
+        XCTAssertFalse(timedOut.stable)
+        XCTAssertTrue(timedOut.timedOut)
+    }
+
+    func testAccessibilityObservationRejectsMalformedRevisions() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        XCTAssertThrowsError(
+            try coordinator.observe(
+                afterRevision: "not-a-revision",
+                scope: "interactive",
+                maxNodes: 100,
+                settleQuietMilliseconds: 75,
+                maximumWaitMilliseconds: 100,
+                strategy: "snapshot-diff"
+            ) { _, _ in [:] }
+        ) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "PARAMETER_INVALID")
+        }
     }
 
     func testJSONValueRoundTrip() throws {
@@ -568,13 +654,13 @@ final class ProtocolTests: XCTestCase {
 
     func testAndroidAgentHandshakeRejectsVersionOrAuthenticationFailure() throws {
         XCTAssertNoThrow(
-            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 3, 0, 0, 0, 0]))
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 4, 0, 0, 0, 0]))
         )
         XCTAssertThrowsError(
             try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 2, 0, 0, 0, 0]))
         )
         XCTAssertThrowsError(
-            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 3, 0, 0, 0, 1]))
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 4, 0, 0, 0, 1]))
         )
     }
 

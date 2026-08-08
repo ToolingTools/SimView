@@ -177,7 +177,8 @@ final class SimViewServer: @unchecked Sendable {
     private var selectedDevice: DeviceDescription?
     private let capture = FrameCapture()
     private let hid = HIDInjector()
-    private let accessibility = AccessibilityService()
+    private let accessibilityObservation = AccessibilityObservationCoordinator()
+    private let accessibility: AccessibilityService
     private let probe = ProbeCoordinator()
     private let h264 = H264Encoder()
     private let metrics = Metrics()
@@ -243,6 +244,7 @@ final class SimViewServer: @unchecked Sendable {
         self.instanceID = instanceID
         self.parentPID = parentPID
         self.idleTimeout = idleTimeout
+        self.accessibility = AccessibilityService(observation: accessibilityObservation)
     }
 
     func run() throws -> Never {
@@ -401,6 +403,8 @@ final class SimViewServer: @unchecked Sendable {
             } else {
                 if captureActive { stopCapture() }
                 selectedDevice = device
+                accessibilityObservation.reset()
+                startIOSAccessibilityObservation(for: device)
             }
             sendResult(
                 [
@@ -667,6 +671,10 @@ final class SimViewServer: @unchecked Sendable {
             let device = try selectDevice(request.deviceIdentifier)
             let result = try accessibilitySnapshot(device, params: request.params)
             sendResult(result, requestID: request.id, to: connection)
+        case "accessibility.observe":
+            let device = try selectDevice(request.deviceIdentifier)
+            let result = try accessibilityObserve(device, params: request.params)
+            sendResult(result, requestID: request.id, to: connection)
         case "accessibility.elementAtPoint":
             let device = try selectDevice(request.deviceIdentifier)
             let result = try accessibilityElementAtPoint(device, params: request.params)
@@ -813,6 +821,7 @@ final class SimViewServer: @unchecked Sendable {
         androidAgentFrameSequence = 0
         latestH264Configuration = nil
         selectedDevice = device
+        accessibilityObservation.reset()
         captureDeviceID = device.id
         androidInputWidth = device.pixelWidth ?? 0
         androidInputHeight = device.pixelHeight ?? 0
@@ -835,6 +844,7 @@ final class SimViewServer: @unchecked Sendable {
         captureActive = true
         do {
             if device.platform == .ios {
+                startIOSAccessibilityObservation(for: device)
                 try capture.start(udid: device.nativeIdentifier, callback: handler)
             } else {
                 let client = try ADBClient()
@@ -846,7 +856,8 @@ final class SimViewServer: @unchecked Sendable {
                 androidAccessibility = AndroidAccessibilityService(
                     client: client,
                     serial: device.nativeIdentifier,
-                    agent: accelerated ? androidAgent : nil
+                    agent: accelerated ? androidAgent : nil,
+                    observation: accessibilityObservation
                 )
                 if accelerated {
                     if connections.contains(where: {
@@ -865,6 +876,7 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func stopCapture() {
+        accessibility.stopObservation(udid: captureDeviceID)
         captureGeneration &+= 1
         capture.stop()
         androidCapture?.stop()
@@ -888,6 +900,7 @@ final class SimViewServer: @unchecked Sendable {
         pendingH264Frame = nil
         pendingMJPEGFrame = nil
         observation.clear()
+        accessibilityObservation.reset()
         Task { await h264.stop() }
     }
 
@@ -1067,6 +1080,9 @@ final class SimViewServer: @unchecked Sendable {
                         server.broadcast(WireFrame(kind: .h264Frame, payload: payload), codec: "h264")
                     }
                 },
+                onAccessibilityEvent: { [weak self] _ in
+                    self?.accessibilityObservation.markEvent()
+                },
                 onFailure: { [weak self] error in
                     guard let server = self else { return }
                     server.queue.async { server.handleAndroidAgentFailure(error, generation: generation) }
@@ -1129,7 +1145,8 @@ final class SimViewServer: @unchecked Sendable {
                 androidAccessibility = AndroidAccessibilityService(
                     client: client,
                     serial: device.nativeIdentifier,
-                    agent: androidAgent
+                    agent: androidAgent,
+                    observation: accessibilityObservation
                 )
                 if connections.contains(where: {
                     $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg"
@@ -1344,6 +1361,8 @@ final class SimViewServer: @unchecked Sendable {
             androidAgentRestartAttempts = 0
             androidInputWidth = 0
             androidInputHeight = 0
+            accessibility.stopObservation(udid: selectedDevice.nativeIdentifier)
+            accessibilityObservation.reset()
         }
         selectedDevice = device
         return device
@@ -1355,6 +1374,12 @@ final class SimViewServer: @unchecked Sendable {
             throw SimViewError("METHOD_UNSUPPORTED", "UIKit probe methods are unavailable on Android")
         }
         return device
+    }
+
+    private func startIOSAccessibilityObservation(for device: DeviceDescription) {
+        accessibility.startObservation(udid: device.nativeIdentifier) { [weak self] in
+            self?.accessibilityObservation.markEvent()
+        }
     }
 
     private func androidInputIfSelected() throws -> AndroidController? {
@@ -1386,7 +1411,11 @@ final class SimViewServer: @unchecked Sendable {
             client = try ADBClient()
         }
         androidClient = client
-        let service = AndroidAccessibilityService(client: client, serial: device.nativeIdentifier)
+        let service = AndroidAccessibilityService(
+            client: client,
+            serial: device.nativeIdentifier,
+            observation: accessibilityObservation
+        )
         androidAccessibility = service
         return service
     }
@@ -1405,6 +1434,60 @@ final class SimViewServer: @unchecked Sendable {
             scope: params["scope"]?.stringValue ?? "interactive",
             maxNodes: params["maxNodes"]?.intValue ?? 1_200
         )
+    }
+
+    private func accessibilityObserve(
+        _ device: DeviceDescription, params: [String: JSONValue]
+    ) throws -> [String: Any] {
+        let scope = params["scope"]?.stringValue ?? "interactive"
+        let maxNodes = params["maxNodes"]?.intValue ?? 1_200
+        let quiet = params["settleQuietMs"]?.intValue ?? 75
+        let maximumWait = params["maxWaitMs"]?.intValue ?? 500
+        let afterRevision = params["afterRevision"]?.stringValue
+        if device.platform == .ios {
+            startIOSAccessibilityObservation(for: device)
+        }
+        let strategy =
+            device.platform == .android
+            ? "android-uiautomation"
+            : accessibility.observationStrategy
+        let result = try accessibilityObservation.observe(
+            afterRevision: afterRevision,
+            scope: scope,
+            maxNodes: maxNodes,
+            settleQuietMilliseconds: quiet,
+            maximumWaitMilliseconds: maximumWait,
+            strategy: strategy
+        ) { [weak self] scope, maxNodes in
+            guard let self else {
+                throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "SimView server is unavailable")
+            }
+            if device.platform == .android {
+                return try self.requireAndroidAccessibility().snapshot(
+                    scope: scope,
+                    maxNodes: maxNodes
+                )
+            }
+            return try self.accessibility.snapshot(
+                udid: device.nativeIdentifier,
+                scope: scope,
+                maxNodes: maxNodes
+            )
+        }
+        let formatter = ISO8601DateFormatter()
+        var value: [String: Any] = [
+            "snapshot": result.snapshot,
+            "revision": result.revision,
+            "eventChanged": result.eventChanged,
+            "stable": result.stable,
+            "timedOut": result.timedOut,
+            "strategy": result.strategy,
+            "settledAt": formatter.string(from: result.settledAt),
+        ]
+        if let firstChangedAt = result.firstChangedAt {
+            value["firstChangedAt"] = formatter.string(from: firstChangedAt)
+        }
+        return value
     }
 
     private func accessibilityElementAtPoint(

@@ -4,6 +4,7 @@ import Foundation
 final class AndroidAgentConnection: @unchecked Sendable {
     typealias ConfigurationHandler = @Sendable (Data) -> Void
     typealias FrameHandler = @Sendable (UInt64, Bool, Data) -> Void
+    typealias AccessibilityEventHandler = @Sendable (UInt64) -> Void
     typealias FailureHandler = @Sendable (Error) -> Void
 
     private static let magic: UInt32 = 0x5356_4131
@@ -23,6 +24,7 @@ final class AndroidAgentConnection: @unchecked Sendable {
     private let readerQueue = DispatchQueue(label: "dev.simview.android.agent.reader", qos: .userInteractive)
     private let onConfiguration: ConfigurationHandler
     private let onFrame: FrameHandler
+    private let onAccessibilityEvent: AccessibilityEventHandler
     private let onFailure: FailureHandler
 
     init(
@@ -30,12 +32,14 @@ final class AndroidAgentConnection: @unchecked Sendable {
         token: String,
         onConfiguration: @escaping ConfigurationHandler,
         onFrame: @escaping FrameHandler,
+        onAccessibilityEvent: @escaping AccessibilityEventHandler = { _ in },
         onFailure: @escaping FailureHandler
     ) {
         self.lifecycle = lifecycle
         self.token = token
         self.onConfiguration = onConfiguration
         self.onFrame = onFrame
+        self.onAccessibilityEvent = onAccessibilityEvent
         self.onFailure = onFailure
     }
 
@@ -283,6 +287,9 @@ final class AndroidAgentConnection: @unchecked Sendable {
                     responsePayload = payload
                     acknowledgement.broadcast()
                     acknowledgement.unlock()
+                case 0x44:
+                    let revision = try readExactly(8).uint64(at: 0)
+                    onAccessibilityEvent(revision)
                 case 0x4F:
                     let message = try readJavaUTF()
                     throw SimViewError("ANDROID_AGENT_CAPTURE_FAILED", message)

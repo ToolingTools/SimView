@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,6 +17,9 @@ import {
   SimViewClient,
 } from "@simview/client";
 import {
+  type AccessibilityResource,
+  accessibilityObserveResultSchema,
+  accessibilityResourceSchema,
   annotationMutationSchema,
   type ElementFallbackReason,
   type ElementTreeOutput,
@@ -27,6 +30,7 @@ import {
   type SaveReviewImagesOutput,
   type SessionState,
   saveReviewImagesInputSchema,
+  stableAccessibilityEntries,
   summarizeAccessibilityNode,
   uiContextSchema,
 } from "@simview/contracts";
@@ -86,6 +90,8 @@ export interface WarmObservation {
   image?: Uint8Array | undefined;
 }
 
+export type AccessibilityObservation = z.output<typeof accessibilityObserveResultSchema>;
+
 const PREVIEW_PACKET_LIMIT = 120;
 const PREVIEW_MAX_LAG_PACKETS = 30;
 
@@ -116,9 +122,17 @@ export class SimViewSession {
   #metroInspector = new MetroInspector();
   #observationMode: "hybrid" | "semantic" = "semantic";
   #latestObservation: WarmObservation | undefined;
+  #latestAccessibilityObservation: AccessibilityObservation | undefined;
+  #latestAccessibilityResource: AccessibilityResource | undefined;
+  #accessibilityResourceListeners = new Set<(resource: AccessibilityResource) => void>();
   #fiberCache = new Map<string, { expiresAt: number; bytes: number; output: ElementTreeOutput }>();
   #semanticCache:
-    | { expiresAt: number; changeRevision: number; output: ElementTreeOutput }
+    | {
+        expiresAt: number;
+        accessibilityRevision: string;
+        semanticHash: string;
+        output: ElementTreeOutput;
+      }
     | undefined;
   #semanticRefresh: Promise<ElementTreeOutput> | undefined;
   #semanticGeneration = 0;
@@ -126,6 +140,23 @@ export class SimViewSession {
 
   get connectionGeneration(): number {
     return this.#connectionGeneration;
+  }
+
+  get accessibilityRevision(): string | undefined {
+    return this.#latestAccessibilityObservation?.revision ?? this.lastAccessibility?.snapshotId;
+  }
+
+  get accessibilityStrategy(): AccessibilityObservation["strategy"] | undefined {
+    return this.#latestAccessibilityObservation?.strategy;
+  }
+
+  get accessibilityResourceUri(): string {
+    return `simview://review/${this.reviewId}/accessibility`;
+  }
+
+  onAccessibilityResourceUpdate(listener: (resource: AccessibilityResource) => void): () => void {
+    this.#accessibilityResourceListeners.add(listener);
+    return () => this.#accessibilityResourceListeners.delete(listener);
   }
 
   get annotations(): Map<string, Annotation> {
@@ -455,20 +486,97 @@ export class SimViewSession {
       scope,
       maxNodes,
     });
-    if (semanticGeneration === this.#semanticGeneration) this.lastAccessibility = snapshot;
+    if (semanticGeneration === this.#semanticGeneration) {
+      this.lastAccessibility = snapshot;
+      this.#rememberAccessibilitySnapshot(snapshot, {
+        revision: snapshot.snapshotId,
+        strategy:
+          snapshot.source === "android-agent-uiautomator"
+            ? "android-uiautomation"
+            : "snapshot-diff",
+        stable: true,
+        settledAt: snapshot.capturedAt,
+      });
+    }
     return snapshot;
+  }
+
+  async accessibilityObserve({
+    afterRevision,
+    scope = "interactive",
+    maxNodes = 1_200,
+    settleQuietMs = 75,
+    maxWaitMs = 500,
+  }: {
+    afterRevision?: string | undefined;
+    scope?: "interactive" | "visible" | "full" | undefined;
+    maxNodes?: number | undefined;
+    settleQuietMs?: number | undefined;
+    maxWaitMs?: number | undefined;
+  } = {}): Promise<AccessibilityObservation> {
+    const semanticGeneration = this.#semanticGeneration;
+    this.requireCapability("accessibility", "Accessibility inspection");
+    const result = accessibilityObserveResultSchema.parse(
+      await this.requireClient().request("accessibility.observe", {
+        ...selectedDeviceParams(this.device),
+        ...(afterRevision ? { afterRevision } : {}),
+        scope,
+        maxNodes,
+        settleQuietMs,
+        maxWaitMs,
+      }),
+    );
+    if (semanticGeneration === this.#semanticGeneration) {
+      this.lastAccessibility = result.snapshot;
+      this.#latestAccessibilityObservation = result;
+      this.#rememberAccessibilitySnapshot(result.snapshot, result);
+    }
+    return result;
+  }
+
+  async accessibilityResource(): Promise<AccessibilityResource> {
+    if (this.#latestAccessibilityResource) return this.#latestAccessibilityResource;
+    await this.accessibilityObserve({ maxWaitMs: 0 });
+    if (!this.#latestAccessibilityResource) {
+      throw new Error("Accessibility resource is unavailable");
+    }
+    return this.#latestAccessibilityResource;
+  }
+
+  #rememberAccessibilitySnapshot(
+    snapshot: AccessibilitySnapshot,
+    observation: Pick<AccessibilityObservation, "revision" | "strategy" | "stable" | "settledAt">,
+  ): void {
+    const semanticHash = semanticHashForSnapshot(snapshot);
+    const resource = accessibilityResourceSchema.parse({
+      schemaVersion: 1,
+      revision: observation.revision,
+      semanticHash,
+      capturedAt: snapshot.capturedAt,
+      strategy: observation.strategy,
+      snapshot,
+    });
+    const changed = this.#latestAccessibilityResource?.semanticHash !== semanticHash;
+    this.#latestAccessibilityResource = resource;
+    if (changed && observation.stable) {
+      for (const listener of this.#accessibilityResourceListeners) listener(resource);
+    }
   }
 
   async elementSnapshot(
     scope: "interactive" | "visible" | "full" = "interactive",
     maxNodes = 1_200,
+    existingAccessibility?: AccessibilitySnapshot,
   ): Promise<ElementTreeOutput> {
     const semanticGeneration = this.#semanticGeneration;
-    const accessibility = await this.accessibilitySnapshot(scope, maxNodes);
+    const accessibility =
+      existingAccessibility ?? (await this.accessibilitySnapshot(scope, maxNodes));
     if (semanticGeneration !== this.#semanticGeneration) {
       throw new Error("Semantic state changed while the element tree was being prepared");
     }
-    const accessibilityKey = Bun.hash(JSON.stringify(accessibility.root)).toString(16);
+    const accessibilityRevision = this.accessibilityRevision ?? accessibility.snapshotId;
+    const semanticHash = semanticHashForSnapshot(accessibility);
+    const accessibilityKey = `${accessibilityRevision}:${semanticHash}`;
     const cached = this.#fiberCache.get(accessibilityKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.lastElements = cached.output.snapshot;
@@ -507,25 +615,38 @@ export class SimViewSession {
   }
 
   async preparedElementSnapshot(maxNodes = 240): Promise<ElementTreeOutput> {
-    const changeRevision = this.#latestObservation?.changeRevision ?? 0;
+    const accessibilityRevision = this.accessibilityRevision ?? "0";
+    const semanticHash = this.lastAccessibility
+      ? semanticHashForSnapshot(this.lastAccessibility)
+      : "";
     const semanticGeneration = this.#semanticGeneration;
     const cached = this.#semanticCache;
-    if (cached && cached.expiresAt > Date.now() && cached.changeRevision === changeRevision) {
+    if (
+      cached &&
+      cached.expiresAt > Date.now() &&
+      cached.accessibilityRevision === accessibilityRevision &&
+      cached.semanticHash === semanticHash
+    ) {
       this.lastElements = cached.output.snapshot;
       this.lastScreenContext = cached.output.screenContext;
       return cached.output;
     }
     if (this.#semanticRefresh) return this.#semanticRefresh;
-    const refresh = this.elementSnapshot("interactive", maxNodes).then((output) => {
-      if (semanticGeneration === this.#semanticGeneration) {
-        this.#semanticCache = {
-          expiresAt: Date.now() + 5_000,
-          changeRevision,
-          output,
-        };
-      }
-      return output;
-    });
+    const refresh = this.elementSnapshot("interactive", maxNodes, this.lastAccessibility).then(
+      (output) => {
+        if (semanticGeneration === this.#semanticGeneration) {
+          this.#semanticCache = {
+            expiresAt: Date.now() + 5_000,
+            accessibilityRevision: this.accessibilityRevision ?? accessibilityRevision,
+            semanticHash: this.lastAccessibility
+              ? semanticHashForSnapshot(this.lastAccessibility)
+              : semanticHash,
+            output,
+          };
+        }
+        return output;
+      },
+    );
     this.#semanticRefresh = refresh;
     try {
       return await refresh;
@@ -559,22 +680,8 @@ export class SimViewSession {
 
   async findElements(selector: AccessibilitySelector) {
     const snapshots = await this.#semanticTargetSnapshots(selector.ref);
-    const exact = selector.exact ?? true;
-    const match = (actual: string | undefined, expected: string | undefined) =>
-      expected === undefined ||
-      (actual !== undefined &&
-        (exact
-          ? actual.localeCompare(expected, undefined, { sensitivity: "accent" }) === 0
-          : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase())));
     for (const snapshot of snapshots) {
-      const matches = flattenAccessibilityTree(snapshot.root).filter(
-        (node) =>
-          match(node.ref, selector.ref) &&
-          match(node.identifier, selector.identifier) &&
-          match(node.role, selector.role) &&
-          match(node.label ?? node.title, selector.name) &&
-          match(node.value, selector.value),
-      );
+      const matches = matchingElements(snapshot, selector);
       if (matches.length > 0) {
         return { snapshotId: snapshot.snapshotId, selector, matches, count: matches.length };
       }
@@ -585,6 +692,47 @@ export class SimViewSession {
       matches: [],
       count: 0,
     };
+  }
+
+  async resolveActionableElement(selector: AccessibilitySelector) {
+    const snapshots = await this.#semanticTargetSnapshots(selector.ref);
+    let fallback:
+      | {
+          snapshotId: string;
+          selector: AccessibilitySelector;
+          matches: AccessibilityNode[];
+          count: number;
+        }
+      | undefined;
+    for (const snapshot of snapshots) {
+      const matches = matchingElements(snapshot, selector);
+      if (matches.length === 0) continue;
+      const selected =
+        selector.index === undefined ? matches : [matches[selector.index]].filter(isDefined);
+      fallback ??= {
+        snapshotId: snapshot.snapshotId,
+        selector,
+        matches: selected,
+        count: selected.length,
+      };
+      const actionable = selected.filter(isTappableElement);
+      if (actionable.length > 0) {
+        return {
+          snapshotId: snapshot.snapshotId,
+          selector,
+          matches: actionable,
+          count: actionable.length,
+        };
+      }
+    }
+    return (
+      fallback ?? {
+        snapshotId: snapshots[0]?.snapshotId ?? "unavailable",
+        selector,
+        matches: [],
+        count: 0,
+      }
+    );
   }
 
   async searchElements(search: ElementSearchQuery) {
@@ -624,17 +772,30 @@ export class SimViewSession {
   }
 
   async #semanticTargetSnapshots(ref?: string): Promise<ElementSnapshot[]> {
+    const currentSnapshots = () => {
+      const native = this.lastAccessibility;
+      const projected = this.lastElements;
+      const ordered = ref?.startsWith("rn:") ? [projected, native] : [native, projected];
+      return ordered.filter(
+        (snapshot, index, snapshots): snapshot is ElementSnapshot =>
+          snapshot !== undefined &&
+          snapshots.findIndex((candidate) => candidate?.snapshotId === snapshot.snapshotId) ===
+            index,
+      );
+    };
+    const cached = currentSnapshots();
+    if (
+      ref &&
+      cached.some((snapshot) =>
+        flattenAccessibilityTree(snapshot.root).some((node) => node.ref === ref),
+      )
+    ) {
+      return cached;
+    }
     if (this.#latestObservation || (!this.lastAccessibility && !this.lastElements)) {
       await this.preparedElementSnapshot();
     }
-    const native = this.lastAccessibility;
-    const projected = this.lastElements;
-    const ordered = ref?.startsWith("rn:") ? [projected, native] : [native, projected];
-    return ordered.filter(
-      (snapshot, index, snapshots): snapshot is ElementSnapshot =>
-        snapshot !== undefined &&
-        snapshots.findIndex((candidate) => candidate?.snapshotId === snapshot.snapshotId) === index,
-    );
+    return currentSnapshots();
   }
 
   inspectPoint(x: number, y: number) {
@@ -1319,6 +1480,8 @@ export class SimViewSession {
     this.lastAccessibility = undefined;
     this.lastElements = undefined;
     this.lastScreenContext = undefined;
+    this.#latestAccessibilityObservation = undefined;
+    this.#latestAccessibilityResource = undefined;
     this.#fiberCache.clear();
     this.#semanticCache = undefined;
   }
@@ -1353,6 +1516,13 @@ const ACTIONABLE_ROLE_MARKERS = [
   "cell",
 ];
 
+function semanticHashForSnapshot(snapshot: AccessibilitySnapshot): string {
+  const entries = stableAccessibilityEntries(snapshot.root)
+    .map((entry) => [entry.key, entry.value] as const)
+    .sort(([left], [right]) => left.localeCompare(right));
+  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
+}
+
 function normalizeSearchText(value: string): string {
   return value
     .normalize("NFKD")
@@ -1360,6 +1530,51 @@ function normalizeSearchText(value: string): string {
     .toLocaleLowerCase()
     .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
     .trim();
+}
+
+function matchingElements(
+  snapshot: ElementSnapshot,
+  selector: AccessibilitySelector,
+): AccessibilityNode[] {
+  const exact = selector.exact ?? true;
+  const matches = (actual: string | undefined, expected: string | undefined) =>
+    expected === undefined ||
+    (actual !== undefined &&
+      (exact
+        ? actual.localeCompare(expected, undefined, { sensitivity: "accent" }) === 0
+        : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase())));
+  return flattenAccessibilityTree(snapshot.root).filter(
+    (node) =>
+      matches(node.ref, selector.ref) &&
+      matches(node.identifier, selector.identifier) &&
+      matches(node.role, selector.role) &&
+      matchesAccessibleName(node.label ?? node.title, selector.name, exact) &&
+      matches(node.value, selector.value),
+  );
+}
+
+function matchesAccessibleName(
+  actual: string | undefined,
+  expected: string | undefined,
+  exact: boolean,
+): boolean {
+  if (expected === undefined) return true;
+  if (actual === undefined) return false;
+  if (!exact) return actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase());
+  if (actual.localeCompare(expected, undefined, { sensitivity: "accent" }) === 0) return true;
+  const prefix = actual.slice(0, expected.length);
+  return (
+    prefix.localeCompare(expected, undefined, { sensitivity: "accent" }) === 0 &&
+    /^[,;\n\r(]/u.test(actual.slice(expected.length))
+  );
+}
+
+function isDefined<T>(value: T | undefined): value is T {
+  return value !== undefined;
+}
+
+function isTappableElement(node: AccessibilityNode): boolean {
+  return node.enabled !== false && isVisibleSearchCandidate(node);
 }
 
 function isVisibleSearchCandidate(node: AccessibilityNode): boolean {

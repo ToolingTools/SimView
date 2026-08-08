@@ -1,13 +1,9 @@
 {
-  "mcpServers": {
-    "simview": {
-      "command": "./bin/simview",
-      "args": ["mcp"],
-      "cwd": "."
-    },
+  "servers": {
     "repowise": {
+      "type": "stdio",
       "command": "repowise",
-      "args": ["mcp", "--transport", "stdio"],
+      "args": ["mcp", "${workspaceFolder}", "--transport", "stdio"],
       "description": "repowise: codebase intelligence \u2014 docs, graph, git signals, dead code, decisions"
     }
   }

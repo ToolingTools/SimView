@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type AccessibilitySnapshot,
+  accessibilityObserveParamsSchema,
+  accessibilityObserveResultSchema,
+  accessibilityResourceSchema,
   accessibilitySelectorSchema,
   annotationGeometrySchema,
   deviceDescriptionSchema,
@@ -14,6 +18,7 @@ import {
   parseMethodResult,
   protocolResponseSchema,
   sessionStateSchema,
+  stableAccessibilityEntries,
 } from "@simview/contracts";
 
 describe("shared protocol contracts", () => {
@@ -28,7 +33,7 @@ describe("shared protocol contracts", () => {
 
     expect(params.codecs).toEqual(["h264", "mjpeg"]);
     expect(result.codec).toBe("h264");
-    expect(result.protocolVersion).toBe(2);
+    expect(result.protocolVersion).toBe(3);
   });
 
   test("rejects empty accessibility selectors", () => {
@@ -63,6 +68,55 @@ describe("shared protocol contracts", () => {
         state: "absent",
       }).success,
     ).toBe(false);
+  });
+
+  test("validates accessibility observation and resource envelopes", () => {
+    const snapshot = observationSnapshot("ax-1", "first-ref", "Continue");
+    expect(accessibilityObserveParamsSchema.parse({})).toMatchObject({
+      scope: "interactive",
+      maxNodes: 1_200,
+      settleQuietMs: 75,
+      maxWaitMs: 500,
+    });
+    const observation = accessibilityObserveResultSchema.parse({
+      snapshot,
+      revision: "7",
+      eventChanged: true,
+      stable: true,
+      timedOut: false,
+      strategy: "snapshot-diff",
+      settledAt: snapshot.capturedAt,
+    });
+    const resource = accessibilityResourceSchema.parse({
+      schemaVersion: 1,
+      revision: observation.revision,
+      semanticHash: "a".repeat(64),
+      capturedAt: snapshot.capturedAt,
+      strategy: observation.strategy,
+      snapshot,
+    });
+    expect(resource.snapshot.snapshotId).toBe("ax-1");
+  });
+
+  test("keeps semantic identities stable when snapshot refs are regenerated", () => {
+    const first = observationSnapshot("ax-1", "first-ref", "Continue");
+    const regenerated = observationSnapshot("ax-2", "second-ref", "Continue");
+    const changed = observationSnapshot("ax-3", "third-ref", "Continue");
+    const changedButton = changed.root.children?.[0];
+    if (!changedButton) throw new Error("Test snapshot is missing its button");
+    changedButton.enabled = false;
+
+    const firstEntries = stableAccessibilityEntries(first.root);
+    const regeneratedEntries = stableAccessibilityEntries(regenerated.root);
+    const changedEntries = stableAccessibilityEntries(changed.root);
+    expect(regeneratedEntries.map(({ key }) => key)).toEqual(firstEntries.map(({ key }) => key));
+    expect(regeneratedEntries.map(({ value }) => value)).toEqual(
+      firstEntries.map(({ value }) => value),
+    );
+    expect(changedEntries.map(({ key }) => key)).toEqual(firstEntries.map(({ key }) => key));
+    expect(changedEntries.map(({ value }) => value)).not.toEqual(
+      firstEntries.map(({ value }) => value),
+    );
   });
 
   test("rejects out-of-range input at the protocol boundary", () => {
@@ -266,3 +320,31 @@ describe("shared protocol contracts", () => {
     ).toBe(true);
   });
 });
+
+function observationSnapshot(
+  snapshotId: string,
+  ref: string,
+  label: string,
+): AccessibilitySnapshot {
+  return {
+    schemaVersion: 1,
+    snapshotId,
+    capturedAt: "2026-08-08T10:00:00.000Z",
+    source: "core-simulator-ax",
+    scope: "interactive",
+    screen: { x: 0, y: 0, width: 402, height: 874 },
+    root: {
+      ref: "root-ref",
+      children: [
+        {
+          ref,
+          identifier: "continue-button",
+          role: "button",
+          label,
+          enabled: true,
+        },
+      ],
+    },
+    stats: { nodeCount: 2, truncated: false },
+  };
+}

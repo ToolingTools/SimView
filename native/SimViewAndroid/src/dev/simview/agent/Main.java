@@ -12,7 +12,7 @@ import java.security.MessageDigest;
 /** Transient shell-user agent. No application package or persistent service is installed. */
 public final class Main {
   static final int MAGIC = 0x53564131; // SVA1
-  static final int PROTOCOL_VERSION = 3;
+  static final int PROTOCOL_VERSION = 4;
 
   private Main() {}
 

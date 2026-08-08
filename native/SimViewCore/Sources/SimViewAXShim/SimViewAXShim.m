@@ -10,6 +10,7 @@
 #import <AppKit/AppKit.h>
 #import <dlfcn.h>
 #import <objc/message.h>
+#import <objc/runtime.h>
 
 static NSString *const SVAXErrorDomain = @"dev.simview.accessibility";
 
@@ -47,6 +48,8 @@ static NSString *const SVAXErrorDomain = @"dev.simview.accessibility";
 @interface SVAXTranslator : NSObject
 + (instancetype)sharedInstance;
 @property(nonatomic, weak) id bridgeTokenDelegate;
+@property(nonatomic, copy) id appNotificationTestingCallback;
+- (void)enableAccessibility;
 - (SVAXTranslationObject *)frontmostApplicationWithDisplayId:(unsigned int)displayId
                                          bridgeDelegateToken:(NSString *)token;
 - (SVAXTranslationObject *)objectAtPoint:(CGPoint)point
@@ -59,7 +62,15 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
 
 @interface SVAccessibilityDispatcher : NSObject
 @property(nonatomic, strong) NSMapTable<NSString *, NSObject *> *devices;
+@property(nonatomic, strong) NSMapTable<NSObject *, NSString *> *tokens;
+@property(nonatomic, strong) NSMutableDictionary<NSString *, dispatch_block_t> *handlers;
 @property(nonatomic, strong) dispatch_queue_t callbackQueue;
+- (NSString *)tokenForDevice:(NSObject *)device;
+- (void)observeDevice:(NSObject *)device handler:(dispatch_block_t)handler;
+- (void)stopObservingDevice:(NSObject *)device;
+- (void)dispatchNotification:(unsigned long long)notification
+                        data:(id)data
+            associatedObject:(id)associatedObject;
 @end
 
 @implementation SVAccessibilityDispatcher
@@ -68,10 +79,62 @@ typedef id _Nullable (^SVAXTranslationCallback)(id request);
   self = [super init];
   if (self) {
     _devices = [NSMapTable strongToWeakObjectsMapTable];
+    _tokens = [NSMapTable strongToStrongObjectsMapTable];
+    _handlers = [NSMutableDictionary dictionary];
     _callbackQueue =
         dispatch_queue_create("dev.simview.accessibility.callback", DISPATCH_QUEUE_SERIAL);
   }
   return self;
+}
+
+- (NSString *)tokenForDevice:(NSObject *)device {
+  @synchronized(self) {
+    NSString *token = [_tokens objectForKey:device];
+    if (!token) {
+      token = NSUUID.UUID.UUIDString;
+      [_tokens setObject:token forKey:device];
+    }
+    [_devices setObject:device forKey:token];
+    return token;
+  }
+}
+
+- (void)observeDevice:(NSObject *)device handler:(dispatch_block_t)handler {
+  NSString *token = [self tokenForDevice:device];
+  @synchronized(self) {
+    _handlers[token] = [handler copy];
+  }
+}
+
+- (void)stopObservingDevice:(NSObject *)device {
+  @synchronized(self) {
+    NSString *token = [_tokens objectForKey:device];
+    if (token)
+      [_handlers removeObjectForKey:token];
+  }
+}
+
+- (void)dispatchNotification:(unsigned long long)notification
+                        data:(id)data
+            associatedObject:(id)associatedObject {
+  (void)notification;
+  (void)data;
+  NSString *token = nil;
+  @try {
+    if ([associatedObject respondsToSelector:NSSelectorFromString(@"bridgeDelegateToken")]) {
+      token = [associatedObject valueForKey:@"bridgeDelegateToken"];
+    }
+  } @catch (__unused NSException *exception) {
+    token = nil;
+  }
+  dispatch_block_t handler = nil;
+  @synchronized(self) {
+    if (token.length == 0 && _handlers.count == 1)
+      token = _handlers.allKeys.firstObject;
+    handler = [_handlers[token] copy];
+  }
+  if (handler)
+    dispatch_async(_callbackQueue, handler);
 }
 
 - (SVAXTranslationCallback)accessibilityTranslationDelegateBridgeCallbackWithToken:
@@ -129,6 +192,10 @@ static SVAccessibilityDispatcher *SVDispatcher(void) {
   return dispatcher;
 }
 
+static IMP SVOriginalHandleNotification;
+static void SVSwizzledHandleNotification(id object, SEL selector, unsigned long long notification,
+                                         id data, id associatedObject);
+
 static SVAXTranslator *SVTranslator(void) {
   static SVAXTranslator *translator;
   static dispatch_once_t onceToken;
@@ -137,9 +204,19 @@ static SVAXTranslator *SVTranslator(void) {
            "AccessibilityPlatformTranslation",
            RTLD_NOW | RTLD_GLOBAL);
     Class translatorClass = NSClassFromString(@"AXPTranslator");
-    if ([translatorClass respondsToSelector:@selector(sharedInstance)]) {
+    if ([translatorClass respondsToSelector:NSSelectorFromString(@"sharedmacOSInstance")]) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+      translator = [translatorClass performSelector:NSSelectorFromString(@"sharedmacOSInstance")];
+#pragma clang diagnostic pop
+    } else if ([translatorClass respondsToSelector:@selector(sharedInstance)]) {
       translator = [translatorClass sharedInstance];
+    }
+    if (translator) {
       translator.bridgeTokenDelegate = SVDispatcher();
+      if ([translator respondsToSelector:@selector(enableAccessibility)]) {
+        [translator enableAccessibility];
+      }
     }
   });
   return translator;
@@ -272,8 +349,7 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
     return nil;
   }
 
-  NSString *token = NSUUID.UUID.UUIDString;
-  [SVDispatcher().devices setObject:device forKey:token];
+  NSString *token = [SVDispatcher() tokenForDevice:device];
   @try {
     SVAXTranslationObject *translation =
         point ? [translator objectAtPoint:*point displayId:0 bridgeDelegateToken:token]
@@ -323,8 +399,6 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
     if (error)
       *error = SVError(4, exception.reason ?: @"Accessibility translation failed");
     return nil;
-  } @finally {
-    [SVDispatcher().devices removeObjectForKey:token];
   }
 }
 
@@ -340,6 +414,53 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
   return SVResolve(device, NULL, NSZeroRect, maxNodes, error);
 }
 
++ (BOOL)startObservingDevice:(NSObject *)device
+                     handler:(dispatch_block_t)handler
+                       error:(NSError **)error {
+  SVAXTranslator *translator = SVTranslator();
+  if (!translator || !handler) {
+    if (error)
+      *error = SVError(5, @"CoreSimulator accessibility observation is unavailable");
+    return NO;
+  }
+  SVAccessibilityDispatcher *dispatcher = SVDispatcher();
+  [dispatcher observeDevice:device handler:handler];
+
+  SEL getter = NSSelectorFromString(@"appNotificationTestingCallback");
+  SEL setter = NSSelectorFromString(@"setAppNotificationTestingCallback:");
+  if ([translator respondsToSelector:getter] && [translator respondsToSelector:setter]) {
+    id previous = ((id (*)(id, SEL))objc_msgSend)(translator, getter);
+    id callback = ^(unsigned long long notification, id data, id associatedObject) {
+      if (previous) {
+        ((void (^)(unsigned long long, id, id))previous)(notification, data, associatedObject);
+      }
+      [dispatcher dispatchNotification:notification data:data associatedObject:associatedObject];
+    };
+    ((void (*)(id, SEL, id))objc_msgSend)(translator, setter, callback);
+    return YES;
+  }
+
+  Class translatorClass = object_getClass(translator);
+  SEL notificationSelector = NSSelectorFromString(@"handleNotification:data:associatedObject:");
+  Method method = class_getInstanceMethod(translatorClass, notificationSelector);
+  if (!method) {
+    [dispatcher stopObservingDevice:device];
+    if (error)
+      *error = SVError(6, @"CoreSimulator accessibility notification ABI is unavailable");
+    return NO;
+  }
+  static dispatch_once_t onceToken;
+  dispatch_once(&onceToken, ^{
+    SVOriginalHandleNotification = method_getImplementation(method);
+    method_setImplementation(method, (IMP)SVSwizzledHandleNotification);
+  });
+  return SVOriginalHandleNotification != NULL;
+}
+
++ (void)stopObservingDevice:(NSObject *)device {
+  [SVDispatcher() stopObservingDevice:device];
+}
+
 + (NSDictionary *)elementForDevice:(NSObject *)device
                                  x:(double)x
                                  y:(double)y
@@ -351,3 +472,12 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
 }
 
 @end
+
+static void SVSwizzledHandleNotification(id object, SEL selector, unsigned long long notification,
+                                         id data, id associatedObject) {
+  [SVDispatcher() dispatchNotification:notification data:data associatedObject:associatedObject];
+  if (SVOriginalHandleNotification) {
+    ((void (*)(id, SEL, unsigned long long, id, id))SVOriginalHandleNotification)(
+        object, selector, notification, data, associatedObject);
+  }
+}

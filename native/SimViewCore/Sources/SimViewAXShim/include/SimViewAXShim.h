@@ -7,6 +7,7 @@
  */
 
 #import <Foundation/Foundation.h>
+#import <dispatch/dispatch.h>
 
 NS_ASSUME_NONNULL_BEGIN
 
@@ -17,6 +18,12 @@ NS_ASSUME_NONNULL_BEGIN
 + (nullable NSDictionary<NSString *, id> *)snapshotForDevice:(NSObject *)device
                                                     maxNodes:(NSUInteger)maxNodes
                                                        error:(NSError **)error;
+
++ (BOOL)startObservingDevice:(NSObject *)device
+                     handler:(dispatch_block_t)handler
+                       error:(NSError **)error;
+
++ (void)stopObservingDevice:(NSObject *)device;
 
 + (nullable NSDictionary<NSString *, id> *)elementForDevice:(NSObject *)device
                                                           x:(double)x

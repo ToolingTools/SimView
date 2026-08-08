@@ -1,14 +1,21 @@
 import Foundation
 
-final class AndroidAccessibilityService {
+final class AndroidAccessibilityService: @unchecked Sendable {
     private let client: ADBClient
     private let serial: String
     private weak var agent: AndroidAgentConnection?
+    private let observation: AccessibilityObservationCoordinator
 
-    init(client: ADBClient, serial: String, agent: AndroidAgentConnection? = nil) {
+    init(
+        client: ADBClient,
+        serial: String,
+        agent: AndroidAgentConnection? = nil,
+        observation: AccessibilityObservationCoordinator = AccessibilityObservationCoordinator()
+    ) {
         self.client = client
         self.serial = serial
         self.agent = agent
+        self.observation = observation
     }
 
     func snapshot(
@@ -111,25 +118,43 @@ final class AndroidAccessibilityService {
         guard state == "visible" || state == "hidden" else {
             throw SimViewError("PARAMETER_INVALID", "accessibility.wait state must be visible or hidden")
         }
+        try validateAccessibilitySelector(selector)
         let deadline = Date().addingTimeInterval(Double(max(1, min(timeoutMs, 30_000))) / 1_000)
+        var revision: String?
         var lastCount = 0
-        repeat {
-            let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { break }
-            let result = try find(selector: selector, timeout: remaining)
-            lastCount = result["count"] as? Int ?? 0
+        while Date() < deadline {
+            let remaining = max(0, deadline.timeIntervalSinceNow)
+            let observed = try observation.observe(
+                afterRevision: revision,
+                scope: "visible",
+                maxNodes: 5_000,
+                settleQuietMilliseconds: 75,
+                maximumWaitMilliseconds: min(500, Int(remaining * 1_000)),
+                strategy: agent == nil ? "snapshot-diff" : "android-uiautomation"
+            ) { [weak self] scope, maxNodes in
+                guard let self else {
+                    throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "Accessibility service is unavailable")
+                }
+                return try self.snapshot(scope: scope, maxNodes: maxNodes, timeout: 15)
+            }
+            revision = observed.revision
+            var matches: [[String: Any]] = []
+            if let root = observed.snapshot["root"] as? [String: Any] {
+                collectMatches(root, selector: selector, matches: &matches)
+            }
+            lastCount = matches.count
             if (state == "visible" && lastCount > 0) || (state == "hidden" && lastCount == 0) {
                 return [
                     "schemaVersion": 1,
                     "state": state,
                     "satisfied": true,
                     "count": lastCount,
-                    "snapshotId": result["snapshotId"] as Any,
-                    "matches": result["matches"] as Any,
+                    "snapshotId": observed.snapshot["snapshotId"] as Any,
+                    "matches": matches,
                 ]
             }
-            Thread.sleep(forTimeInterval: 0.1)
-        } while Date() < deadline
+            if observed.timedOut { break }
+        }
         throw SimViewError(
             "ACCESSIBILITY_REQUEST_TIMEOUT",
             "Timed out waiting for Android accessibility element to become \(state)",

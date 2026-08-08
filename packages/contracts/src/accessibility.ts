@@ -100,7 +100,7 @@ export const accessibilitySnapshotSchema = z
     schemaVersion: z.literal(1),
     snapshotId: z.string(),
     capturedAt: z.string(),
-    source: z.enum(["core-simulator-ax", "android-uiautomator"]),
+    source: z.enum(["core-simulator-ax", "android-uiautomator", "android-agent-uiautomator"]),
     scope: z.enum(["interactive", "visible", "full"]),
     screen: normalizedRectSchema,
     root: accessibilityNodeSchema,
@@ -112,6 +112,109 @@ export const accessibilitySnapshotSchema = z
   .passthrough();
 
 export type AccessibilitySnapshot = z.infer<typeof accessibilitySnapshotSchema>;
+
+export const accessibilityObservationStrategySchema = z.enum([
+  "ios-axp",
+  "android-uiautomation",
+  "snapshot-diff",
+]);
+
+export type AccessibilityObservationStrategy = z.infer<
+  typeof accessibilityObservationStrategySchema
+>;
+
+export const accessibilityObserveParamsSchema = z
+  .object({
+    afterRevision: z.string().min(1).optional(),
+    scope: z.enum(["interactive", "visible", "full"]).default("interactive"),
+    maxNodes: z.number().int().min(1).max(5_000).default(1_200),
+    settleQuietMs: z.number().int().min(20).max(500).default(75),
+    maxWaitMs: z.number().int().min(0).max(5_000).default(500),
+  })
+  .passthrough();
+
+export type AccessibilityObserveParams = z.infer<typeof accessibilityObserveParamsSchema>;
+
+export const accessibilityObserveResultSchema = z
+  .object({
+    snapshot: accessibilitySnapshotSchema,
+    revision: z.string().min(1),
+    eventChanged: z.boolean(),
+    stable: z.boolean(),
+    timedOut: z.boolean(),
+    strategy: accessibilityObservationStrategySchema,
+    firstChangedAt: z.string().optional(),
+    settledAt: z.string(),
+  })
+  .passthrough();
+
+export type AccessibilityObserveResult = z.infer<typeof accessibilityObserveResultSchema>;
+
+export const accessibilityResourceSchema = z.object({
+  schemaVersion: z.literal(1),
+  revision: z.string().min(1),
+  semanticHash: z.string().length(64),
+  capturedAt: z.string(),
+  strategy: accessibilityObservationStrategySchema,
+  snapshot: accessibilitySnapshotSchema,
+});
+
+export type AccessibilityResource = z.infer<typeof accessibilityResourceSchema>;
+
+export interface StableAccessibilityEntry {
+  key: string;
+  ref: string;
+  value: Record<string, unknown>;
+}
+
+/**
+ * Produces revision-independent semantic identities. Snapshot refs are useful
+ * for actions, but are intentionally excluded from identity so a regenerated
+ * tree can still produce an unchanged semantic hash.
+ */
+export function stableAccessibilityEntries(root: AccessibilityNode): StableAccessibilityEntry[] {
+  const visited: Array<{ node: AccessibilityNode; path: number[] }> = [];
+  const visit = (node: AccessibilityNode, path: number[]) => {
+    visited.push({ node, path });
+    node.children?.forEach((child, index) => {
+      visit(child, [...path, index]);
+    });
+  };
+  visit(root, []);
+  const identityCounts = new Map<string, number>();
+  for (const { node } of visited) {
+    const identifier = node.testID ?? node.identifier;
+    if (!identifier) continue;
+    const role = node.role ?? node.roleDescription ?? "";
+    const identity = `${identifier}\u0000${role}`;
+    identityCounts.set(identity, (identityCounts.get(identity) ?? 0) + 1);
+  }
+  return visited.map(({ node, path }) => {
+    const role = node.role ?? node.roleDescription ?? "";
+    const name = node.label ?? node.title ?? "";
+    const identifier = node.testID ?? node.identifier;
+    const identity = identifier ? `${identifier}\u0000${role}` : "";
+    const key =
+      identifier && identityCounts.get(identity) === 1
+        ? `identifier:${identifier}\u0000role:${role}`
+        : `position:${path.join(".")}\u0000role:${role}\u0000name:${name}`;
+    const value = {
+      hierarchyPosition: path,
+      role: node.role,
+      name,
+      value: node.valueRedacted ? "<redacted>" : node.value,
+      valueRedacted: node.valueRedacted,
+      identifier,
+      enabled: node.enabled,
+      hidden: node.hidden,
+      focused: node.focused,
+      expanded: node.expanded,
+      actions: node.actions?.slice().sort(),
+      frame: node.frame?.normalized,
+    } satisfies Record<string, unknown>;
+    return { key, ref: node.ref, value };
+  });
+}
 
 const selectorFields = {
   ref: z.string().min(1).optional(),

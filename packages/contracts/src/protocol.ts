@@ -1,6 +1,8 @@
 import { z } from "zod";
 import {
   accessibilityNodeSchema,
+  accessibilityObserveParamsSchema,
+  accessibilityObserveResultSchema,
   accessibilitySelectorSchema,
   accessibilitySnapshotSchema,
 } from "./accessibility";
@@ -416,6 +418,10 @@ export const methodSchemas = {
       maxNodes: z.number().int().min(1).max(5_000).optional(),
     }),
     result: accessibilitySnapshotSchema,
+  },
+  "accessibility.observe": {
+    params: selectedDeviceParamsSchema.merge(accessibilityObserveParamsSchema),
+    result: accessibilityObserveResultSchema,
   },
   "accessibility.elementAtPoint": {
     params: selectedDeviceParamsSchema.extend(normalizedPointSchema.shape),

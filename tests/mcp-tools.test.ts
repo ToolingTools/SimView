@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
   type AccessibilitySnapshot,
   deviceListSchema,
@@ -279,6 +280,77 @@ describe("MCP app tools", () => {
 
       expect(session.browserOpened).toBe(0);
       expect(session.relayStarted).toBe(0);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("serves the settled accessibility resource and notifies only on semantic changes", async () => {
+    const session = new SimViewSession();
+    session.device = iosDevice("resource-device", "Resource Device");
+    const snapshots = [
+      resourceSnapshot("ax-1", "ax:first", "Continue"),
+      resourceSnapshot("ax-2", "ax:second", "Continue"),
+      resourceSnapshot("ax-3", "ax:third", "Done"),
+    ];
+    let captures = 0;
+    session.client = {
+      connected: true,
+      close: async () => {},
+      request: async (method: string) => {
+        if (method !== "accessibility.observe") throw new Error(`Unexpected method ${method}`);
+        const snapshot = snapshots[Math.min(captures, snapshots.length - 1)];
+        if (!snapshot) throw new Error("Test snapshot sequence is empty");
+        captures += 1;
+        return {
+          snapshot,
+          revision: String(captures),
+          eventChanged: captures > 1,
+          stable: true,
+          timedOut: false,
+          strategy: "snapshot-diff",
+          settledAt: snapshot.capturedAt,
+        };
+      },
+    } as never;
+    const server = createServer(session);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: "accessibility-resource-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const notifications: string[] = [];
+    client.setNotificationHandler(ResourceUpdatedNotificationSchema, ({ params }) => {
+      notifications.push(params.uri);
+    });
+    try {
+      const listed = await client.listResources();
+      const resource = listed.resources.find((item) => item.uri.startsWith("simview://review/"));
+      if (!resource) throw new Error("Accessibility resource was not registered");
+      const first = await client.readResource({ uri: resource.uri });
+      const second = await client.readResource({ uri: resource.uri });
+      expect(captures).toBe(1);
+      expect(JSON.parse((first.contents[0] as { text: string }).text)).toMatchObject({
+        schemaVersion: 1,
+        revision: "1",
+        strategy: "snapshot-diff",
+        snapshot: { snapshotId: "ax-1" },
+      });
+      expect((second.contents[0] as { text: string }).text).toBe(
+        (first.contents[0] as { text: string }).text,
+      );
+
+      await client.subscribeResource({ uri: resource.uri });
+      await session.accessibilityObserve({ maxWaitMs: 0 });
+      await Bun.sleep(5);
+      expect(notifications).toEqual([]);
+
+      await session.accessibilityObserve({ maxWaitMs: 0 });
+      await Bun.sleep(5);
+      expect(notifications).toEqual([resource.uri]);
+      const updated = await client.readResource({ uri: resource.uri });
+      expect(JSON.parse((updated.contents[0] as { text: string }).text)).toMatchObject({
+        revision: "3",
+        snapshot: { snapshotId: "ax-3" },
+      });
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }
@@ -776,7 +848,7 @@ describe("MCP app tools", () => {
         total: 1,
         truncated: false,
       }) as never;
-    session.findElements = async (selector) =>
+    session.resolveActionableElement = async (selector) =>
       ({ snapshotId: "ax-1", selector, matches: [element], count: 1 }) as never;
     let dispatched: unknown;
     session.dispatchInput = async (input) => {
@@ -799,6 +871,286 @@ describe("MCP app tools", () => {
       expect(dispatched).toEqual({
         method: "input.tap",
         params: { x: 0.35, y: 0.275 },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("returns a valid embedded semantic observation after an element tap", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("observed-tap", "Observed Tap");
+    const element = {
+      ref: "ax:continue",
+      role: "button",
+      label: "Continue",
+      enabled: true,
+      frame: {
+        points: { x: 100, y: 200, width: 80, height: 40 },
+        normalized: { x: 0.25, y: 0.25, width: 0.2, height: 0.05 },
+      },
+    };
+    const snapshot: AccessibilitySnapshot = {
+      schemaVersion: 1,
+      snapshotId: "ax-observed",
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      source: "core-simulator-ax",
+      scope: "interactive",
+      screen: { x: 0, y: 0, width: 402, height: 874 },
+      root: { ref: "ax:root", children: [element] },
+      stats: { nodeCount: 2, truncated: false },
+    };
+    session.lastAccessibility = snapshot;
+    session.findElements = async (selector) =>
+      ({ snapshotId: snapshot.snapshotId, selector, matches: [element], count: 1 }) as never;
+    session.warmObservation = async () => ({
+      observationId: "warm-observed",
+      frameId: "frame-observed",
+      frameRevision: 2,
+      changeRevision: 2,
+      imageRevision: 0,
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      settledAt: "2026-08-08T10:00:00.075Z",
+      stable: true,
+      ageMs: 75,
+      width: 402,
+      height: 874,
+      byteLength: 0,
+      imageIncluded: false,
+      cacheHit: true,
+    });
+    session.preparedElementSnapshot = async () => ({
+      snapshot,
+      screenContext: {
+        schemaVersion: 1,
+        kind: "uikit",
+        platform: "ios",
+        capturedAt: snapshot.capturedAt,
+        frameId: "frame-observed",
+        simulatorName: "Observed Tap",
+        viewport: { x: 0, y: 0, width: 402, height: 874 },
+        orientation: "portrait",
+      },
+    });
+    session.dispatchInput = async () => ({ accepted: true });
+    const server = createServer(session);
+    const client = new Client({ name: "observed-tap-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: { ref: element.ref, observe: "semantic" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        receipt: { accepted: true },
+        observation: {
+          frameId: "frame-observed",
+          semantic: { status: "full", nodeCount: 2 },
+          vision: { included: false, returnedBytes: 0 },
+        },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("taps a clearly ranked semantic query winner", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("ranked-query", "Ranked Query");
+    const target = {
+      ref: "ax:branches",
+      role: "AXTab",
+      label: "Branches, tab, 2 of 5",
+      enabled: true,
+      actions: ["AXPress"],
+      frame: {
+        points: { x: 80, y: 800, width: 80, height: 44 },
+        normalized: { x: 0.2, y: 0.91, width: 0.2, height: 0.05 },
+      },
+    };
+    const weaker = { ...target, ref: "ax:change-branch", label: "Change branch" };
+    session.searchElements = async () =>
+      ({
+        snapshotId: "ax-ranked",
+        query: {
+          query: "Branches tab",
+          actionableOnly: true,
+          visibleOnly: true,
+          limit: 5,
+        },
+        matches: [
+          { element: target, score: 0.92, matchedFields: ["name", "role"], exact: false },
+          { element: weaker, score: 0.65, matchedFields: ["name"], exact: false },
+        ],
+        count: 2,
+        total: 2,
+        truncated: false,
+      }) as never;
+    session.resolveActionableElement = async (selector) =>
+      ({ snapshotId: "ax-ranked", selector, matches: [target], count: 1 }) as never;
+    let dispatched: unknown;
+    session.dispatchInput = async (input) => {
+      dispatched = input;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "ranked-query-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: { query: "Branches tab", observe: "none" },
+      });
+      expect(result.structuredContent).toMatchObject({
+        selector: { ref: target.ref },
+        receipt: { accepted: true },
+      });
+      expect(dispatched).toEqual({
+        method: "input.tap",
+        params: { x: 0.30000000000000004, y: 0.935 },
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("keeps a generation-scoped ref resolvable from its source snapshot", async () => {
+    const session = new SimViewSession();
+    const source: AccessibilitySnapshot = {
+      schemaVersion: 1,
+      snapshotId: "ax-source",
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      source: "core-simulator-ax",
+      scope: "interactive",
+      screen: { x: 0, y: 0, width: 402, height: 874 },
+      root: { ref: "ax:root", children: [{ ref: "ax:generation:21", label: "Branches" }] },
+      stats: { nodeCount: 2, truncated: false },
+    };
+    session.lastAccessibility = source;
+    session.client = {
+      connected: true,
+      close: async () => {},
+      request: async () => ({
+        observationId: "warm-source",
+        frameId: "frame-source",
+        frameRevision: 1,
+        changeRevision: 1,
+        imageRevision: 0,
+        capturedAt: source.capturedAt,
+        settledAt: source.capturedAt,
+        stable: true,
+        ageMs: 0,
+        width: 402,
+        height: 874,
+        byteLength: 0,
+        imageIncluded: false,
+        cacheHit: true,
+      }),
+    } as never;
+    await session.warmObservation({ visual: false, maxWaitMs: 0 });
+    let refreshes = 0;
+    session.preparedElementSnapshot = async () => {
+      refreshes += 1;
+      const refreshed = {
+        ...source,
+        snapshotId: "ax-refreshed",
+        root: { ref: "ax:root", children: [{ ref: "ax:generation:22", label: "Branches" }] },
+      };
+      session.lastAccessibility = refreshed;
+      return {
+        snapshot: refreshed,
+        screenContext: {
+          schemaVersion: 1,
+          kind: "uikit",
+          platform: "ios",
+          capturedAt: source.capturedAt,
+          frameId: "frame-source",
+          simulatorName: "Ref Source",
+          viewport: { x: 0, y: 0, width: 402, height: 874 },
+          orientation: "portrait",
+        },
+      };
+    };
+
+    expect(await session.findElements({ ref: "ax:generation:21", exact: true })).toMatchObject({
+      snapshotId: "ax-source",
+      count: 1,
+    });
+    expect(refreshes).toBe(0);
+    await session.close();
+  });
+
+  test("uses a tappable semantic source for an action batch", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("batch-target", "Batch Target");
+    session.lastAccessibility = {
+      schemaVersion: 1,
+      snapshotId: "ax-batch",
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      source: "core-simulator-ax",
+      scope: "interactive",
+      screen: { x: 0, y: 0, width: 402, height: 874 },
+      root: {
+        ref: "ax:root",
+        children: [{ ref: "ax:search", identifier: "branch-search", role: "AXButton" }],
+      },
+      stats: { nodeCount: 2, truncated: false },
+    };
+    session.lastElements = {
+      schemaVersion: 1,
+      snapshotId: "rn-batch",
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      source: "react-native-fiber",
+      scope: "interactive",
+      screen: { x: 0, y: 0, width: 402, height: 874 },
+      root: {
+        ref: "rn:root",
+        children: [
+          {
+            ref: "rn:search",
+            identifier: "branch-search",
+            role: "button",
+            interactive: true,
+            frame: {
+              points: { x: 160, y: 780, width: 80, height: 44 },
+              normalized: { x: 0.4, y: 0.89, width: 0.2, height: 0.05 },
+            },
+          },
+        ],
+      },
+      stats: { nodeCount: 2, truncated: false },
+      metro: {
+        host: "127.0.0.1",
+        port: 8081,
+        targetId: "target-1",
+        targetTitle: "Branches",
+        renderer: "fabric",
+      },
+    };
+    let dispatched: unknown;
+    session.dispatchInput = async (input) => {
+      dispatched = input;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "batch-target-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          actions: [{ type: "tap_element", identifier: "branch-search", exact: true }],
+          observe: "none",
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(dispatched).toEqual({
+        method: "input.tap",
+        params: { x: 0.5, y: 0.915 },
       });
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
@@ -948,6 +1300,18 @@ describe("MCP app tools", () => {
       count: 1,
       matches: [{ ref: "ax:shop" }],
     });
+    expect(await session.findElements({ name: "Shop", exact: true })).toMatchObject({
+      snapshotId: "ax-current",
+      count: 1,
+      matches: [{ ref: "ax:shop" }],
+    });
+    expect(
+      await session.resolveActionableElement({ role: "AXButton", exact: true, index: 1 }),
+    ).toMatchObject({
+      snapshotId: "ax-current",
+      count: 1,
+      matches: [{ ref: "ax:category" }],
+    });
     expect(session.state()).toMatchObject({
       route: "ShopMenuRoot",
       component: {
@@ -1006,4 +1370,32 @@ function resourceUri(tools: Awaited<ReturnType<Client["listTools"]>>): string {
 
 function iosDevice(udid: string, name: string) {
   return parseDeviceDescription({ udid, name, state: "Booted", runtime: "iOS" });
+}
+
+function resourceSnapshot(snapshotId: string, ref: string, label: string): AccessibilitySnapshot {
+  return {
+    schemaVersion: 1,
+    snapshotId,
+    capturedAt: "2026-08-08T10:00:00.000Z",
+    source: "core-simulator-ax",
+    scope: "interactive",
+    screen: { x: 0, y: 0, width: 402, height: 874 },
+    root: {
+      ref: "ax:root",
+      children: [
+        {
+          ref,
+          identifier: "continue-button",
+          role: "button",
+          label,
+          enabled: true,
+          frame: {
+            points: { x: 20, y: 700, width: 120, height: 44 },
+            normalized: { x: 0.05, y: 0.8, width: 0.3, height: 0.05 },
+          },
+        },
+      ],
+    },
+    stats: { nodeCount: 2, truncated: false },
+  };
 }

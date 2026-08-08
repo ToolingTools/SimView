@@ -64,7 +64,7 @@ try {
       protocolVersion?: number;
       android?: { agent?: { packaged?: boolean } };
     } | null;
-    if (diagnostics?.protocolVersion !== 2 || diagnostics.android?.agent?.packaged !== true) {
+    if (diagnostics?.protocolVersion !== 3 || diagnostics.android?.agent?.packaged !== true) {
       throw new Error(
         `${command[0]} package smoke resolved stale or incomplete contents: ${stdout.trim()}`,
       );

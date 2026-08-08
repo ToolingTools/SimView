@@ -15,15 +15,30 @@ final class AgentSession {
   private static final int SHUTDOWN = 0x7f;
   private static final int EVENT_ACKNOWLEDGEMENT = 0x42;
   private static final int EVENT_RESPONSE = 0x43;
+  private static final int EVENT_ACCESSIBILITY_REVISION = 0x44;
 
   private final DataInputStream input;
   private final DataOutputStream output;
+  private final AccessibilitySnapshot accessibilitySnapshot;
   private InputDispatcher inputDispatcher;
   private ScreenStreamer streamer;
 
   AgentSession(DataInputStream input, DataOutputStream output) {
     this.input = input;
     this.output = output;
+    this.accessibilitySnapshot =
+        AccessibilitySnapshot.start(
+            revision -> {
+              try {
+                synchronized (output) {
+                  output.writeByte(EVENT_ACCESSIBILITY_REVISION);
+                  output.writeLong(revision);
+                  output.flush();
+                }
+              } catch (Exception ignored) {
+                // The reader will report the socket failure to the host.
+              }
+            });
   }
 
   void run() throws Exception {
@@ -75,7 +90,7 @@ final class AgentSession {
             inputDispatcher().gesture(tracks);
             break;
           case ACCESSIBILITY_SNAPSHOT:
-            respond(command, AccessibilitySnapshot.capture());
+            respond(command, accessibilitySnapshot.capture());
             break;
           case SHUTDOWN:
             return;
