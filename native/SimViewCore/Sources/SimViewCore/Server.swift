@@ -1449,7 +1449,7 @@ final class SimViewServer: @unchecked Sendable {
         }
         let strategy =
             device.platform == .android
-            ? "android-uiautomation"
+            ? try requireAndroidAccessibility().observationStrategy
             : accessibility.observationStrategy
         let result = try accessibilityObservation.observe(
             afterRevision: afterRevision,

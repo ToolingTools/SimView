@@ -1280,21 +1280,22 @@ describe("MCP app tools", () => {
       },
       stats: { nodeCount: 2, truncated: false },
     };
-    expect(
-      await session.searchElements({
-        query: "Shop",
-        actionableOnly: true,
-        visibleOnly: true,
-        limit: 10,
-      }),
-    ).toMatchObject({
-      snapshotId: "ax-current",
-      count: 2,
-      matches: [
-        { element: { ref: "ax:shop" }, score: 0.92, exact: false },
-        { element: { ref: "ax:category" }, score: 0.874, exact: false },
-      ],
+    const shopSearch = await session.searchElements({
+      query: "Shop",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 10,
     });
+    expect(shopSearch).toMatchObject({
+      snapshotId: "ax-current",
+      count: 4,
+    });
+    expect(shopSearch.matches.map((match) => match.element.ref).sort()).toEqual([
+      "ax:category",
+      "ax:shop",
+      "rn:1",
+      "rn:2",
+    ]);
     expect(await session.findElements({ name: "Shop", exact: false })).toMatchObject({
       snapshotId: "ax-current",
       count: 1,

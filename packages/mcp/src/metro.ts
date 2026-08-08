@@ -150,7 +150,13 @@ export class MetroInspector {
         scope: accessibility.scope,
         screen: viewport,
         root: raw.root,
-        stats: { nodeCount: raw.nodeCount, truncated: raw.truncated },
+        stats: {
+          nodeCount: raw.nodeCount,
+          truncated: raw.truncated,
+          quality: raw.truncated ? "partial" : "complete",
+          capturedBudget: maxNodes,
+          ...(raw.truncated ? { reason: "node-budget-exhausted" } : {}),
+        },
         metro: {
           host: selected.server.host,
           port: selected.server.port,
@@ -456,20 +462,23 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
   return `(async function() {
     var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
     if (!hook || !hook.getFiberRoots) return null;
-    var roots = null;
-    var renderer = null;
-    for (var id = 1; id <= 20; id++) {
+    var rootEntries = [];
+    var rendererIds = hook.renderers && hook.renderers.keys ? Array.from(hook.renderers.keys()) : [];
+    // Older DevTools hooks do not publish renderers; keep a bounded fallback
+    // for their renderer IDs while still enumerating every registered renderer.
+    if (!rendererIds.length) rendererIds = Array.from({ length: 64 }, function(_, index) { return index + 1; });
+    for (var id of rendererIds) {
       try {
         var candidate = hook.getFiberRoots(id);
         if (candidate && candidate.size) {
-          roots = candidate;
-          renderer = hook.renderers && hook.renderers.get ? hook.renderers.get(id) : null;
-          break;
+          var candidateRenderer = hook.renderers && hook.renderers.get ? hook.renderers.get(id) : null;
+          candidate.forEach(function(root) { if (root && root.current) rootEntries.push({ fiber: root.current, renderer: candidateRenderer }); });
         }
       } catch (_) {}
     }
-    if (!roots || !roots.size) return null;
-    var rootFiber = Array.from(roots)[0].current;
+    if (!rootEntries.length) return null;
+    var rootFiber = rootEntries[0].fiber;
+    var renderer = rootEntries[0].renderer;
     var WIDTH = ${JSON.stringify(width)};
     var HEIGHT = ${JSON.stringify(height)};
     var MAX_NODES = ${Math.min(1_199, Math.max(0, maxNodes - 1))};
@@ -602,18 +611,37 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         };
         if (host) measure(node, fiber);
       }
-      var children = [];
+      var childFibers = [];
       var child = fiber.child;
-      while (child && count < MAX_NODES) {
-        children = children.concat(walk(child, depth + 1));
-        child = child.sibling;
+      while (child) { childFibers.push(child); child = child.sibling; }
+      // Project labelled/actionable siblings before structural branches. This
+      // keeps global tab bars and navigation controls inside a compact tree.
+      childFibers.sort(function(left, right) {
+        function priority(candidate) {
+          var candidateProps = candidate.memoizedProps || {};
+          var candidateRole = candidateProps.accessibilityRole || candidateProps.role;
+          var candidateLabel = candidateProps.accessibilityLabel || candidateProps['aria-label'];
+          var candidateAction = candidateProps.onPress || candidateProps.onPressIn || candidateProps.onClick || candidateProps.onTap;
+          return (candidateAction ? 8 : 0) + (candidateLabel ? 4 : 0) + (candidateProps.testID ? 2 : 0) + (candidateRole ? 1 : 0);
+        }
+        return priority(right) - priority(left);
+      });
+      var children = [];
+      for (var childIndex = 0; childIndex < childFibers.length && count < MAX_NODES; childIndex++) {
+        children = children.concat(walk(childFibers[childIndex], depth + 1));
       }
-      if (child) truncated = true;
+      if (childIndex < childFibers.length) truncated = true;
       if (!node) return children;
       if (children.length) node.children = children;
       return [node];
     }
-    var projected = walk(rootFiber, 0);
+    // Visit every registered renderer/root; child projection prioritizes global
+    // navigation siblings over deep structural branches.
+    var projected = [];
+    for (var rootIndex = 0; rootIndex < rootEntries.length && count < MAX_NODES; rootIndex++) {
+      renderer = rootEntries[rootIndex].renderer;
+      projected = projected.concat(walk(rootEntries[rootIndex].fiber, 0));
+    }
     await Promise.all(measureJobs);
     function union(node) {
       var frames = [];

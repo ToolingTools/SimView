@@ -204,19 +204,13 @@ static SVAXTranslator *SVTranslator(void) {
            "AccessibilityPlatformTranslation",
            RTLD_NOW | RTLD_GLOBAL);
     Class translatorClass = NSClassFromString(@"AXPTranslator");
-    if ([translatorClass respondsToSelector:NSSelectorFromString(@"sharedmacOSInstance")]) {
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Warc-performSelector-leaks"
-      translator = [translatorClass performSelector:NSSelectorFromString(@"sharedmacOSInstance")];
-#pragma clang diagnostic pop
-    } else if ([translatorClass respondsToSelector:@selector(sharedInstance)]) {
+    // AXPTranslator's macOS singleton is a host accessibility bridge, not the
+    // Simulator translator. It can return a valid-looking but empty AXApplication.
+    if ([translatorClass respondsToSelector:@selector(sharedInstance)]) {
       translator = [translatorClass sharedInstance];
     }
     if (translator) {
       translator.bridgeTokenDelegate = SVDispatcher();
-      if ([translator respondsToSelector:@selector(enableAccessibility)]) {
-        [translator enableAccessibility];
-      }
     }
   });
   return translator;
@@ -381,6 +375,12 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
     BOOL truncated = NO;
     NSDictionary *root = SVSerializeElement(element, snapshotID, token, screenFrame, &ordinal,
                                             MAX(1, maxNodes), 0, &truncated);
+    if (!point && ordinal == 1 && [element accessibilityChildren].count == 0 &&
+        NSEqualRects([element accessibilityFrame], NSZeroRect)) {
+      if (error)
+        *error = SVError(7, @"Accessibility translation returned an empty application placeholder");
+      return nil;
+    }
     return @{
       @"schemaVersion" : @1,
       @"snapshotId" : snapshotID,
@@ -393,7 +393,12 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
         @"height" : @(screenFrame.size.height)
       },
       @"root" : root,
-      @"stats" : @{@"nodeCount" : @(ordinal), @"truncated" : @(truncated)}
+      @"stats" : @{
+        @"nodeCount" : @(ordinal),
+        @"truncated" : @(truncated),
+        @"quality" : truncated ? @"partial" : @"complete",
+        @"capturedBudget" : @(MAX(1, maxNodes))
+      }
     };
   } @catch (NSException *exception) {
     if (error)
@@ -470,7 +475,9 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
                       screenHeight:(double)screenHeight
                              error:(NSError **)error {
   CGPoint point = CGPointMake(x, y);
-  return SVResolve(device, &point, NSMakeRect(0, 0, screenWidth, screenHeight), 1, error);
+  NSDictionary *snapshot =
+      SVResolve(device, &point, NSMakeRect(0, 0, screenWidth, screenHeight), 1, error);
+  return snapshot[@"root"];
 }
 
 @end

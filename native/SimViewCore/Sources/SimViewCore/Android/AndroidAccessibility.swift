@@ -18,13 +18,15 @@ final class AndroidAccessibilityService: @unchecked Sendable {
         self.observation = observation
     }
 
+    var observationStrategy: String { agent == nil ? "snapshot-diff" : "android-shell-dump" }
+
     func snapshot(
         scope: String = "interactive", maxNodes: Int = 1_200, timeout: TimeInterval = 15
     ) throws -> [String: Any] {
         let deadline = Date().addingTimeInterval(max(0.1, timeout))
         if let agent {
             let xml = try agent.accessibilitySnapshot(timeout: max(0.1, deadline.timeIntervalSinceNow))
-            return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-agent-uiautomator")
+            return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-agent-shell")
         }
         let remotePath = "/data/local/tmp/simview-\(UUID().uuidString.lowercased()).xml"
         defer {
@@ -64,6 +66,25 @@ final class AndroidAccessibilityService: @unchecked Sendable {
         let display = displayBounds(root)
         let framedRoot = applyingFrames(to: root, display: display)
         let selectedRoot = scope == "interactive" ? interactiveTree(framedRoot) ?? framedRoot : framedRoot
+        let quality: String
+        let reason: String?
+        if parser.nodeCount <= 1 || display.width <= 0 || display.height <= 0 {
+            quality = "degraded"
+            reason = "root-only-or-zero-sized-hierarchy"
+        } else if parser.truncated {
+            quality = "partial"
+            reason = "node-budget-exhausted"
+        } else {
+            quality = "complete"
+            reason = nil
+        }
+        var stats: [String: Any] = [
+            "nodeCount": parser.nodeCount,
+            "truncated": parser.truncated,
+            "quality": quality,
+            "capturedBudget": max(1, min(maxNodes, 5_000)),
+        ]
+        if let reason { stats["reason"] = reason }
         return [
             "schemaVersion": 1,
             "snapshotId": snapshotID,
@@ -72,7 +93,7 @@ final class AndroidAccessibilityService: @unchecked Sendable {
             "scope": scope,
             "screen": ["x": 0, "y": 0, "width": display.width, "height": display.height],
             "root": selectedRoot,
-            "stats": ["nodeCount": parser.nodeCount, "truncated": parser.truncated],
+            "stats": stats,
         ]
     }
 
@@ -130,7 +151,7 @@ final class AndroidAccessibilityService: @unchecked Sendable {
                 maxNodes: 5_000,
                 settleQuietMilliseconds: 75,
                 maximumWaitMilliseconds: min(500, Int(remaining * 1_000)),
-                strategy: agent == nil ? "snapshot-diff" : "android-uiautomation"
+                strategy: observationStrategy
             ) { [weak self] scope, maxNodes in
                 guard let self else {
                     throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "Accessibility service is unavailable")

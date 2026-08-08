@@ -37,6 +37,9 @@ export const reactNativeElementSnapshotSchema = z.object({
   stats: z.object({
     nodeCount: z.number().int().nonnegative(),
     truncated: z.boolean(),
+    quality: z.enum(["complete", "partial", "degraded"]).optional(),
+    reason: z.string().optional(),
+    capturedBudget: z.number().int().positive().optional(),
   }),
   metro: z.object({
     host: z.string(),

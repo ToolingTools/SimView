@@ -100,13 +100,16 @@ export const accessibilitySnapshotSchema = z
     schemaVersion: z.literal(1),
     snapshotId: z.string(),
     capturedAt: z.string(),
-    source: z.enum(["core-simulator-ax", "android-uiautomator", "android-agent-uiautomator"]),
+    source: z.enum(["core-simulator-ax", "android-uiautomator", "android-agent-shell"]),
     scope: z.enum(["interactive", "visible", "full"]),
     screen: normalizedRectSchema,
     root: accessibilityNodeSchema,
     stats: z.object({
       nodeCount: z.number().int().nonnegative(),
       truncated: z.boolean(),
+      quality: z.enum(["complete", "partial", "degraded"]).optional(),
+      reason: z.string().optional(),
+      capturedBudget: z.number().int().positive().optional(),
     }),
   })
   .passthrough();
@@ -116,6 +119,7 @@ export type AccessibilitySnapshot = z.infer<typeof accessibilitySnapshotSchema>;
 export const accessibilityObservationStrategySchema = z.enum([
   "ios-axp",
   "android-uiautomation",
+  "android-shell-dump",
   "snapshot-diff",
 ]);
 

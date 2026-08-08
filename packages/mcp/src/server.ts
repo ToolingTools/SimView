@@ -333,6 +333,7 @@ const searchElementsOutputSchema = z.object({
   count: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
   truncated: z.boolean(),
+  sourceTruncated: z.boolean(),
 });
 const waitOutputSchema = z.object({
   durationMs: z.number().nonnegative(),
@@ -723,8 +724,8 @@ export function createServer(
         stable: true,
         timedOut: false,
         strategy:
-          session.lastAccessibility.source === "android-agent-uiautomator"
-            ? "android-uiautomation"
+          session.lastAccessibility.source === "android-agent-shell"
+            ? "android-shell-dump"
             : "snapshot-diff",
         settledAt: session.lastAccessibility.capturedAt,
       };

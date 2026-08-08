@@ -126,15 +126,8 @@ export class SimViewSession {
   #latestAccessibilityResource: AccessibilityResource | undefined;
   #accessibilityResourceListeners = new Set<(resource: AccessibilityResource) => void>();
   #fiberCache = new Map<string, { expiresAt: number; bytes: number; output: ElementTreeOutput }>();
-  #semanticCache:
-    | {
-        expiresAt: number;
-        accessibilityRevision: string;
-        semanticHash: string;
-        output: ElementTreeOutput;
-      }
-    | undefined;
-  #semanticRefresh: Promise<ElementTreeOutput> | undefined;
+  #semanticCache = new Map<string, { expiresAt: number; output: ElementTreeOutput }>();
+  #semanticRefresh = new Map<string, Promise<ElementTreeOutput>>();
   #semanticGeneration = 0;
   #visualObservationTail: Promise<void> = Promise.resolve();
 
@@ -491,9 +484,7 @@ export class SimViewSession {
       this.#rememberAccessibilitySnapshot(snapshot, {
         revision: snapshot.snapshotId,
         strategy:
-          snapshot.source === "android-agent-uiautomator"
-            ? "android-uiautomation"
-            : "snapshot-diff",
+          snapshot.source === "android-agent-shell" ? "android-shell-dump" : "snapshot-diff",
         stable: true,
         settledAt: snapshot.capturedAt,
       });
@@ -576,7 +567,7 @@ export class SimViewSession {
     }
     const accessibilityRevision = this.accessibilityRevision ?? accessibility.snapshotId;
     const semanticHash = semanticHashForSnapshot(accessibility);
-    const accessibilityKey = `${accessibilityRevision}:${semanticHash}`;
+    const accessibilityKey = `${scope}:${maxNodes}:${accessibilityRevision}:${semanticHash}`;
     const cached = this.#fiberCache.get(accessibilityKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.lastElements = cached.output.snapshot;
@@ -620,38 +611,31 @@ export class SimViewSession {
       ? semanticHashForSnapshot(this.lastAccessibility)
       : "";
     const semanticGeneration = this.#semanticGeneration;
-    const cached = this.#semanticCache;
-    if (
-      cached &&
-      cached.expiresAt > Date.now() &&
-      cached.accessibilityRevision === accessibilityRevision &&
-      cached.semanticHash === semanticHash
-    ) {
+    const cacheKey = `interactive:${maxNodes}:${accessibilityRevision}:${semanticHash}`;
+    const cached = this.#semanticCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) {
       this.lastElements = cached.output.snapshot;
       this.lastScreenContext = cached.output.screenContext;
       return cached.output;
     }
-    if (this.#semanticRefresh) return this.#semanticRefresh;
+    const inFlight = this.#semanticRefresh.get(cacheKey);
+    if (inFlight) return inFlight;
     const refresh = this.elementSnapshot("interactive", maxNodes, this.lastAccessibility).then(
       (output) => {
         if (semanticGeneration === this.#semanticGeneration) {
-          this.#semanticCache = {
+          this.#semanticCache.set(cacheKey, {
             expiresAt: Date.now() + 5_000,
-            accessibilityRevision: this.accessibilityRevision ?? accessibilityRevision,
-            semanticHash: this.lastAccessibility
-              ? semanticHashForSnapshot(this.lastAccessibility)
-              : semanticHash,
             output,
-          };
+          });
         }
         return output;
       },
     );
-    this.#semanticRefresh = refresh;
+    this.#semanticRefresh.set(cacheKey, refresh);
     try {
       return await refresh;
     } finally {
-      if (this.#semanticRefresh === refresh) this.#semanticRefresh = undefined;
+      if (this.#semanticRefresh.get(cacheKey) === refresh) this.#semanticRefresh.delete(cacheKey);
     }
   }
 
@@ -738,8 +722,8 @@ export class SimViewSession {
   async searchElements(search: ElementSearchQuery) {
     const roles = search.roles?.map(normalizeSearchText);
     const snapshots = await this.#semanticTargetSnapshots();
-    let snapshot = snapshots[0];
-    let ranked: ElementSearchMatch[] = [];
+    const snapshot = snapshots[0];
+    const ranked: Array<{ match: ElementSearchMatch; source: ElementSnapshot }> = [];
     for (const candidateSnapshot of snapshots) {
       const candidates = flattenAccessibilityTree(candidateSnapshot.root)
         .filter((node) => !search.visibleOnly || isVisibleSearchCandidate(node))
@@ -749,25 +733,53 @@ export class SimViewSession {
             !roles?.length ||
             roles.some((role) => normalizeSearchText(node.role ?? "").includes(role)),
         );
-      ranked = candidates
-        .map((element) => rankElementSearchMatch(element, search.query))
-        .filter((match): match is ElementSearchMatch => match !== undefined)
-        .sort(
-          (left, right) =>
-            right.score - left.score ||
-            Number(right.exact) - Number(left.exact) ||
-            left.element.ref.localeCompare(right.element.ref),
-        );
-      snapshot = candidateSnapshot;
-      if (ranked.length > 0) break;
+      ranked.push(
+        ...candidates
+          .map((element) => rankElementSearchMatch(element, search.query))
+          .filter((match): match is ElementSearchMatch => match !== undefined)
+          .map((match) => ({ match, source: candidateSnapshot })),
+      );
     }
+    const deduplicated = new Map<string, { match: ElementSearchMatch; source: ElementSnapshot }>();
+    for (const candidate of ranked) {
+      const node = candidate.match.element;
+      const frame = node.frame?.normalized;
+      const key = [
+        normalizeSearchText(node.identifier ?? node.label ?? node.title ?? node.ref),
+        normalizeSearchText(node.role ?? ""),
+        frame
+          ? `${Math.round(frame.x * 100)}:${Math.round(frame.y * 100)}:${Math.round(frame.width * 100)}:${Math.round(frame.height * 100)}`
+          : node.ref,
+      ].join("|");
+      const existing = deduplicated.get(key);
+      const nativeActionable =
+        candidate.source.source !== "react-native-fiber" && isActionableSearchCandidate(node);
+      const existingNativeActionable =
+        existing &&
+        existing.source.source !== "react-native-fiber" &&
+        isActionableSearchCandidate(existing.match.element);
+      if (
+        !existing ||
+        (nativeActionable && !existingNativeActionable) ||
+        candidate.match.score > existing.match.score
+      ) {
+        deduplicated.set(key, candidate);
+      }
+    }
+    const ordered = [...deduplicated.values()].sort(
+      (left, right) =>
+        right.match.score - left.match.score ||
+        Number(right.match.exact) - Number(left.match.exact) ||
+        left.match.element.ref.localeCompare(right.match.element.ref),
+    );
     return {
       snapshotId: snapshot?.snapshotId ?? "unavailable",
       query: search,
-      matches: ranked.slice(0, search.limit),
-      count: Math.min(ranked.length, search.limit),
-      total: ranked.length,
-      truncated: ranked.length > search.limit,
+      matches: ordered.slice(0, search.limit).map(({ match }) => match),
+      count: Math.min(ordered.length, search.limit),
+      total: ordered.length,
+      truncated: ordered.length > search.limit,
+      sourceTruncated: snapshots.some((candidate) => candidate.stats.truncated),
     };
   }
 
@@ -1476,14 +1488,14 @@ export class SimViewSession {
 
   #clearSemanticState(): void {
     this.#semanticGeneration += 1;
-    this.#semanticRefresh = undefined;
+    this.#semanticRefresh.clear();
     this.lastAccessibility = undefined;
     this.lastElements = undefined;
     this.lastScreenContext = undefined;
     this.#latestAccessibilityObservation = undefined;
     this.#latestAccessibilityResource = undefined;
     this.#fiberCache.clear();
-    this.#semanticCache = undefined;
+    this.#semanticCache.clear();
   }
 
   async #primeObservation(): Promise<void> {
@@ -1633,7 +1645,7 @@ function rankElementSearchMatch(
     } else {
       const valueTokens = new Set(value.split(" ").filter(Boolean));
       const matchedTokenCount = queryTokens.filter((token) => valueTokens.has(token)).length;
-      if (matchedTokenCount > 0) {
+      if (matchedTokenCount === queryTokens.length) {
         fieldScore = 0.45 + 0.3 * (matchedTokenCount / queryTokens.length);
       }
     }
