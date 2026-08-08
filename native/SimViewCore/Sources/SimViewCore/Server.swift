@@ -167,6 +167,11 @@ final class SimViewServer: @unchecked Sendable {
     private let idleTimeout: TimeInterval
     private let queue = DispatchQueue(label: "dev.simview.server", qos: .userInteractive)
     private let inputQueue = DispatchQueue(label: "dev.simview.server.input", qos: .userInteractive)
+    private let observationQueue = DispatchQueue(
+        label: "dev.simview.server.observation",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
     private let mjpegQueue = DispatchQueue(label: "dev.simview.server.mjpeg", qos: .userInitiated)
     private var listenerFD: Int32 = -1
     private var listener: DispatchSourceRead?
@@ -475,39 +480,23 @@ final class SimViewServer: @unchecked Sendable {
             } else {
                 afterRevision = nil
             }
-            let prepared = try observation.observe(
-                visual: visual,
-                afterRevision: afterRevision,
-                quietMilliseconds: request.params["settleQuietMs"]?.intValue ?? 75,
-                maximumWaitMilliseconds: request.params["maxWaitMs"]?.intValue ?? 500
-            )
-            let formatter = ISO8601DateFormatter()
-            let image = prepared.image
-            var result: [String: Any] = [
-                "observationId": prepared.observationID,
-                "frameId": prepared.frameID,
-                "frameRevision": prepared.frameRevision,
-                "changeRevision": prepared.changeRevision,
-                "imageRevision": prepared.imageRevision,
-                "capturedAt": formatter.string(from: prepared.capturedAt),
-                "settledAt": formatter.string(from: prepared.settledAt),
-                "stable": prepared.stable,
-                "ageMs": max(0, prepared.settledAt.timeIntervalSince(prepared.capturedAt) * 1_000),
-                "width": prepared.width,
-                "height": prepared.height,
-                "byteLength": image?.count ?? 0,
-                "imageIncluded": image != nil,
-                "cacheHit": prepared.cacheHit,
-            ]
-            if let date = prepared.firstChangedFrameAt {
-                result["firstChangedFrameAt"] = formatter.string(from: date)
+            let quietMilliseconds = request.params["settleQuietMs"]?.intValue ?? 75
+            let maximumWaitMilliseconds = request.params["maxWaitMs"]?.intValue ?? 500
+            observationQueue.async { [weak self] in
+                guard let self else { return }
+                do {
+                    let prepared = try self.observation.observe(
+                        visual: visual,
+                        afterRevision: afterRevision,
+                        quietMilliseconds: quietMilliseconds,
+                        maximumWaitMilliseconds: maximumWaitMilliseconds
+                    )
+                    self.sendObservationResult(
+                        prepared, requestID: request.id, to: connection)
+                } catch {
+                    self.sendError(error, requestID: request.id, to: connection)
+                }
             }
-            if let date = prepared.imageReadyAt {
-                result["imageReadyAt"] = formatter.string(from: date)
-            }
-            sendResult(result, requestID: request.id, to: connection)
-            if let image { connection.send(WireFrame(kind: .preparedImage, payload: image)) }
-            metrics.didReturnObservation()
         case "input.touch":
             if selectedDevice?.platform == .android {
                 guard let androidAgent, let dimensions = androidInputDimensions()
@@ -801,6 +790,40 @@ final class SimViewServer: @unchecked Sendable {
         default:
             throw SimViewError("METHOD_NOT_FOUND", "Unknown method: \(request.method)")
         }
+    }
+
+    private func sendObservationResult(
+        _ prepared: PreparedObservation,
+        requestID: String,
+        to connection: ClientConnection
+    ) {
+        let formatter = ISO8601DateFormatter()
+        let image = prepared.image
+        var result: [String: Any] = [
+            "observationId": prepared.observationID,
+            "frameId": prepared.frameID,
+            "frameRevision": prepared.frameRevision,
+            "changeRevision": prepared.changeRevision,
+            "imageRevision": prepared.imageRevision,
+            "capturedAt": formatter.string(from: prepared.capturedAt),
+            "settledAt": formatter.string(from: prepared.settledAt),
+            "stable": prepared.stable,
+            "ageMs": max(0, prepared.settledAt.timeIntervalSince(prepared.capturedAt) * 1_000),
+            "width": prepared.width,
+            "height": prepared.height,
+            "byteLength": image?.count ?? 0,
+            "imageIncluded": image != nil,
+            "cacheHit": prepared.cacheHit,
+        ]
+        if let date = prepared.firstChangedFrameAt {
+            result["firstChangedFrameAt"] = formatter.string(from: date)
+        }
+        if let date = prepared.imageReadyAt {
+            result["imageReadyAt"] = formatter.string(from: date)
+        }
+        sendResult(result, requestID: requestID, to: connection)
+        if let image { connection.send(WireFrame(kind: .preparedImage, payload: image)) }
+        metrics.didReturnObservation()
     }
 
     private func startCapture(_ device: DeviceDescription) throws {

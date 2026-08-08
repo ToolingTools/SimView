@@ -221,7 +221,7 @@ export async function run(argv = process.argv): Promise<void> {
     }
     case "preview": {
       const session = new SimViewSession();
-      const state = await session.open(deviceId ?? udid);
+      const state = await session.open(deviceId ?? udid, { startRelay: true });
       const browserUrl = session.browserUrl();
       const shouldOpen = options["no-open"] !== true;
       printJson(
