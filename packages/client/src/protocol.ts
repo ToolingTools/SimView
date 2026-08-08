@@ -14,6 +14,7 @@ export enum FrameKind {
   H264Frame = 0x11,
   JpegFrame = 0x12,
   PngScreenshot = 0x20,
+  PreparedImage = 0x21,
 }
 
 export function compactAccessibilityTree(

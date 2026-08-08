@@ -203,15 +203,18 @@ Tools:
 - `open_simview`
 - `connect_device`
 - `list_devices`
-- `connect_simulator`
-- `list_simulators`
-- `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`
+- `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`, `perform_gesture`
+- `perform_actions`
 - `take_screenshot`
-- `observe_screen`, `get_element_tree`, `get_accessibility_tree`, `find_elements`, `tap_element`
+- `observe_screen`, `get_element_tree`, `get_accessibility_tree`, `search_elements`, `find_elements`, `tap_element`
 - `inspect_point`, `wait_for_element`
 - `get_ui_context`, `enable_ui_probe`
 - `get_simview_state`
 - `add_annotation`, `update_annotation`, `delete_annotation`
+
+`list_devices` returns only available devices by default and caps each response
+at 25 entries. Pass `availableOnly: false` with `offset` and `limit` to inspect
+shutdown or unavailable inventory without overflowing MCP host result limits.
 
 The standalone browser preview uses the authenticated localhost stream. The
 embedded MCP App does not make localhost HTTP or WebSocket requests: Codex
@@ -228,15 +231,18 @@ then boots from the connected session and immediately requests fullscreen.
 `open_simview` is the only model-callable tool linked to the MCP App resource;
 discovery and connection results remain text-only so preflight calls cannot
 mount or replace the preview. Once open, resource-scoped app-only tools handle
-device switching and preview interactions. `list_simulators` and
-`connect_simulator` remain compatibility aliases; the former includes iOS
-Simulators and Android Emulators but not physical Android devices.
+device switching and preview interactions. Headless connection does not create
+a relay, preview window, encoder subscription, or preview packet ring.
 
-Agents navigate with a semantic visual loop: call `observe_screen`, choose an
-accessible identifier/role/name, call `tap_element`, wait for an observable
-state, and observe again. iOS input uses SimulatorKit HID; Android uses the
+Agents navigate with the warm semantic loop: call `observe_screen` in
+`semantic` mode, pass `sinceObservationId` on subsequent calls, use
+`search_elements` for bounded ranked discovery, and pass the chosen stable ref
+to `tap_element`. Prefer `perform_actions` with `observe: "semantic"` for
+ordered input plus a coherent post-action observation. Images are never an
+automatic fallback; use explicit `visual` mode only when the user requests
+visual inspection. iOS input uses SimulatorKit HID; Android uses the
 SimView agent with ADB shell input as a reduced-capability fallback. Pixel
-coordinates remain the fallback for inaccessible or purely visual targets.
+coordinates remain an explicit last resort for inaccessible targets.
 Android currently declares ASCII text support; iOS supports the full Unicode
 typing path. Callers should inspect the selected device capability before typing.
 

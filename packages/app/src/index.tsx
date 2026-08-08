@@ -6,6 +6,7 @@ import {
   type Annotation as ContractAnnotation,
   type ElementSnapshot as ContractElementSnapshot,
   type DeviceDescription,
+  deviceListSchema,
   type ElementFallbackReason,
   type ElementTreePage,
   elementTreeOutputSchema,
@@ -18,7 +19,6 @@ import {
   SIMVIEW_VERSION,
   saveReviewImagesOutputSchema,
   sessionStateSchema,
-  simulatorListSchema,
   type UiContext,
   uiContextSchema,
 } from "@simview/contracts";
@@ -476,18 +476,29 @@ function SimView() {
     setDevicesLoading(true);
     try {
       const devices = embedded
-        ? await bridge
-            .callServerTool({
-              name: "app_list_devices",
-              arguments: {},
-            })
-            .then((result) => {
-              return simulatorListSchema.parse(result.structuredContent).devices;
-            })
+        ? await (async () => {
+            const inventory: Device[] = [];
+            let offset = 0;
+            let hasMore = false;
+            do {
+              const result = await bridge.callServerTool({
+                name: "app_list_devices",
+                arguments: { availableOnly: false, offset, limit: 25 },
+              });
+              const page = deviceListSchema.parse(result.structuredContent);
+              inventory.push(...page.devices);
+              offset += page.returned ?? page.devices.length;
+              hasMore = page.hasMore ?? false;
+              if (hasMore && page.devices.length === 0) {
+                throw new Error("Device inventory pagination made no progress");
+              }
+            } while (hasMore);
+            return inventory;
+          })()
         : await relayFetch("/devices")
             .then(async (response) => {
               if (!response.ok) throw new Error(`Device list failed (${response.status})`);
-              return simulatorListSchema.parse(await response.json());
+              return deviceListSchema.parse(await response.json());
             })
             .then((result) => result.devices);
       setAvailableDevices((current) => {

@@ -3,10 +3,13 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  type AccessibilityNode,
   type AccessibilitySelector,
   type AccessibilitySnapshot,
   type Annotation,
   type DeviceDescription,
+  type ElementSearchMatch,
+  type ElementSearchQuery,
   type ElementSnapshot,
   FrameKind,
   flattenAccessibilityTree,
@@ -24,6 +27,7 @@ import {
   type SaveReviewImagesOutput,
   type SessionState,
   saveReviewImagesInputSchema,
+  summarizeAccessibilityNode,
   uiContextSchema,
 } from "@simview/contracts";
 import type { ServerWebSocket } from "bun";
@@ -62,6 +66,26 @@ interface Screenshot {
   height: number;
 }
 
+export interface WarmObservation {
+  observationId: string;
+  frameId: string;
+  frameRevision: number;
+  changeRevision: number;
+  imageRevision: number;
+  capturedAt: string;
+  settledAt: string;
+  stable: boolean;
+  ageMs: number;
+  width: number;
+  height: number;
+  byteLength: number;
+  imageIncluded: boolean;
+  cacheHit: boolean;
+  firstChangedFrameAt?: string | undefined;
+  imageReadyAt?: string | undefined;
+  image?: Uint8Array | undefined;
+}
+
 const PREVIEW_PACKET_LIMIT = 120;
 const PREVIEW_MAX_LAG_PACKETS = 30;
 
@@ -90,6 +114,15 @@ export class SimViewSession {
   #closePromise: Promise<void> | undefined = undefined;
   #connectionGeneration = 0;
   #metroInspector = new MetroInspector();
+  #observationMode: "hybrid" | "semantic" = "semantic";
+  #latestObservation: WarmObservation | undefined;
+  #fiberCache = new Map<string, { expiresAt: number; bytes: number; output: ElementTreeOutput }>();
+  #semanticCache:
+    | { expiresAt: number; changeRevision: number; output: ElementTreeOutput }
+    | undefined;
+  #semanticRefresh: Promise<ElementTreeOutput> | undefined;
+  #semanticGeneration = 0;
+  #visualObservationTail: Promise<void> = Promise.resolve();
 
   get connectionGeneration(): number {
     return this.#connectionGeneration;
@@ -105,8 +138,21 @@ export class SimViewSession {
     return annotations;
   }
 
-  async open(deviceId?: string, options: { startRelay?: boolean } = {}): Promise<SessionState> {
-    if (!this.client) {
+  async open(
+    deviceId?: string,
+    options: { startRelay?: boolean; observationMode?: "hybrid" | "semantic" } = {},
+  ): Promise<SessionState> {
+    if (!this.client?.connected) {
+      if (this.client) {
+        for (const unsubscribe of this.#unsubscribers) unsubscribe();
+        this.#unsubscribers = [];
+        await this.client.close().catch(() => {});
+        this.client = undefined;
+        this.#connectionGeneration += 1;
+        this.#clearSemanticState();
+        this.#latestObservation = undefined;
+        this.#resetPreviewPackets();
+      }
       const devices = await SimViewClient.listDevices();
       const available = devices.filter((device) => device.available);
       this.device = deviceId
@@ -119,12 +165,14 @@ export class SimViewSession {
         this.client = await SimViewClient.acquire({ deviceId: this.device.id, codec: "h264" });
         this.#connectionGeneration += 1;
         this.#bindFrames();
-        const capture = await this.client.request(
-          "capture.start",
-          selectedDeviceParams(this.device),
-        );
+        this.#observationMode = options.observationMode ?? "semantic";
+        const capture = await this.client.request("capture.start", {
+          ...selectedDeviceParams(this.device),
+          observationMode: this.#observationMode,
+        });
         this.device = capture.device;
-        if (options.startRelay !== false) this.startRelay();
+        if (options.startRelay === true) this.startRelay();
+        void this.#primeObservation();
       } catch (error) {
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
         this.#unsubscribers = [];
@@ -150,15 +198,6 @@ export class SimViewSession {
     return SimViewClient.listDevices();
   }
 
-  async simulatorDevices(): Promise<DeviceDescription[]> {
-    const devices = await SimViewClient.listDevices();
-    return devices.filter((device) => device.kind !== "physical");
-  }
-
-  async bootedDevices(): Promise<DeviceDescription[]> {
-    return (await this.simulatorDevices()).filter((device) => device.available);
-  }
-
   async refreshDevice(): Promise<SessionState> {
     if (this.client && this.device) {
       this.device = await this.client.request("device.describe", selectedDeviceParams(this.device));
@@ -175,7 +214,10 @@ export class SimViewSession {
 
     const nextClient = await SimViewClient.acquire({ deviceId: selected.id, codec: "h264" });
     try {
-      const capture = await nextClient.request("capture.start", selectedDeviceParams(selected));
+      const capture = await nextClient.request("capture.start", {
+        ...selectedDeviceParams(selected),
+        observationMode: this.#observationMode,
+      });
 
       this.#connectionGeneration += 1;
       for (const unsubscribe of this.#unsubscribers) unsubscribe();
@@ -187,9 +229,8 @@ export class SimViewSession {
       this.client = nextClient;
       this.device = capture.device;
       this.frameId = undefined;
-      this.lastAccessibility = undefined;
-      this.lastElements = undefined;
-      this.lastScreenContext = undefined;
+      this.#latestObservation = undefined;
+      this.#clearSemanticState();
       this.#metroInspector.close();
       this.#resetPreviewPackets();
       this.#bindFrames();
@@ -229,7 +270,7 @@ export class SimViewSession {
           : undefined,
       annotations: [...this.annotations.values()],
       codec: this.codec,
-      connected: Boolean(this.client),
+      connected: this.client?.connected === true,
     };
   }
 
@@ -253,6 +294,107 @@ export class SimViewSession {
     } finally {
       if (this.#screenshotOperation === operation) this.#screenshotOperation = undefined;
     }
+  }
+
+  async enablePreview(enabled = true): Promise<void> {
+    await this.requireClient().request("capture.preview", { enabled });
+    if (!enabled) this.#resetPreviewPackets();
+  }
+
+  async warmObservation({
+    visual,
+    afterRevision,
+    settleQuietMs = 75,
+    maxWaitMs = 500,
+  }: {
+    visual: boolean;
+    afterRevision?: number | undefined;
+    settleQuietMs?: number | undefined;
+    maxWaitMs?: number | undefined;
+  }): Promise<WarmObservation> {
+    if (!visual) {
+      return this.#requestWarmObservation({
+        visual,
+        afterRevision,
+        settleQuietMs,
+        maxWaitMs,
+      });
+    }
+    const previous = this.#visualObservationTail;
+    let release = () => {};
+    this.#visualObservationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous;
+    try {
+      return await this.#requestWarmObservation({
+        visual,
+        afterRevision,
+        settleQuietMs,
+        maxWaitMs,
+      });
+    } finally {
+      release();
+    }
+  }
+
+  async #requestWarmObservation({
+    visual,
+    afterRevision,
+    settleQuietMs,
+    maxWaitMs,
+  }: {
+    visual: boolean;
+    afterRevision?: number | undefined;
+    settleQuietMs: number;
+    maxWaitMs: number;
+  }): Promise<WarmObservation> {
+    const client = this.requireClient();
+    const connectionGeneration = this.#connectionGeneration;
+    let cancelImageWait = () => {};
+    const imagePromise = visual
+      ? new Promise<Uint8Array>((resolve, reject) => {
+          const unsubscribe = client.on(FrameKind.PreparedImage, (bytes) => {
+            clearTimeout(timeout);
+            unsubscribe();
+            resolve(bytes);
+          });
+          const timeout = setTimeout(
+            () => {
+              unsubscribe();
+              reject(new Error("Timed out waiting for prepared observation image"));
+            },
+            Math.max(1_000, maxWaitMs + 1_000),
+          );
+          cancelImageWait = () => {
+            clearTimeout(timeout);
+            unsubscribe();
+          };
+        })
+      : undefined;
+    try {
+      const metadata = await client.request("observation.get", {
+        visual,
+        afterRevision,
+        settleQuietMs,
+        maxWaitMs,
+      });
+      if (!metadata.imageIncluded) cancelImageWait();
+      const image = metadata.imageIncluded ? await imagePromise : undefined;
+      const result = { ...metadata, image };
+      if (connectionGeneration === this.#connectionGeneration && client === this.client) {
+        this.frameId = result.frameId;
+        this.#latestObservation = result;
+      }
+      return result;
+    } catch (error) {
+      cancelImageWait();
+      throw error;
+    }
+  }
+
+  get latestObservation(): WarmObservation | undefined {
+    return this.#latestObservation;
   }
 
   async saveReviewImages(input: SaveReviewImagesInput): Promise<SaveReviewImagesOutput> {
@@ -306,13 +448,14 @@ export class SimViewSession {
     scope: "interactive" | "visible" | "full" = "interactive",
     maxNodes = 1_200,
   ) {
+    const semanticGeneration = this.#semanticGeneration;
     this.requireCapability("accessibility", "Accessibility inspection");
     const snapshot = await this.requireClient().request("accessibility.snapshot", {
       ...selectedDeviceParams(this.device),
       scope,
       maxNodes,
     });
-    this.lastAccessibility = snapshot;
+    if (semanticGeneration === this.#semanticGeneration) this.lastAccessibility = snapshot;
     return snapshot;
   }
 
@@ -320,7 +463,18 @@ export class SimViewSession {
     scope: "interactive" | "visible" | "full" = "interactive",
     maxNodes = 1_200,
   ): Promise<ElementTreeOutput> {
+    const semanticGeneration = this.#semanticGeneration;
     const accessibility = await this.accessibilitySnapshot(scope, maxNodes);
+    if (semanticGeneration !== this.#semanticGeneration) {
+      throw new Error("Semantic state changed while the element tree was being prepared");
+    }
+    const accessibilityKey = Bun.hash(JSON.stringify(accessibility.root)).toString(16);
+    const cached = this.#fiberCache.get(accessibilityKey);
+    if (cached && cached.expiresAt > Date.now()) {
+      this.lastElements = cached.output.snapshot;
+      this.lastScreenContext = cached.output.screenContext;
+      return cached.output;
+    }
     const device = this.device;
     const frameId = this.frameId ?? "current";
     const metro = device
@@ -337,7 +491,12 @@ export class SimViewSession {
       }
       this.lastElements = metro.snapshot;
       this.lastScreenContext = metro.screenContext;
-      return { snapshot: metro.snapshot, screenContext: metro.screenContext };
+      const output: ElementTreeOutput = {
+        snapshot: metro.snapshot,
+        screenContext: metro.screenContext,
+      };
+      this.#cacheFiber(accessibilityKey, output);
+      return output;
     }
 
     return this.#accessibilityElementOutput(
@@ -345,6 +504,34 @@ export class SimViewSession {
       frameId,
       this.#metroInspector.fallbackReason ?? "metro-target-unavailable",
     );
+  }
+
+  async preparedElementSnapshot(maxNodes = 240): Promise<ElementTreeOutput> {
+    const changeRevision = this.#latestObservation?.changeRevision ?? 0;
+    const semanticGeneration = this.#semanticGeneration;
+    const cached = this.#semanticCache;
+    if (cached && cached.expiresAt > Date.now() && cached.changeRevision === changeRevision) {
+      this.lastElements = cached.output.snapshot;
+      this.lastScreenContext = cached.output.screenContext;
+      return cached.output;
+    }
+    if (this.#semanticRefresh) return this.#semanticRefresh;
+    const refresh = this.elementSnapshot("interactive", maxNodes).then((output) => {
+      if (semanticGeneration === this.#semanticGeneration) {
+        this.#semanticCache = {
+          expiresAt: Date.now() + 5_000,
+          changeRevision,
+          output,
+        };
+      }
+      return output;
+    });
+    this.#semanticRefresh = refresh;
+    try {
+      return await refresh;
+    } finally {
+      if (this.#semanticRefresh === refresh) this.#semanticRefresh = undefined;
+    }
   }
 
   async accessibilityElementSnapshot(
@@ -371,7 +558,7 @@ export class SimViewSession {
   }
 
   async findElements(selector: AccessibilitySelector) {
-    const snapshot = this.lastElements ?? (await this.elementSnapshot("visible")).snapshot;
+    const snapshots = await this.#semanticTargetSnapshots(selector.ref);
     const exact = selector.exact ?? true;
     const match = (actual: string | undefined, expected: string | undefined) =>
       expected === undefined ||
@@ -379,15 +566,75 @@ export class SimViewSession {
         (exact
           ? actual.localeCompare(expected, undefined, { sensitivity: "accent" }) === 0
           : actual.toLocaleLowerCase().includes(expected.toLocaleLowerCase())));
-    const matches = flattenAccessibilityTree(snapshot.root).filter(
-      (node) =>
-        match(node.ref, selector.ref) &&
-        match(node.identifier, selector.identifier) &&
-        match(node.role, selector.role) &&
-        match(node.label ?? node.title, selector.name) &&
-        match(node.value, selector.value),
+    for (const snapshot of snapshots) {
+      const matches = flattenAccessibilityTree(snapshot.root).filter(
+        (node) =>
+          match(node.ref, selector.ref) &&
+          match(node.identifier, selector.identifier) &&
+          match(node.role, selector.role) &&
+          match(node.label ?? node.title, selector.name) &&
+          match(node.value, selector.value),
+      );
+      if (matches.length > 0) {
+        return { snapshotId: snapshot.snapshotId, selector, matches, count: matches.length };
+      }
+    }
+    return {
+      snapshotId: snapshots[0]?.snapshotId ?? "unavailable",
+      selector,
+      matches: [],
+      count: 0,
+    };
+  }
+
+  async searchElements(search: ElementSearchQuery) {
+    const roles = search.roles?.map(normalizeSearchText);
+    const snapshots = await this.#semanticTargetSnapshots();
+    let snapshot = snapshots[0];
+    let ranked: ElementSearchMatch[] = [];
+    for (const candidateSnapshot of snapshots) {
+      const candidates = flattenAccessibilityTree(candidateSnapshot.root)
+        .filter((node) => !search.visibleOnly || isVisibleSearchCandidate(node))
+        .filter((node) => !search.actionableOnly || isActionableSearchCandidate(node))
+        .filter(
+          (node) =>
+            !roles?.length ||
+            roles.some((role) => normalizeSearchText(node.role ?? "").includes(role)),
+        );
+      ranked = candidates
+        .map((element) => rankElementSearchMatch(element, search.query))
+        .filter((match): match is ElementSearchMatch => match !== undefined)
+        .sort(
+          (left, right) =>
+            right.score - left.score ||
+            Number(right.exact) - Number(left.exact) ||
+            left.element.ref.localeCompare(right.element.ref),
+        );
+      snapshot = candidateSnapshot;
+      if (ranked.length > 0) break;
+    }
+    return {
+      snapshotId: snapshot?.snapshotId ?? "unavailable",
+      query: search,
+      matches: ranked.slice(0, search.limit),
+      count: Math.min(ranked.length, search.limit),
+      total: ranked.length,
+      truncated: ranked.length > search.limit,
+    };
+  }
+
+  async #semanticTargetSnapshots(ref?: string): Promise<ElementSnapshot[]> {
+    if (this.#latestObservation || (!this.lastAccessibility && !this.lastElements)) {
+      await this.preparedElementSnapshot();
+    }
+    const native = this.lastAccessibility;
+    const projected = this.lastElements;
+    const ordered = ref?.startsWith("rn:") ? [projected, native] : [native, projected];
+    return ordered.filter(
+      (snapshot, index, snapshots): snapshot is ElementSnapshot =>
+        snapshot !== undefined &&
+        snapshots.findIndex((candidate) => candidate?.snapshotId === snapshot.snapshotId) === index,
     );
-    return { snapshotId: snapshot.snapshotId, selector, matches, count: matches.length };
   }
 
   inspectPoint(x: number, y: number) {
@@ -403,6 +650,7 @@ export class SimViewSession {
     maxPackets = 12,
     timeoutMs = 1_500,
   ): Promise<PreviewPacketBatch> {
+    await this.enablePreview(true);
     const packetLimit = Math.min(30, Math.max(1, maxPackets));
     const waitLimit = Math.min(5_000, Math.max(50, timeoutMs));
     const oldestSequence = this.#previewPackets[0]?.sequence;
@@ -703,6 +951,9 @@ export class SimViewSession {
           socket.data.authenticated = true;
           clearTimeout(socket.data.authenticationTimer);
           session.viewers.add(socket);
+          void session.enablePreview(true).catch(() => {
+            socket.close(1011, "Unable to enable preview capture");
+          });
           if (socket.data.codec === "h264") {
             if (session.#h264Configuration) {
               session.#sendFrame(socket, FrameKind.H264Configuration, session.#h264Configuration);
@@ -720,6 +971,7 @@ export class SimViewSession {
         close(socket) {
           clearTimeout(socket.data.authenticationTimer);
           session.viewers.delete(socket);
+          if (session.viewers.size === 0) void session.enablePreview(false).catch(() => {});
         },
         drain(socket) {
           socket.data.paused = false;
@@ -736,7 +988,9 @@ export class SimViewSession {
   }
 
   requireClient(): SimViewClient {
-    if (!this.client) throw new Error("Open SimView before using device controls");
+    if (!this.client?.connected) {
+      throw new Error("No device is connected; call connect_device before using device controls");
+    }
     return this.client;
   }
 
@@ -753,6 +1007,7 @@ export class SimViewSession {
     const client = this.requireClient();
     const capabilities = this.device?.capabilities.input;
     if (!capabilities) throw new Error("The selected device has no input capabilities");
+    this.#clearSemanticState();
     switch (input.method) {
       case "input.touch":
         if (!(capabilities.rawTouch ?? capabilities.touch))
@@ -767,6 +1022,14 @@ export class SimViewSession {
         return client.request(input.method, input.params);
       case "input.swipe":
         if (!capabilities.touch) throw new Error("Swipe is not supported by the selected device");
+        return client.request(input.method, input.params);
+      case "input.gesture":
+        if (input.params.tracks.length > 1 && !capabilities.multiTouch) {
+          throw new Error("Multi-touch gestures are not supported by the selected device runtime");
+        }
+        if (!(capabilities.rawTouch ?? capabilities.touch)) {
+          throw new Error("Continuous gestures are not supported by the selected device");
+        }
         return client.request(input.method, input.params);
       case "input.typeText":
         if (capabilities.text === "none")
@@ -803,9 +1066,8 @@ export class SimViewSession {
     this.client = undefined;
     this.device = undefined;
     this.frameId = undefined;
-    this.lastAccessibility = undefined;
-    this.lastElements = undefined;
-    this.lastScreenContext = undefined;
+    this.#latestObservation = undefined;
+    this.#clearSemanticState();
     this.#metroInspector.close();
     this.#annotationsByDevice.clear();
     this.#resetPreviewPackets();
@@ -901,6 +1163,23 @@ export class SimViewSession {
 
   #bindFrames(): void {
     const client = this.requireClient();
+    this.#unsubscribers.push(
+      client.onDisconnect(() => {
+        if (this.client !== client) return;
+        this.#connectionGeneration += 1;
+        for (const unsubscribe of this.#unsubscribers) unsubscribe();
+        this.#unsubscribers = [];
+        this.client = undefined;
+        this.frameId = undefined;
+        this.#latestObservation = undefined;
+        this.#clearSemanticState();
+        this.#metroInspector.close();
+        this.#resetPreviewPackets();
+        if (this.mjpegClient) void this.mjpegClient.close().catch(() => {});
+        this.mjpegClient = undefined;
+        this.#mjpegClientPromise = undefined;
+      }),
+    );
     for (const kind of [FrameKind.H264Configuration, FrameKind.H264Frame]) {
       this.#unsubscribers.push(
         client.on(kind, (payload) => {
@@ -1019,12 +1298,142 @@ export class SimViewSession {
     this.#previewPackets = [];
     this.#notifyPreviewWaiters();
   }
+
+  #cacheFiber(key: string, output: ElementTreeOutput): void {
+    const bytes = Buffer.byteLength(JSON.stringify(output), "utf8");
+    if (bytes > 8 * 1024 * 1024) return;
+    this.#fiberCache.delete(key);
+    this.#fiberCache.set(key, { expiresAt: Date.now() + 5_000, bytes, output });
+    const cachedBytes = () =>
+      [...this.#fiberCache.values()].reduce((total, entry) => total + entry.bytes, 0);
+    while (this.#fiberCache.size > 2 || cachedBytes() > 8 * 1024 * 1024) {
+      const oldest = this.#fiberCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.#fiberCache.delete(oldest);
+    }
+  }
+
+  #clearSemanticState(): void {
+    this.#semanticGeneration += 1;
+    this.#semanticRefresh = undefined;
+    this.lastAccessibility = undefined;
+    this.lastElements = undefined;
+    this.lastScreenContext = undefined;
+    this.#fiberCache.clear();
+    this.#semanticCache = undefined;
+  }
+
+  async #primeObservation(): Promise<void> {
+    try {
+      await this.warmObservation({ visual: false, maxWaitMs: 500 });
+      await this.preparedElementSnapshot(240);
+    } catch {
+      // Foreground observations retry both warm frame and semantics with bounded deadlines.
+    }
+  }
 }
 
 function matchesDeviceId(device: DeviceDescription | undefined, requested: string): boolean {
   return Boolean(
     device && (device.id === requested || device.udid === requested || device.serial === requested),
   );
+}
+
+const ACTIONABLE_ROLE_MARKERS = [
+  "button",
+  "link",
+  "tab",
+  "checkbox",
+  "radio",
+  "switch",
+  "textfield",
+  "searchfield",
+  "combobox",
+  "menuitem",
+  "cell",
+];
+
+function normalizeSearchText(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{Mark}/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
+    .trim();
+}
+
+function isVisibleSearchCandidate(node: AccessibilityNode): boolean {
+  const frame = node.frame?.normalized;
+  return (
+    node.hidden !== true &&
+    frame !== undefined &&
+    frame.width > 0 &&
+    frame.height > 0 &&
+    frame.x + frame.width > 0 &&
+    frame.y + frame.height > 0 &&
+    frame.x < 1 &&
+    frame.y < 1
+  );
+}
+
+function isActionableSearchCandidate(node: AccessibilityNode): boolean {
+  if (node.enabled === false || node.hidden === true) return false;
+  if (node.interactive === true || (node.actions?.length ?? 0) > 0) return true;
+  const role = normalizeSearchText(node.role ?? "").replaceAll(" ", "");
+  return ACTIONABLE_ROLE_MARKERS.some((marker) => role.includes(marker));
+}
+
+function rankElementSearchMatch(
+  element: AccessibilityNode,
+  query: string,
+): ElementSearchMatch | undefined {
+  const normalizedQuery = normalizeSearchText(query);
+  const queryTokens = normalizedQuery.split(" ").filter(Boolean);
+  const fields = [
+    ["ref", element.ref, 1],
+    ["identifier", element.testID ?? element.identifier, 0.95],
+    ["name", element.label ?? element.title, 1],
+    ["placeholder", element.placeholder, 0.93],
+    ["text", element.text, 0.9],
+    ["value", element.valueRedacted ? undefined : element.value, 0.86],
+    ["help", element.help, 0.75],
+    ["role", element.role, 0.65],
+    ["component", element.component, 0.6],
+  ] as const;
+  let score = 0;
+  let exact = false;
+  const matchedFields: string[] = [];
+  for (const [field, rawValue, weight] of fields) {
+    if (!rawValue) continue;
+    const value = normalizeSearchText(rawValue);
+    if (!value) continue;
+    let fieldScore = 0;
+    if (value === normalizedQuery) {
+      fieldScore = 1;
+      exact = true;
+    } else if (value.startsWith(normalizedQuery)) {
+      fieldScore = 0.92;
+    } else if (value.includes(normalizedQuery)) {
+      fieldScore = 0.84;
+    } else {
+      const valueTokens = new Set(value.split(" ").filter(Boolean));
+      const matchedTokenCount = queryTokens.filter((token) => valueTokens.has(token)).length;
+      if (matchedTokenCount > 0) {
+        fieldScore = 0.45 + 0.3 * (matchedTokenCount / queryTokens.length);
+      }
+    }
+    const weightedScore = fieldScore * weight;
+    if (weightedScore <= 0) continue;
+    matchedFields.push(field);
+    score = Math.max(score, weightedScore);
+  }
+  if (score === 0) return undefined;
+  return {
+    element: summarizeAccessibilityNode(element),
+    score: Math.round(score * 1_000) / 1_000,
+    matchedFields,
+    exact,
+  };
 }
 
 function selectedDeviceParams(device: DeviceDescription | undefined): {

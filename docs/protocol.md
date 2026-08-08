@@ -75,10 +75,12 @@ method's result shape.
 - `devices.list`
 - `device.describe`
 - `capture.start`
+- `capture.preview`
 - `capture.stop`
 - `capture.keyframe`
 - `capture.screenshot`
 - `input.touch`
+- `input.gesture`
 - `input.tap`
 - `input.longPress`
 - `input.swipe`
@@ -106,14 +108,20 @@ namespaced identifier such as `ios:<uuid>` or `android:<adb-serial>`;
 CoreSimulator and ADB spelling. `capabilities` declares capture, touch, text,
 buttons, orientation, accessibility, Android context, and UIKit probe support.
 `input.rawTouch` distinguishes continuous contact injection from discrete
-tap/swipe shell fallbacks when present.
+tap/swipe shell fallbacks when present. `input.multiTouch` advertises support
+for two simultaneous pointer tracks.
 `udid` is present for iOS and `serial` for Android. Selected-device parameters
 use `deviceId`; `udid` remains an iOS compatibility alias for one release.
 
 Public coordinates are normalized from 0 to 1. `input.touch` carries
 `contactId`, `phase`, `x`, `y`, and may carry pressure and a monotonic timestamp.
-Version 2 injects the first contact; the stable shape reserves compatible
-multi-touch expansion.
+`input.gesture` carries one or two pointer tracks with bounded, monotonic
+timestamps. On iOS Simulator, two-track gestures use the private SimulatorKit
+legacy HID client and `IndigoHIDMessageForMouseNSEvent`; the capability is
+reported only when both are available in the active Xcode runtime. This is the
+same class of Simulator-only HID path used for pointer input and supports pinch
+gestures without synthesizing Option-key UI interaction. Android uses the
+packaged agent's multi-pointer `MotionEvent` injection.
 
 Accessibility responses carry `schemaVersion: 1` and generation-scoped
 `ax:<snapshot>:<ordinal>` references. References are not stable across

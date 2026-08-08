@@ -20,8 +20,15 @@ export const sessionStateSchema = z.object({
   connected: z.boolean(),
 });
 
-export const simulatorListSchema = z.object({ devices: z.array(deviceDescriptionSchema) });
-export const deviceListSchema = simulatorListSchema;
+export const deviceListSchema = z.object({
+  devices: z.array(deviceDescriptionSchema),
+  inventoryTotal: z.number().int().nonnegative().optional(),
+  total: z.number().int().nonnegative().optional(),
+  returned: z.number().int().nonnegative().optional(),
+  offset: z.number().int().nonnegative().optional(),
+  limit: z.number().int().positive().optional(),
+  hasMore: z.boolean().optional(),
+});
 
 export const semanticErrorSchema = z.object({
   code: z.string().min(1),

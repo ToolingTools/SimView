@@ -59,6 +59,7 @@ export const deviceCapabilitiesSchema = z.object({
   input: z.object({
     touch: z.boolean(),
     rawTouch: z.boolean().optional(),
+    multiTouch: z.boolean().optional(),
     text: z.enum(["none", "ascii", "unicode"]),
     buttons: z.array(deviceButtonSchema),
   }),
@@ -74,6 +75,7 @@ const iosCapabilities: DeviceCapabilities = {
   input: {
     touch: true,
     rawTouch: true,
+    multiTouch: false,
     text: "unicode",
     buttons: ["home", "lock", "volume-up", "volume-down", "action"],
   },
@@ -169,6 +171,54 @@ const selectedDeviceParamsSchema = z.object({
 });
 const acceptedResultSchema = z.object({ accepted: z.literal(true) }).passthrough();
 
+export const observationModeSchema = z.enum(["hybrid", "semantic"]);
+export type ObservationMode = z.infer<typeof observationModeSchema>;
+
+export const gestureWaypointSchema = normalizedPointSchema.extend({
+  timestampMs: z.number().finite().min(0).max(5_000),
+});
+
+export const gestureTrackSchema = z.object({
+  pointerId: z.number().int().min(0).max(1),
+  waypoints: z.array(gestureWaypointSchema).min(2).max(120),
+});
+
+export const gestureTracksSchema = z.array(gestureTrackSchema).min(1).max(2);
+
+export const gestureSchema = z
+  .object({ tracks: gestureTracksSchema })
+  .superRefine((gesture, context) => {
+    const samples = gesture.tracks.reduce((total, track) => total + track.waypoints.length, 0);
+    if (samples > 120) {
+      context.addIssue({
+        code: "custom",
+        path: ["tracks"],
+        message: "A gesture supports at most 120 samples",
+      });
+    }
+    const ids = gesture.tracks.map((track) => track.pointerId);
+    if (new Set(ids).size !== ids.length) {
+      context.addIssue({
+        code: "custom",
+        path: ["tracks"],
+        message: "Gesture pointer IDs must be unique",
+      });
+    }
+    for (const track of gesture.tracks) {
+      for (let index = 1; index < track.waypoints.length; index += 1) {
+        const current = track.waypoints[index];
+        const previous = track.waypoints[index - 1];
+        if (current && previous && current.timestampMs < previous.timestampMs) {
+          context.addIssue({
+            code: "custom",
+            path: ["tracks", ids.indexOf(track.pointerId), "waypoints", index, "timestampMs"],
+            message: "Gesture timestamps must be monotonic",
+          });
+        }
+      }
+    }
+  });
+
 const findResultSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -255,12 +305,19 @@ export const methodSchemas = {
   "devices.list": { params: emptyParamsSchema, result: z.array(deviceDescriptionSchema) },
   "device.describe": { params: selectedDeviceParamsSchema, result: deviceDescriptionSchema },
   "capture.start": {
-    params: selectedDeviceParamsSchema,
+    params: selectedDeviceParamsSchema.extend({
+      observationMode: observationModeSchema.optional(),
+    }),
     result: z.object({
       device: deviceDescriptionSchema,
       codec: codecSchema,
       frameRate: z.number().int().positive(),
+      observationMode: observationModeSchema,
     }),
+  },
+  "capture.preview": {
+    params: z.object({ enabled: z.boolean() }),
+    result: z.object({ enabled: z.boolean() }),
   },
   "capture.stop": { params: emptyParamsSchema, result: z.object({ stopped: z.literal(true) }) },
   "capture.keyframe": { params: emptyParamsSchema, result: acceptedResultSchema },
@@ -271,6 +328,32 @@ export const methodSchemas = {
       width: z.number().int().positive(),
       height: z.number().int().positive(),
       byteLength: z.number().int().nonnegative(),
+    }),
+  },
+  "observation.get": {
+    params: z.object({
+      visual: z.boolean().optional(),
+      afterRevision: z.number().int().nonnegative().optional(),
+      settleQuietMs: z.number().int().min(20).max(500).optional(),
+      maxWaitMs: z.number().int().min(0).max(5_000).optional(),
+    }),
+    result: z.object({
+      observationId: z.string().min(1),
+      frameId: z.string(),
+      frameRevision: z.number().int().nonnegative(),
+      changeRevision: z.number().int().nonnegative(),
+      imageRevision: z.number().int().nonnegative(),
+      capturedAt: z.string(),
+      settledAt: z.string(),
+      stable: z.boolean(),
+      ageMs: z.number().nonnegative(),
+      width: z.number().int().nonnegative(),
+      height: z.number().int().nonnegative(),
+      byteLength: z.number().int().nonnegative(),
+      imageIncluded: z.boolean(),
+      cacheHit: z.boolean(),
+      firstChangedFrameAt: z.string().optional(),
+      imageReadyAt: z.string().optional(),
     }),
   },
   "input.touch": {
@@ -297,6 +380,13 @@ export const methodSchemas = {
       durationMs: z.number().finite().positive(),
     }),
     result: acceptedResultSchema,
+  },
+  "input.gesture": {
+    params: gestureSchema,
+    result: acceptedResultSchema.extend({
+      pointerCount: z.number().int().min(1).max(2),
+      sampleCount: z.number().int().min(2).max(120),
+    }),
   },
   "input.typeText": {
     params: z.object({ text: z.string() }),

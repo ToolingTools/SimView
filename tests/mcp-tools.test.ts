@@ -4,18 +4,23 @@ import { tmpdir } from "node:os";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import {
+  type AccessibilitySnapshot,
   type ElementTreeOutput,
   type ElementTreePage,
   elementTreePageSchema,
   parseDeviceDescription,
 } from "@simview/contracts";
 import { assembleElementTreePages } from "../packages/app/src/helpers";
-import { createServer, hasMcpUiCapability, isDesktopMcpAppHost } from "../packages/mcp/src/server";
+import {
+  createServer,
+  deviceListPage,
+  hasMcpUiCapability,
+  isDesktopMcpAppHost,
+} from "../packages/mcp/src/server";
 import { SimViewSession } from "../packages/mcp/src/session";
 
 const appCalledTools = [
   "app_connect_device",
-  "app_connect_simulator",
   "app_enable_ui_probe",
   "app_get_accessibility_tree",
   "app_get_element_tree",
@@ -23,7 +28,6 @@ const appCalledTools = [
   "app_get_ui_context",
   "app_inspect_point",
   "app_list_devices",
-  "app_list_simulators",
   "app_take_screenshot",
   "save_review_images",
   "app_tap_element",
@@ -37,19 +41,61 @@ const appCalledTools = [
 const modelOnlyTools = [
   "add_annotation",
   "connect_device",
-  "connect_simulator",
   "get_accessibility_tree",
   "get_simview_state",
   "get_ui_context",
   "enable_ui_probe",
   "inspect_point",
   "list_devices",
-  "list_simulators",
+  "search_elements",
   "take_screenshot",
   "tap_element",
 ];
 
 describe("MCP app tools", () => {
+  test("directs disconnected control calls to connect_device", () => {
+    const session = new SimViewSession();
+    expect(() => session.requireClient()).toThrow(
+      "No device is connected; call connect_device before using device controls",
+    );
+  });
+
+  test("bounds device discovery and defaults to available devices", () => {
+    const ready = iosDevice("00000000-0000-4000-8000-000000000001", "Ready iPhone");
+    const shutdown = Array.from({ length: 40 }, (_, index) => ({
+      ...iosDevice(
+        `00000000-0000-4000-8000-${String(index + 2).padStart(12, "0")}`,
+        `Shutdown iPhone ${index + 1}`,
+      ),
+      state: "shutdown" as const,
+      available: false,
+    }));
+
+    expect(deviceListPage([ready, ...shutdown])).toMatchObject({
+      devices: [ready],
+      inventoryTotal: 41,
+      total: 1,
+      returned: 1,
+      offset: 0,
+      limit: 10,
+      hasMore: false,
+    });
+    const firstPage = deviceListPage([ready, ...shutdown], {
+      availableOnly: false,
+      offset: 0,
+      limit: 25,
+    });
+    expect(firstPage.returned).toBe(25);
+    expect(firstPage.hasMore).toBe(true);
+    const secondPage = deviceListPage([ready, ...shutdown], {
+      availableOnly: false,
+      offset: 25,
+      limit: 25,
+    });
+    expect(secondPage.returned).toBe(16);
+    expect(secondPage.hasMore).toBe(false);
+  });
+
   test("recognizes the MCP App capability in modern and legacy capability locations", () => {
     expect(hasMcpUiCapability({ "io.modelcontextprotocol/ui": {} })).toBe(true);
     expect(hasMcpUiCapability({ extensions: { "io.modelcontextprotocol/ui": {} } })).toBe(true);
@@ -425,14 +471,105 @@ describe("MCP app tools", () => {
     expect(await Bun.file(saved.screenshotPath).exists()).toBe(false);
   });
 
-  test("returns the screenshot when semantic inspection fails", async () => {
+  test("returns bounded semantic nodes in structured observations", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const session = new SimViewSession();
-    session.screenshot = async () => ({
-      bytes: new Uint8Array([0x89, 0x50, 0x4e, 0x47]),
+    const snapshot: AccessibilitySnapshot = {
+      schemaVersion: 1,
+      snapshotId: "ax-1",
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      source: "core-simulator-ax",
+      scope: "interactive",
+      screen: { x: 0, y: 0, width: 402, height: 874 },
+      root: {
+        ref: "ax:root",
+        children: [
+          {
+            ref: "ax:shop",
+            role: "button",
+            label: "Shop",
+            enabled: true,
+            actions: ["press"],
+            frame: {
+              points: { x: 20, y: 800, width: 80, height: 44 },
+              normalized: { x: 0.05, y: 0.915, width: 0.2, height: 0.05 },
+            },
+          },
+        ],
+      },
+      stats: { nodeCount: 3, truncated: false },
+    };
+    session.lastAccessibility = snapshot;
+    session.warmObservation = async () => ({
+      observationId: "frame-1",
+      frameId: "frame-1",
+      frameRevision: 1,
+      changeRevision: 1,
+      imageRevision: 0,
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      settledAt: "2026-08-08T10:00:00.075Z",
+      stable: true,
+      ageMs: 75,
+      width: 402,
+      height: 874,
+      byteLength: 0,
+      imageIncluded: false,
+      cacheHit: true,
+    });
+    session.preparedElementSnapshot = async () => ({
+      snapshot,
+      screenContext: {
+        schemaVersion: 1,
+        kind: "uikit",
+        platform: "ios",
+        capturedAt: snapshot.capturedAt,
+        frameId: "frame-1",
+        simulatorName: "iPhone 17 Pro",
+        viewport: { x: 0, y: 0, width: 402, height: 874 },
+        orientation: "portrait",
+      },
+    });
+    const server = createServer(session);
+    const client = new Client({ name: "simview-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: "observe_screen", arguments: {} });
+      expect(result.structuredContent).toMatchObject({
+        semantic: {
+          status: "full",
+          nodeCount: 2,
+          nodes: [{ ref: "ax:root" }, { ref: "ax:shop", role: "button", label: "Shop" }],
+        },
+        vision: { included: false, reason: "semantic-mode", returnedBytes: 0 },
+      });
+      const nodes = (result.structuredContent as { semantic: { nodes: Array<unknown> } }).semantic
+        .nodes;
+      expect(nodes[0]).not.toHaveProperty("children");
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("does not return a JPEG for semantic failure unless visual mode is explicit", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.warmObservation = async ({ visual }) => ({
+      observationId: "frame-1",
       frameId: "android-frame-1",
-      width: 1080,
-      height: 2400,
+      frameRevision: 1,
+      changeRevision: 1,
+      imageRevision: 1,
+      capturedAt: "2026-08-08T10:00:00.000Z",
+      settledAt: "2026-08-08T10:00:00.075Z",
+      stable: true,
+      ageMs: 75,
+      width: 461,
+      height: 1024,
+      byteLength: visual ? 4 : 0,
+      imageIncluded: visual,
+      cacheHit: visual,
+      imageReadyAt: "2026-08-08T10:00:00.075Z",
+      image: visual ? new Uint8Array([0xff, 0xd8, 0xff, 0xd9]) : undefined,
     });
     session.elementSnapshot = async () => {
       throw new Error("UIAutomator timed out");
@@ -443,16 +580,86 @@ describe("MCP app tools", () => {
     try {
       const result = await client.callTool({ name: "observe_screen", arguments: {} });
       expect((result.content as Array<Record<string, unknown>>)[0]).toMatchObject({
-        type: "image",
-        mimeType: "image/png",
+        type: "text",
       });
       expect(result.structuredContent).toMatchObject({
+        observationId: expect.any(String),
         frameId: "android-frame-1",
         semanticError: {
           code: "semantic_inspection_failed",
           message: "UIAutomator timed out",
           recoverable: true,
         },
+        vision: {
+          included: false,
+          reason: "semantic-unavailable-vision-not-requested",
+          returnedBytes: 0,
+        },
+      });
+      const visual = await client.callTool({
+        name: "observe_screen",
+        arguments: { mode: "visual" },
+      });
+      expect((visual.content as Array<Record<string, unknown>>)[0]).toMatchObject({
+        type: "image",
+        mimeType: "image/jpeg",
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("resolves a query-only semantic tap without requiring a second selector", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("query-tap", "Query Tap");
+    const element = {
+      ref: "ax:continue",
+      role: "button",
+      label: "Continue",
+      enabled: true,
+      frame: {
+        points: { x: 100, y: 200, width: 80, height: 40 },
+        normalized: { x: 0.25, y: 0.25, width: 0.2, height: 0.05 },
+      },
+    };
+    session.searchElements = async () =>
+      ({
+        snapshotId: "ax-1",
+        query: {
+          query: "continue",
+          actionableOnly: true,
+          visibleOnly: true,
+          limit: 5,
+        },
+        matches: [{ element, score: 1, matchedFields: ["name"], exact: true }],
+        count: 1,
+        total: 1,
+        truncated: false,
+      }) as never;
+    session.findElements = async (selector) =>
+      ({ snapshotId: "ax-1", selector, matches: [element], count: 1 }) as never;
+    let dispatched: unknown;
+    session.dispatchInput = async (input) => {
+      dispatched = input;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "query-tap-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: { query: "continue", observe: "none" },
+      });
+      expect(result.structuredContent).toMatchObject({
+        selector: { ref: "ax:continue" },
+        point: { x: 0.35, y: 0.275 },
+        receipt: { accepted: true },
+      });
+      expect(dispatched).toEqual({
+        method: "input.tap",
+        params: { x: 0.35, y: 0.275 },
       });
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
@@ -475,11 +682,28 @@ describe("MCP app tools", () => {
             ref: "rn:1",
             identifier: "shop-menu-screen",
             label: "Shop menu",
+            role: "button",
+            interactive: true,
+            frame: {
+              points: { x: 20, y: 700, width: 100, height: 44 },
+              normalized: { x: 0.05, y: 0.75, width: 0.23, height: 0.05 },
+            },
             kind: "component",
+          },
+          {
+            ref: "rn:2",
+            identifier: "shopping-history",
+            label: "Shopping history",
+            role: "button",
+            interactive: true,
+            frame: {
+              points: { x: 140, y: 700, width: 160, height: 44 },
+              normalized: { x: 0.33, y: 0.75, width: 0.37, height: 0.05 },
+            },
           },
         ],
       },
-      stats: { nodeCount: 2, truncated: false },
+      stats: { nodeCount: 3, truncated: false },
       metro: {
         host: "127.0.0.1",
         port: 8081,
@@ -509,6 +733,82 @@ describe("MCP app tools", () => {
       count: 1,
       matches: [{ ref: "rn:1" }],
     });
+    expect(
+      await session.searchElements({
+        query: "shop",
+        actionableOnly: true,
+        visibleOnly: true,
+        limit: 10,
+      }),
+    ).toMatchObject({
+      count: 2,
+      matches: [
+        {
+          element: { ref: "rn:1" },
+          score: 0.92,
+          matchedFields: ["identifier", "name"],
+          exact: false,
+        },
+        { element: { ref: "rn:2" } },
+      ],
+    });
+    session.lastAccessibility = {
+      schemaVersion: 1,
+      snapshotId: "ax-current",
+      capturedAt: "2026-07-31T10:00:01.000Z",
+      source: "core-simulator-ax",
+      scope: "interactive",
+      screen: { x: 0, y: 0, width: 430, height: 932 },
+      root: {
+        ref: "ax:root",
+        children: [
+          {
+            ref: "ax:shop",
+            role: "AXButton",
+            label: "Shop, tab, 2 of 6",
+            enabled: true,
+            actions: ["AXPress"],
+            frame: {
+              points: { x: 20, y: 800, width: 80, height: 44 },
+              normalized: { x: 0.05, y: 0.86, width: 0.19, height: 0.05 },
+            },
+          },
+          {
+            ref: "ax:category",
+            role: "AXButton",
+            label: "Landscaping",
+            identifier: "shopnavigation-button-category-1362",
+            enabled: true,
+            actions: ["AXPress"],
+            frame: {
+              points: { x: 20, y: 700, width: 160, height: 44 },
+              normalized: { x: 0.05, y: 0.75, width: 0.37, height: 0.05 },
+            },
+          },
+        ],
+      },
+      stats: { nodeCount: 2, truncated: false },
+    };
+    expect(
+      await session.searchElements({
+        query: "Shop",
+        actionableOnly: true,
+        visibleOnly: true,
+        limit: 10,
+      }),
+    ).toMatchObject({
+      snapshotId: "ax-current",
+      count: 2,
+      matches: [
+        { element: { ref: "ax:shop" }, score: 0.92, exact: false },
+        { element: { ref: "ax:category" }, score: 0.874, exact: false },
+      ],
+    });
+    expect(await session.findElements({ name: "Shop", exact: false })).toMatchObject({
+      snapshotId: "ax-current",
+      count: 1,
+      matches: [{ ref: "ax:shop" }],
+    });
     expect(session.state()).toMatchObject({
       route: "ShopMenuRoot",
       component: {
@@ -527,7 +827,10 @@ function previewSession(): SimViewSession & { browserOpened: number; relayStarte
   };
   session.browserOpened = 0;
   session.relayStarted = 0;
+  session.client = { connected: true, close: async () => {} } as never;
+  session.device = iosDevice("preview-session", "Preview Session");
   session.open = async () => session.state();
+  session.enablePreview = async () => {};
   session.startRelay = () => {
     session.relayStarted += 1;
   };

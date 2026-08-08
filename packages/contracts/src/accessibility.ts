@@ -134,3 +134,79 @@ export const accessibilitySelectorSchema = z
   );
 
 export type AccessibilitySelector = z.infer<typeof accessibilitySelectorSchema>;
+
+export const semanticNodeSummarySchema = z.object({
+  ref: z.string(),
+  role: z.string().optional(),
+  label: z.string().optional(),
+  title: z.string().optional(),
+  value: z.string().optional(),
+  valueRedacted: z.boolean().optional(),
+  identifier: z.string().optional(),
+  testID: z.string().optional(),
+  placeholder: z.string().optional(),
+  enabled: z.boolean().optional(),
+  hidden: z.boolean().optional(),
+  focused: z.boolean().optional(),
+  expanded: z.boolean().optional(),
+  actions: z.array(z.string()).optional(),
+  interactive: z.boolean().optional(),
+  component: z.string().optional(),
+  sourceLocation: z
+    .object({
+      file: z.string(),
+      line: z.number().int().positive().optional(),
+      column: z.number().int().positive().optional(),
+    })
+    .optional(),
+  frame: z
+    .object({
+      points: normalizedRectSchema,
+      normalized: normalizedRectSchema,
+    })
+    .optional(),
+});
+
+export type SemanticNodeSummary = z.infer<typeof semanticNodeSummarySchema>;
+
+export function summarizeAccessibilityNode(node: AccessibilityNode): SemanticNodeSummary {
+  return {
+    ref: node.ref,
+    ...(node.role ? { role: node.role } : {}),
+    ...(node.label ? { label: node.label } : {}),
+    ...(node.title ? { title: node.title } : {}),
+    ...(node.value ? { value: node.valueRedacted ? "<redacted>" : node.value } : {}),
+    ...(node.valueRedacted ? { valueRedacted: true } : {}),
+    ...(node.identifier ? { identifier: node.identifier } : {}),
+    ...(node.testID ? { testID: node.testID } : {}),
+    ...(node.placeholder ? { placeholder: node.placeholder } : {}),
+    ...(node.enabled !== undefined ? { enabled: node.enabled } : {}),
+    ...(node.hidden !== undefined ? { hidden: node.hidden } : {}),
+    ...(node.focused !== undefined ? { focused: node.focused } : {}),
+    ...(node.expanded !== undefined ? { expanded: node.expanded } : {}),
+    ...(node.actions?.length ? { actions: node.actions } : {}),
+    ...(node.interactive !== undefined ? { interactive: node.interactive } : {}),
+    ...(node.component ? { component: node.component } : {}),
+    ...(node.sourceLocation ? { sourceLocation: node.sourceLocation } : {}),
+    ...(node.frame ? { frame: node.frame } : {}),
+  };
+}
+
+export const elementSearchQuerySchema = z.object({
+  query: z.string().trim().min(1).max(200),
+  roles: z.array(z.string().trim().min(1)).max(10).optional(),
+  actionableOnly: z.boolean().default(true),
+  visibleOnly: z.boolean().default(true),
+  limit: z.number().int().min(1).max(20).default(10),
+});
+
+export type ElementSearchQuery = z.infer<typeof elementSearchQuerySchema>;
+
+export const elementSearchMatchSchema = z.object({
+  element: semanticNodeSummarySchema,
+  score: z.number().min(0).max(1),
+  matchedFields: z.array(z.string()),
+  exact: z.boolean(),
+});
+
+export type ElementSearchMatch = z.infer<typeof elementSearchMatchSchema>;

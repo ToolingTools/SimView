@@ -15,13 +15,16 @@ await rm(stage, { recursive: true, force: true });
 await mkdir(join(stage, "bin"), { recursive: true });
 await mkdir(join(stage, "app"), { recursive: true });
 await mkdir(join(stage, "assets"), { recursive: true });
+await mkdir(join(stage, "skills"), { recursive: true });
 await mkdir(release, { recursive: true });
 await mkdir(npmCache, { recursive: true });
 
 await Promise.all([
   cp(join(root, ".codex-plugin"), join(stage, ".codex-plugin"), { recursive: true }),
   cp(join(root, ".claude-plugin"), join(stage, ".claude-plugin"), { recursive: true }),
-  cp(join(root, "skills"), join(stage, "skills"), { recursive: true }),
+  cp(join(root, "skills", "simview"), join(stage, "skills", "simview"), {
+    recursive: true,
+  }),
   cp(join(root, "assets", "icon-512.png"), join(stage, "assets", "icon-512.png")),
   cp(join(root, "packages/app/dist"), join(stage, "app/dist"), { recursive: true }),
   cp(join(root, ".mcp.json"), join(stage, ".mcp.json")),

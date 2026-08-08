@@ -31,6 +31,14 @@ final class HIDInjector: @unchecked Sendable {
     private var device: NSObject?
     private(set) var udid: String?
 
+    private static let detectedMultiTouchAvailable: Bool = {
+        Xcode.loadFrameworks()
+        return Xcode.symbolAvailable("IndigoHIDMessageForMouseNSEvent")
+            && NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") != nil
+    }()
+
+    static var multiTouchAvailable: Bool { detectedMultiTouchAvailable }
+
     func setup(udid: String) throws {
         if self.udid == udid, client != nil { return }
         Xcode.loadFrameworks()
@@ -85,6 +93,31 @@ final class HIDInjector: @unchecked Sendable {
         queue.sync {
             var point = CGPoint(x: x, y: y)
             if let message = mouse?(&point, nil, 0x32, eventType, 1, 1, edge) {
+                send(message)
+            }
+        }
+    }
+
+    func multiTouch(
+        phase: String,
+        first: (x: Double, y: Double),
+        second: (x: Double, y: Double),
+        edge: UInt32 = 0
+    ) throws {
+        try validate(first.x, "first.x")
+        try validate(first.y, "first.y")
+        try validate(second.x, "second.x")
+        try validate(second.y, "second.y")
+        let eventType: Int32
+        switch phase {
+        case "down", "move": eventType = 1
+        case "up": eventType = 2
+        default: throw SimViewError("INPUT_PHASE_INVALID", "Touch phase must be down, move, or up")
+        }
+        queue.sync {
+            var primary = CGPoint(x: first.x, y: first.y)
+            var secondary = CGPoint(x: second.x, y: second.y)
+            if let message = mouse?(&primary, &secondary, 0x32, eventType, 1, 1, edge) {
                 send(message)
             }
         }

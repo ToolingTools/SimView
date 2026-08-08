@@ -79,6 +79,20 @@ The process model has two layers:
   Codex cannot open insecure localhost HTTP/WebSocket origins and a local TLS
   certificate would impose user setup. A second MCP resource would still use
   the same host bridge rather than creating a separate network lane.
+- `connect_device` is headless. The native observation coordinator retains the
+  newest framebuffer, a 64×64 luma signature, independent frame/image
+  revisions, and one 1024-long-edge JPEG in memory. H.264/MJPEG encoding and
+  MCP packet retention start only when a preview subscribes. Warm frames are
+  cleared on device changes, disconnect, shutdown, and idle expiry and are
+  never written to disk.
+- `observe_screen` returns bounded semantic nodes initially and deterministic
+  SHA-256 deltas thereafter. Neither `semantic` nor `auto` waits for or returns
+  an image; only explicit `visual` mode requests the prepared JPEG.
+  `search_elements` ranks bounded current-snapshot matches across accessible
+  names, identifiers, values, roles, placeholders, and React Native metadata;
+  its winning generation-scoped ref can be passed to `tap_element`.
+  `perform_actions` combines up to 20 ordered inputs, post-action settling, and
+  one semantic observation in a single MCP round trip by default.
 - Element inspection first captures the native accessibility snapshot as a
   safe fallback,
   then optionally discovers loopback Metro targets through `metro-bridge`. A
@@ -147,8 +161,9 @@ not cross-platform identity keys.
 
 The native server authenticates clients before accepting requests, times out
 unauthenticated sockets, and tracks authenticated connections for idle shutdown
-(ephemeral clients may also provide a parent PID). Capture and input work are
-serialized on their respective queues. H.264 encoding runs asynchronously;
+(ephemeral clients may also provide a parent PID). Capture, observation image
+work, semantics, and input use independent bounded queues. Newest-frame-wins
+settling prevents capture work from delaying input. H.264 encoding runs asynchronously;
 MJPEG work runs off the server queue. Each connection prioritizes control
 responses and coalesces preview frames so a slow viewer cannot accumulate an
 unbounded video backlog. `health.get` reports the sanitized PID, instance ID,

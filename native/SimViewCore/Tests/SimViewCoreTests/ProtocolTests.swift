@@ -5,6 +5,36 @@ import XCTest
 @testable import SimViewCore
 
 final class ProtocolTests: XCTestCase {
+    private func pixelBuffer(red: UInt8, green: UInt8, blue: UInt8) throws -> CVPixelBuffer {
+        var buffer: CVPixelBuffer?
+        XCTAssertEqual(
+            CVPixelBufferCreate(
+                kCFAllocatorDefault,
+                64,
+                64,
+                kCVPixelFormatType_32BGRA,
+                nil,
+                &buffer
+            ),
+            kCVReturnSuccess
+        )
+        let result = try XCTUnwrap(buffer)
+        CVPixelBufferLockBaseAddress(result, [])
+        let bytes = CVPixelBufferGetBaseAddress(result)!.assumingMemoryBound(to: UInt8.self)
+        let stride = CVPixelBufferGetBytesPerRow(result)
+        for y in 0..<64 {
+            for x in 0..<64 {
+                let offset = y * stride + x * 4
+                bytes[offset] = blue
+                bytes[offset + 1] = green
+                bytes[offset + 2] = red
+                bytes[offset + 3] = 255
+            }
+        }
+        CVPixelBufferUnlockBaseAddress(result, [])
+        return result
+    }
+
     private func temporaryExecutable(_ body: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("simview-adb-tests-\(UUID().uuidString)")
@@ -48,6 +78,49 @@ final class ProtocolTests: XCTestCase {
         let latency = metrics.dictionary["latencyMs"] as! [String: Double]
         XCTAssertGreaterThan(latency["p50"]!, 1_000)
         XCTAssertGreaterThan(latency["p95"]!, 1_900)
+    }
+
+    func testObservationCoordinatorSettlesAndKeepsOnlyTheNewestPreparedFrame() throws {
+        let coordinator = ObservationCoordinator()
+        coordinator.ingest(try pixelBuffer(red: 255, green: 0, blue: 0), frameID: "one")
+        let first = try coordinator.observe(
+            visual: true,
+            afterRevision: nil,
+            maximumWaitMilliseconds: 1_000
+        )
+        XCTAssertEqual(first.frameRevision, 1)
+        XCTAssertEqual(first.imageRevision, 1)
+        XCTAssertEqual(first.frameID, "one")
+        XCTAssertTrue(first.stable)
+        XCTAssertNotNil(first.image)
+
+        coordinator.ingest(try pixelBuffer(red: 255, green: 0, blue: 0), frameID: "one-again")
+        let unchanged = try coordinator.observe(
+            visual: true,
+            afterRevision: first.frameRevision,
+            maximumWaitMilliseconds: 1_000
+        )
+        XCTAssertEqual(unchanged.frameRevision, 2)
+        XCTAssertEqual(unchanged.changeRevision, 1)
+        XCTAssertEqual(unchanged.imageRevision, 1)
+        XCTAssertEqual(unchanged.image, first.image)
+
+        coordinator.ingest(try pixelBuffer(red: 0, green: 0, blue: 255), frameID: "two")
+        let second = try coordinator.observe(
+            visual: true,
+            afterRevision: unchanged.frameRevision,
+            maximumWaitMilliseconds: 1_000
+        )
+        XCTAssertEqual(second.frameRevision, 3)
+        XCTAssertEqual(second.changeRevision, 2)
+        XCTAssertEqual(second.imageRevision, 2)
+        XCTAssertEqual(second.frameID, "two")
+        XCTAssertNotEqual(first.image, second.image)
+
+        coordinator.clear()
+        XCTAssertThrowsError(
+            try coordinator.observe(visual: false, afterRevision: nil, maximumWaitMilliseconds: 0)
+        )
     }
 
     func testAccessibilitySelectorRequiresAMatchingField() throws {
@@ -353,13 +426,13 @@ final class ProtocolTests: XCTestCase {
 
     func testAndroidAgentHandshakeRejectsVersionOrAuthenticationFailure() throws {
         XCTAssertNoThrow(
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 3, 0, 0, 0, 0]))
+        )
+        XCTAssertThrowsError(
             try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 2, 0, 0, 0, 0]))
         )
         XCTAssertThrowsError(
-            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 1, 0, 0, 0, 0]))
-        )
-        XCTAssertThrowsError(
-            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 2, 0, 0, 0, 1]))
+            try AndroidAgentHandshake.validate(Data([0x53, 0x56, 0x41, 0x31, 0, 0, 0, 3, 0, 0, 0, 1]))
         )
     }
 
@@ -379,6 +452,35 @@ final class ProtocolTests: XCTestCase {
         let encoded = try await encoder.encode(buffer)
         XCTAssertFalse(encoded.bytes.isEmpty)
         XCTAssertTrue(encoded.keyframe)
+        await encoder.stop()
+    }
+
+    func testH264DecoderProducesABGRAObservationFrame() async throws {
+        var pixelBuffer: CVPixelBuffer?
+        let status = CVPixelBufferCreate(
+            kCFAllocatorDefault,
+            160,
+            90,
+            kCVPixelFormatType_32BGRA,
+            [kCVPixelBufferIOSurfacePropertiesKey: [:]] as CFDictionary,
+            &pixelBuffer
+        )
+        XCTAssertEqual(status, kCVReturnSuccess)
+        let buffer = try XCTUnwrap(pixelBuffer)
+        let encoder = H264Encoder()
+        let encoded = try await encoder.encode(buffer)
+        let configuration = try XCTUnwrap(encoded.configuration)
+        let decoded = expectation(description: "decoded Android H.264 frame")
+        let decoder = H264Decoder()
+        try decoder.configure(configuration) { frame, _ in
+            XCTAssertEqual(CVPixelBufferGetPixelFormatType(frame), kCVPixelFormatType_32BGRA)
+            XCTAssertEqual(CVPixelBufferGetWidth(frame), 160)
+            XCTAssertEqual(CVPixelBufferGetHeight(frame), 90)
+            decoded.fulfill()
+        }
+        decoder.decode(encoded.bytes, timestampMicros: 1_000)
+        await fulfillment(of: [decoded], timeout: 2)
+        decoder.stop()
         await encoder.stop()
     }
 }

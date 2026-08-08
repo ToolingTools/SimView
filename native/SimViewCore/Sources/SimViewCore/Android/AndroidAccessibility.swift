@@ -3,21 +3,27 @@ import Foundation
 final class AndroidAccessibilityService {
     private let client: ADBClient
     private let serial: String
+    private weak var agent: AndroidAgentConnection?
 
-    init(client: ADBClient, serial: String) {
+    init(client: ADBClient, serial: String, agent: AndroidAgentConnection? = nil) {
         self.client = client
         self.serial = serial
+        self.agent = agent
     }
 
     func snapshot(
         scope: String = "interactive", maxNodes: Int = 1_200, timeout: TimeInterval = 15
     ) throws -> [String: Any] {
+        let deadline = Date().addingTimeInterval(max(0.1, timeout))
+        if let agent {
+            let xml = try agent.accessibilitySnapshot(timeout: max(0.1, deadline.timeIntervalSinceNow))
+            return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-agent-uiautomator")
+        }
         let remotePath = "/data/local/tmp/simview-\(UUID().uuidString.lowercased()).xml"
         defer {
             _ = try? client.execute(
                 ["shell", "rm", "-f", remotePath], serial: serial, timeout: 2)
         }
-        let deadline = Date().addingTimeInterval(max(0.1, timeout))
         let dump = try client.require(
             ["shell", "uiautomator", "dump", "--compressed", remotePath],
             serial: serial,
@@ -36,6 +42,15 @@ final class AndroidAccessibilityService {
         guard xml.count <= 8 * 1024 * 1024 else {
             throw SimViewError("ACCESSIBILITY_RESPONSE_TOO_LARGE", "UIAutomator hierarchy exceeds 8 MiB")
         }
+        return try parsedSnapshot(xml, scope: scope, maxNodes: maxNodes, source: "android-uiautomator")
+    }
+
+    private func parsedSnapshot(
+        _ xml: Data,
+        scope: String,
+        maxNodes: Int,
+        source: String
+    ) throws -> [String: Any] {
         let snapshotID = UUID().uuidString.lowercased()
         let parser = AndroidHierarchyParser(maxNodes: max(1, min(maxNodes, 5_000)))
         let root = try parser.parse(xml, referencePrefix: "android:\(snapshotID)")
@@ -46,7 +61,7 @@ final class AndroidAccessibilityService {
             "schemaVersion": 1,
             "snapshotId": snapshotID,
             "capturedAt": ISO8601DateFormatter().string(from: Date()),
-            "source": "android-uiautomator",
+            "source": source,
             "scope": scope,
             "screen": ["x": 0, "y": 0, "width": display.width, "height": display.height],
             "root": selectedRoot,

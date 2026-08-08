@@ -16,6 +16,8 @@ final class AndroidAgentConnection: @unchecked Sendable {
     private let acknowledgement = NSCondition()
     private var pendingAcknowledgement: UInt8?
     private var acknowledgementError: String?
+    private var pendingResponseCommand: UInt8?
+    private var responsePayload: Data?
     private var fd: Int32 = -1
     private var stopped = false
     private let readerQueue = DispatchQueue(label: "dev.simview.android.agent.reader", qos: .userInteractive)
@@ -109,7 +111,7 @@ final class AndroidAgentConnection: @unchecked Sendable {
         command.appendFloat(Float(x * Double(max(1, width - 1))))
         command.appendFloat(Float(y * Double(max(1, height - 1))))
         command.appendBigEndian(UInt32(max(1, Int(duration * 1_000))))
-        try sendCommand(command)
+        try sendCommand(command, timeout: max(3, duration + 1))
     }
 
     func swipe(
@@ -130,6 +132,30 @@ final class AndroidAgentConnection: @unchecked Sendable {
             Thread.sleep(forTimeInterval: duration / Double(steps))
         }
         try touch(phase: "up", x: toX, y: toY, width: width, height: height)
+    }
+
+    func gesture(
+        tracks: [(pointerID: Int, waypoints: [(x: Double, y: Double, timestamp: Double)])],
+        width: Int,
+        height: Int
+    ) throws {
+        guard (1...2).contains(tracks.count) else {
+            throw SimViewError("INPUT_GESTURE_INVALID", "Android gestures require one or two tracks")
+        }
+        var command = Data([0x24, UInt8(tracks.count)])
+        for track in tracks {
+            guard (0...1).contains(track.pointerID), track.waypoints.count <= Int(UInt16.max) else {
+                throw SimViewError("INPUT_GESTURE_INVALID", "Android gesture track is invalid")
+            }
+            command.append(UInt8(track.pointerID))
+            command.appendBigEndian(UInt16(track.waypoints.count))
+            for point in track.waypoints {
+                command.appendFloat(Float(point.x * Double(max(1, width - 1))))
+                command.appendFloat(Float(point.y * Double(max(1, height - 1))))
+                command.appendBigEndian(UInt32(point.timestamp * 1_000))
+            }
+        }
+        try sendCommand(command, timeout: 6)
     }
 
     func typeText(_ text: String) throws -> String {
@@ -159,6 +185,17 @@ final class AndroidAgentConnection: @unchecked Sendable {
         default: throw SimViewError("INPUT_BUTTON_UNSUPPORTED", "Android does not support button \(button)")
         }
         try sendCommand(Data([0x23, value]))
+    }
+
+    func accessibilitySnapshot(timeout: TimeInterval = 15) throws -> Data {
+        let payload = try sendCommand(Data([0x30]), timeout: timeout, expectsResponse: true)
+        guard let payload, payload.count <= 8 * 1024 * 1024 else {
+            throw SimViewError(
+                "ACCESSIBILITY_RESPONSE_TOO_LARGE",
+                "Android agent returned an invalid or oversized UIAutomator hierarchy"
+            )
+        }
+        return payload
     }
 
     func stop() {
@@ -222,6 +259,28 @@ final class AndroidAgentConnection: @unchecked Sendable {
                     }
                     acknowledgementError = message
                     pendingAcknowledgement = nil
+                    acknowledgement.broadcast()
+                    acknowledgement.unlock()
+                case 0x43:
+                    let header = try readExactly(5)
+                    let command = header[0]
+                    let length = Int(header.uint32(at: 1))
+                    guard length <= 8 * 1024 * 1024 else {
+                        throw SimViewError(
+                            "ACCESSIBILITY_RESPONSE_TOO_LARGE",
+                            "Android agent hierarchy exceeds 8 MiB"
+                        )
+                    }
+                    let payload = try readExactly(length)
+                    acknowledgement.lock()
+                    guard pendingResponseCommand == command else {
+                        acknowledgement.unlock()
+                        throw SimViewError(
+                            "ANDROID_AGENT_PROTOCOL_INVALID",
+                            "Unexpected response for command \(command)"
+                        )
+                    }
+                    responsePayload = payload
                     acknowledgement.broadcast()
                     acknowledgement.unlock()
                 case 0x4F:
@@ -291,7 +350,12 @@ final class AndroidAgentConnection: @unchecked Sendable {
         try sendTo(fd, data: data)
     }
 
-    private func sendCommand(_ data: Data, timeout: TimeInterval = 3) throws {
+    @discardableResult
+    private func sendCommand(
+        _ data: Data,
+        timeout: TimeInterval = 3,
+        expectsResponse: Bool = false
+    ) throws -> Data? {
         guard let command = data.first else {
             throw SimViewError("ANDROID_AGENT_PROTOCOL_INVALID", "Android agent command is empty")
         }
@@ -300,12 +364,15 @@ final class AndroidAgentConnection: @unchecked Sendable {
         acknowledgement.lock()
         pendingAcknowledgement = command
         acknowledgementError = nil
+        pendingResponseCommand = expectsResponse ? command : nil
+        responsePayload = nil
         acknowledgement.unlock()
         do {
             try sendTo(fd, data: data)
         } catch {
             acknowledgement.lock()
             pendingAcknowledgement = nil
+            pendingResponseCommand = nil
             acknowledgement.unlock()
             throw error
         }
@@ -314,7 +381,11 @@ final class AndroidAgentConnection: @unchecked Sendable {
         while pendingAcknowledgement != nil, acknowledgement.wait(until: deadline) {}
         let error = acknowledgementError
         let timedOut = pendingAcknowledgement != nil
+        let response = responsePayload
+        let missingResponse = expectsResponse && response == nil
         pendingAcknowledgement = nil
+        pendingResponseCommand = nil
+        responsePayload = nil
         acknowledgement.unlock()
         if timedOut {
             throw SimViewError(
@@ -325,6 +396,13 @@ final class AndroidAgentConnection: @unchecked Sendable {
         if let error {
             throw SimViewError("ANDROID_INPUT_REJECTED", error)
         }
+        if missingResponse {
+            throw SimViewError(
+                "ANDROID_AGENT_PROTOCOL_INVALID",
+                "Android agent acknowledged command \(command) without a response"
+            )
+        }
+        return response
     }
 
     private func sendTo(_ socket: Int32, data: Data) throws {

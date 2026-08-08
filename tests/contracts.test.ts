@@ -4,6 +4,7 @@ import {
   annotationGeometrySchema,
   deviceDescriptionSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
+  elementSearchQuerySchema,
   elementTreeOutputSchema,
   elementTreePageSchema,
   inspectPointOutputSchema,
@@ -35,6 +36,16 @@ describe("shared protocol contracts", () => {
     expect(accessibilitySelectorSchema.parse({ identifier: "submit" }).exact).toBe(true);
   });
 
+  test("bounds semantic element searches", () => {
+    expect(elementSearchQuerySchema.parse({ query: "Shop" })).toMatchObject({
+      query: "Shop",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 10,
+    });
+    expect(elementSearchQuerySchema.safeParse({ query: "", limit: 50 }).success).toBe(false);
+  });
+
   test("uses visible and hidden as the only wait states", () => {
     const base = {
       selector: { identifier: "submit" },
@@ -56,6 +67,27 @@ describe("shared protocol contracts", () => {
 
   test("rejects out-of-range input at the protocol boundary", () => {
     expect(methodSchemas["input.tap"].params.safeParse({ x: 1.1, y: 0.5 }).success).toBe(false);
+  });
+
+  test("bounds timestamped gestures by pointers, duration, and total samples", () => {
+    const track = {
+      pointerId: 0,
+      waypoints: [
+        { x: 0.2, y: 0.3, timestampMs: 0 },
+        { x: 0.8, y: 0.7, timestampMs: 350 },
+      ],
+    };
+    expect(methodSchemas["input.gesture"].params.safeParse({ tracks: [track] }).success).toBe(true);
+    expect(
+      methodSchemas["input.gesture"].params.safeParse({
+        tracks: [{ ...track, waypoints: [...track.waypoints].reverse() }],
+      }).success,
+    ).toBe(false);
+    expect(
+      methodSchemas["input.gesture"].params.safeParse({
+        tracks: [track, { ...track, pointerId: 0 }],
+      }).success,
+    ).toBe(false);
   });
 
   test("normalizes legacy iOS descriptions and validates Android device capabilities", () => {

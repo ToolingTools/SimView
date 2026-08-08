@@ -107,6 +107,7 @@ enum FrameKind: UInt8 {
     case h264Frame = 0x11
     case jpegFrame = 0x12
     case pngScreenshot = 0x20
+    case preparedImage = 0x21
 }
 
 struct WireFrame {

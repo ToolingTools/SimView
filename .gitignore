@@ -11,6 +11,10 @@ packages/core/bin/
 .simview/
 coverage/
 
+# Local agent tooling and generated knowledge graphs
+.codex/
+graphify-out/
+
 # Local signing credentials
 *.p12
 *.p8

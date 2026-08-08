@@ -14,6 +14,7 @@ final class ClientConnection: Hashable, @unchecked Sendable {
     let fd: Int32
     private(set) var authenticated = false
     private(set) var codec = "h264"
+    private(set) var previewEnabled = false
     private weak var server: SimViewServer?
     private var decoder = FrameDecoder()
     private var source: DispatchSourceRead?
@@ -51,6 +52,10 @@ final class ClientConnection: Hashable, @unchecked Sendable {
         authenticated = true
         authenticationTimeout?.cancel()
         authenticationTimeout = nil
+    }
+
+    func setPreviewEnabled(_ enabled: Bool) {
+        previewEnabled = enabled
     }
 
     func send(_ frame: WireFrame) {
@@ -175,7 +180,9 @@ final class SimViewServer: @unchecked Sendable {
     private let accessibility = AccessibilityService()
     private let probe = ProbeCoordinator()
     private let h264 = H264Encoder()
+    private let androidH264 = H264Decoder()
     private let metrics = Metrics()
+    private let observation = ObservationCoordinator()
     private var androidClient: ADBClient?
     private var androidCapture: AndroidFrameCapture?
     private var androidController: AndroidController?
@@ -195,6 +202,7 @@ final class SimViewServer: @unchecked Sendable {
     private var encodingMJPEGFrame = false
     private var pendingMJPEGFrame: PendingH264Frame?
     private var captureGeneration: UInt64 = 0
+    private var observationMode = "hybrid"
 
     init(
         socketPath: String,
@@ -270,7 +278,7 @@ final class SimViewServer: @unchecked Sendable {
                             "androidContext": configuredForAndroid,
                         ],
                     ], requestID: request.id, to: connection)
-                if captureActive, connection.codec == "h264" {
+                if captureActive, connection.previewEnabled, connection.codec == "h264" {
                     if let latestH264Configuration {
                         connection.send(WireFrame(kind: .h264Configuration, payload: latestH264Configuration))
                     }
@@ -279,8 +287,10 @@ final class SimViewServer: @unchecked Sendable {
                     } else {
                         Task { await h264.forceKeyframe() }
                     }
-                } else if captureActive, connection.codec == "mjpeg", androidAgent != nil,
-                    connections.filter({ $0.authenticated && $0.codec == "mjpeg" }).count == 1
+                } else if captureActive, connection.previewEnabled, connection.codec == "mjpeg",
+                    androidAgent != nil,
+                    connections.filter({ $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg" })
+                        .count == 1
                 {
                     ensureAndroidMJPEGCapture(generation: captureGeneration)
                 }
@@ -311,7 +321,7 @@ final class SimViewServer: @unchecked Sendable {
         connections.remove(connection)
         connection.close()
         if wasAuthenticated, connection.codec == "mjpeg",
-            !connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }),
+            !connections.contains(where: { $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg" }),
             androidAgent != nil
         {
             androidCapture?.stop()
@@ -337,6 +347,11 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func handle(_ request: Request, connection: ClientConnection) throws {
+        let isInput = request.method.hasPrefix("input.") || request.method == "device.orientation.set"
+        if isInput {
+            metrics.didDispatchInput()
+        }
+        defer { if isInput { metrics.didAcknowledgeInput() } }
         switch request.method {
         case "devices.list":
             sendResult(try DeviceRuntime.devices().map(\.dictionary), requestID: request.id, to: connection)
@@ -352,13 +367,30 @@ final class SimViewServer: @unchecked Sendable {
             sendResult(value, requestID: request.id, to: connection)
         case "capture.start":
             let device = try selectDevice(request.deviceIdentifier)
-            try startCapture(device)
+            observationMode = request.params["observationMode"]?.stringValue ?? "hybrid"
+            if observationMode == "hybrid" || device.platform == .android {
+                try startCapture(device)
+            } else {
+                if captureActive { stopCapture() }
+                selectedDevice = device
+            }
             sendResult(
                 [
                     "device": deviceResponseDictionary(device),
                     "codec": connection.codec,
                     "frameRate": device.platform == .android && androidAgent == nil ? 4 : 60,
+                    "observationMode": observationMode,
                 ], requestID: request.id, to: connection)
+        case "capture.preview":
+            let enabled = request.params["enabled"] == .bool(true)
+            connection.setPreviewEnabled(enabled)
+            if enabled {
+                if !captureActive, let device = selectedDevice { try startCapture(device) }
+                if connection.codec == "h264" {
+                    Task { await h264.forceKeyframe() }
+                }
+            }
+            sendResult(["enabled": enabled], requestID: request.id, to: connection)
         case "capture.stop":
             stopCapture()
             sendResult(["stopped": true], requestID: request.id, to: connection)
@@ -374,6 +406,7 @@ final class SimViewServer: @unchecked Sendable {
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "capture.screenshot":
             if selectedDevice?.platform == .android, let androidCapture {
+                metrics.didUseADBFallback()
                 let png = try androidCapture.screenshot()
                 sendResult(
                     [
@@ -397,6 +430,53 @@ final class SimViewServer: @unchecked Sendable {
                     ], requestID: request.id, to: connection)
                 connection.send(WireFrame(kind: .pngScreenshot, payload: png))
             }
+        case "observation.get":
+            if !captureActive, let device = selectedDevice { try startCapture(device) }
+            let visual = request.params["visual"] == .bool(true)
+            let afterRevision: UInt64?
+            if let revision = request.params["afterRevision"]?.intValue {
+                guard revision >= 0 else {
+                    throw SimViewError(
+                        "OBSERVATION_REVISION_INVALID", "Observation revision must be nonnegative")
+                }
+                afterRevision = UInt64(revision)
+            } else {
+                afterRevision = nil
+            }
+            let prepared = try observation.observe(
+                visual: visual,
+                afterRevision: afterRevision,
+                quietMilliseconds: request.params["settleQuietMs"]?.intValue ?? 75,
+                maximumWaitMilliseconds: request.params["maxWaitMs"]?.intValue ?? 500
+            )
+            let formatter = ISO8601DateFormatter()
+            let image = prepared.image
+            var result: [String: Any] = [
+                "observationId": prepared.observationID,
+                "frameId": prepared.frameID,
+                "frameRevision": prepared.frameRevision,
+                "changeRevision": prepared.changeRevision,
+                "imageRevision": prepared.imageRevision,
+                "capturedAt": formatter.string(from: prepared.capturedAt),
+                "settledAt": formatter.string(from: prepared.settledAt),
+                "stable": prepared.stable,
+                "ageMs": max(0, prepared.settledAt.timeIntervalSince(prepared.capturedAt) * 1_000),
+                "width": prepared.width,
+                "height": prepared.height,
+                "byteLength": image?.count ?? 0,
+                "imageIncluded": image != nil,
+                "cacheHit": prepared.cacheHit,
+            ]
+            if let date = prepared.firstChangedFrameAt {
+                result["firstChangedFrameAt"] = formatter.string(from: date)
+            }
+            if let date = prepared.imageReadyAt {
+                result["imageReadyAt"] = formatter.string(from: date)
+            }
+            sendResult(result, requestID: request.id, to: connection)
+            if let image { connection.send(WireFrame(kind: .preparedImage, payload: image)) }
+            if image != nil { metrics.didEncodeImage() }
+            metrics.didReturnObservation()
         case "input.touch":
             if selectedDevice?.platform == .android {
                 guard let androidAgent, let dimensions = androidInputDimensions()
@@ -456,6 +536,47 @@ final class SimViewServer: @unchecked Sendable {
                 )
             }
             sendResult(["accepted": true], requestID: request.id, to: connection)
+        case "input.gesture":
+            let tracks = request.params["tracks"]?.arrayValue ?? []
+            let parsed = try tracks.map {
+                value -> (
+                    pointerID: Int, waypoints: [(x: Double, y: Double, timestamp: Double)]
+                ) in
+                guard let track = value.objectValue,
+                    let waypoints = track["waypoints"]?.arrayValue
+                else { throw SimViewError("INPUT_GESTURE_INVALID", "Gesture track is invalid") }
+                return (
+                    try track.int("pointerId"),
+                    try parseGestureWaypoints(waypoints)
+                )
+            }
+            if parsed.count == 2, let androidAgent, let dimensions = androidInputDimensions() {
+                try androidAgent.gesture(
+                    tracks: parsed,
+                    width: dimensions.width,
+                    height: dimensions.height
+                )
+            } else if parsed.count == 2, selectedDevice?.platform == .ios,
+                HIDInjector.multiTouchAvailable
+            {
+                try performIOSMultiGesture(parsed)
+            } else if parsed.count == 1, let waypoints = parsed.first?.waypoints {
+                try performGesture(waypoints)
+            } else {
+                throw SimViewError(
+                    "INPUT_MULTITOUCH_UNAVAILABLE",
+                    "The active runtime does not expose a compatible two-touch digitizer path"
+                )
+            }
+            sendResult(
+                [
+                    "accepted": true,
+                    "pointerCount": parsed.count,
+                    "sampleCount": parsed.reduce(0) { $0 + $1.waypoints.count },
+                ],
+                requestID: request.id,
+                to: connection
+            )
         case "input.typeText":
             let method: String
             if let androidAgent {
@@ -652,6 +773,7 @@ final class SimViewServer: @unchecked Sendable {
         capture.stop()
         androidCapture?.stop()
         androidAgent?.stop()
+        androidH264.stop()
         androidController?.stop()
         androidCapture = nil
         androidController = nil
@@ -670,6 +792,7 @@ final class SimViewServer: @unchecked Sendable {
         let generation = captureGeneration
         let handler: @Sendable (CVPixelBuffer, CMTime, String) -> Void = { [weak self] frame, timestamp, frameID in
             guard let self else { return }
+            self.observation.ingest(frame, frameID: frameID)
             let pending = PendingH264Frame(
                 frame: frame,
                 timestamp: timestamp,
@@ -691,10 +814,16 @@ final class SimViewServer: @unchecked Sendable {
                 self.androidClient = client
                 self.androidCapture = androidCapture
                 androidController = AndroidController(client: client, device: device)
-                androidAccessibility = AndroidAccessibilityService(client: client, serial: device.nativeIdentifier)
                 let accelerated = tryStartAndroidAgent(client: client, device: device, generation: generation)
+                androidAccessibility = AndroidAccessibilityService(
+                    client: client,
+                    serial: device.nativeIdentifier,
+                    agent: accelerated ? androidAgent : nil
+                )
                 if accelerated {
-                    if connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }) {
+                    if connections.contains(where: {
+                        $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg"
+                    }) {
                         ensureAndroidMJPEGCapture(generation: generation)
                     }
                 } else {
@@ -712,6 +841,7 @@ final class SimViewServer: @unchecked Sendable {
         capture.stop()
         androidCapture?.stop()
         androidAgent?.stop()
+        androidH264.stop()
         androidController?.stop()
         androidCapture = nil
         androidController = nil
@@ -728,6 +858,7 @@ final class SimViewServer: @unchecked Sendable {
         frameID = "0"
         pendingH264Frame = nil
         pendingMJPEGFrame = nil
+        observation.clear()
         Task { await h264.stop() }
     }
 
@@ -735,9 +866,12 @@ final class SimViewServer: @unchecked Sendable {
         guard captureActive, pending.generation == captureGeneration else { return }
         metrics.didCapture()
         frameID = pending.frameID
-        if connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }) {
+        if connections.contains(where: { $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg" }) {
             enqueueMJPEG(pending)
         }
+
+        guard connections.contains(where: { $0.authenticated && $0.previewEnabled && $0.codec == "h264" })
+        else { return }
 
         if encodingFrame {
             if pendingH264Frame != nil { metrics.didDrop() }
@@ -842,6 +976,19 @@ final class SimViewServer: @unchecked Sendable {
                     guard let server = self else { return }
                     server.queue.async {
                         guard server.captureActive, generation == server.captureGeneration else { return }
+                        do {
+                            try server.androidH264.configure(configuration) { [weak server] frame, timestamp in
+                                guard let server else { return }
+                                server.observation.ingest(
+                                    frame,
+                                    frameID: "android-agent-\(timestamp.value)"
+                                )
+                            }
+                        } catch {
+                            server.metrics.didFailAndroidDecoder()
+                            server.handleAndroidAgentFailure(error, generation: generation)
+                            return
+                        }
                         server.latestH264Configuration = configuration
                         server.broadcast(
                             WireFrame(kind: .h264Configuration, payload: configuration), codec: "h264")
@@ -854,6 +1001,7 @@ final class SimViewServer: @unchecked Sendable {
                         server.androidAgentFrameSequence &+= 1
                         server.frameID = "android-agent-\(server.androidAgentFrameSequence)"
                         server.metrics.didCapture()
+                        server.androidH264.decode(bytes, timestampMicros: timestamp)
                         var payload = Data()
                         var micros = timestamp.bigEndian
                         withUnsafeBytes(of: &micros) { payload.append(contentsOf: $0) }
@@ -884,13 +1032,16 @@ final class SimViewServer: @unchecked Sendable {
     private func acceptAndroidCompatibilityFrame(_ pending: PendingH264Frame) {
         guard captureActive, pending.generation == captureGeneration else { return }
         frameID = pending.frameID
-        if connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }) {
+        if connections.contains(where: {
+            $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg"
+        }) {
             enqueueMJPEG(pending)
         }
     }
 
     private func ensureAndroidMJPEGCapture(generation: UInt64) {
         guard let androidCapture else { return }
+        metrics.didUseADBFallback()
         androidCapture.start { [weak self] frame, timestamp, frameID in
             guard let self else { return }
             let pending = PendingH264Frame(
@@ -908,6 +1059,7 @@ final class SimViewServer: @unchecked Sendable {
         guard captureActive, generation == captureGeneration, selectedDevice?.platform == .android else { return }
         let failedAgent = androidAgent
         failedAgent?.stop()
+        androidH264.stop()
         androidAgentError =
             failedAgent?.diagnostics
             ?? (error as? SimViewError)?.message ?? error.localizedDescription
@@ -916,7 +1068,14 @@ final class SimViewServer: @unchecked Sendable {
         if androidAgentRestartAttempts < 1, let client = androidClient, let device = selectedDevice {
             androidAgentRestartAttempts += 1
             if tryStartAndroidAgent(client: client, device: device, generation: generation) {
-                if connections.contains(where: { $0.authenticated && $0.codec == "mjpeg" }) {
+                androidAccessibility = AndroidAccessibilityService(
+                    client: client,
+                    serial: device.nativeIdentifier,
+                    agent: androidAgent
+                )
+                if connections.contains(where: {
+                    $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg"
+                }) {
                     ensureAndroidMJPEGCapture(generation: generation)
                 }
                 return
@@ -966,6 +1125,126 @@ final class SimViewServer: @unchecked Sendable {
         }
     }
 
+    private func performGesture(
+        _ waypoints: [(x: Double, y: Double, timestamp: Double)]
+    ) throws {
+        guard waypoints.count >= 2, waypoints.count <= 120 else {
+            throw SimViewError("INPUT_GESTURE_INVALID", "A gesture requires 2 through 120 waypoints")
+        }
+        guard let first = waypoints.first, let last = waypoints.last,
+            first.timestamp >= 0, last.timestamp <= 5
+        else {
+            throw SimViewError("INPUT_GESTURE_INVALID", "Gesture duration must not exceed five seconds")
+        }
+        var previousTimestamp = first.timestamp
+        func send(_ phase: String, _ point: (x: Double, y: Double, timestamp: Double)) throws {
+            if let androidAgent, let dimensions = androidInputDimensions() {
+                try androidAgent.touch(
+                    phase: phase,
+                    x: point.x,
+                    y: point.y,
+                    width: dimensions.width,
+                    height: dimensions.height
+                )
+            } else if selectedDevice?.platform == .android {
+                throw SimViewError(
+                    "INPUT_RAW_TOUCH_UNAVAILABLE",
+                    "Timestamped gestures require the SimView Android agent"
+                )
+            } else {
+                try prepareHID()
+                try hid.touch(phase: phase, x: point.x, y: point.y)
+            }
+        }
+        try send("down", first)
+        for point in waypoints.dropFirst().dropLast() {
+            guard point.timestamp >= previousTimestamp else {
+                throw SimViewError("INPUT_GESTURE_INVALID", "Gesture timestamps must be monotonic")
+            }
+            Thread.sleep(forTimeInterval: point.timestamp - previousTimestamp)
+            try send("move", point)
+            previousTimestamp = point.timestamp
+        }
+        Thread.sleep(forTimeInterval: max(0, last.timestamp - previousTimestamp))
+        try send("up", last)
+    }
+
+    private func parseGestureWaypoints(
+        _ values: [JSONValue]
+    ) throws -> [(x: Double, y: Double, timestamp: Double)] {
+        let waypoints: [(x: Double, y: Double, timestamp: Double)] = try values.map { value in
+            guard let point = value.objectValue else {
+                throw SimViewError("INPUT_GESTURE_INVALID", "Each gesture waypoint must be an object")
+            }
+            return (
+                try point.double("x"),
+                try point.double("y"),
+                try point.double("timestampMs") / 1_000
+            )
+        }
+        guard waypoints.count >= 2, waypoints.count <= 120,
+            let first = waypoints.first, let last = waypoints.last,
+            first.timestamp >= 0, last.timestamp <= 5
+        else {
+            throw SimViewError(
+                "INPUT_GESTURE_INVALID", "A gesture requires 2 through 120 monotonic waypoints")
+        }
+        for (previous, current) in zip(waypoints, waypoints.dropFirst())
+        where current.timestamp < previous.timestamp {
+            throw SimViewError("INPUT_GESTURE_INVALID", "Gesture timestamps must be monotonic")
+        }
+        return waypoints
+    }
+
+    private func performIOSMultiGesture(
+        _ tracks: [(pointerID: Int, waypoints: [(x: Double, y: Double, timestamp: Double)])]
+    ) throws {
+        guard tracks.count == 2, let firstStart = tracks[0].waypoints.first,
+            let secondStart = tracks[1].waypoints.first,
+            let firstEnd = tracks[0].waypoints.last,
+            let secondEnd = tracks[1].waypoints.last,
+            firstStart.timestamp == secondStart.timestamp,
+            firstEnd.timestamp == secondEnd.timestamp
+        else {
+            throw SimViewError(
+                "INPUT_MULTITOUCH_INVALID",
+                "iOS two-touch tracks must start and end at the same timestamps"
+            )
+        }
+        try prepareHID()
+        let timeline = Set(tracks.flatMap { $0.waypoints.map(\.timestamp) }).sorted()
+        guard let start = timeline.first, let end = timeline.last, end - start <= 5 else {
+            throw SimViewError("INPUT_GESTURE_INVALID", "Gesture duration must not exceed five seconds")
+        }
+        var previous = start
+        for (index, timestamp) in timeline.enumerated() {
+            if index > 0 { Thread.sleep(forTimeInterval: max(0, timestamp - previous)) }
+            let first = interpolatedPoint(in: tracks[0].waypoints, at: timestamp)
+            let second = interpolatedPoint(in: tracks[1].waypoints, at: timestamp)
+            let phase = index == 0 ? "down" : (timestamp == end ? "up" : "move")
+            try hid.multiTouch(phase: phase, first: first, second: second)
+            previous = timestamp
+        }
+    }
+
+    private func interpolatedPoint(
+        in points: [(x: Double, y: Double, timestamp: Double)],
+        at timestamp: Double
+    ) -> (x: Double, y: Double) {
+        guard let first = points.first else { return (0, 0) }
+        if timestamp <= first.timestamp { return (first.x, first.y) }
+        for (left, right) in zip(points, points.dropFirst()) where timestamp <= right.timestamp {
+            let duration = right.timestamp - left.timestamp
+            let progress = duration > 0 ? (timestamp - left.timestamp) / duration : 1
+            return (
+                left.x + (right.x - left.x) * progress,
+                left.y + (right.y - left.y) * progress
+            )
+        }
+        let last = points[points.count - 1]
+        return (last.x, last.y)
+    }
+
     private func selectDevice(_ requested: String?) throws -> DeviceDescription {
         let normalizedRequest = requested.map { $0.contains(":") ? $0 : "ios:\($0)" }
         let normalizedPreferred = preferredDeviceID.map { $0.contains(":") ? $0 : "ios:\($0)" }
@@ -989,6 +1268,7 @@ final class SimViewServer: @unchecked Sendable {
             androidController?.stop()
             androidCapture?.stop()
             androidAgent?.stop()
+            androidH264.stop()
             androidCapture = nil
             androidController = nil
             androidAccessibility = nil
@@ -1088,6 +1368,13 @@ final class SimViewServer: @unchecked Sendable {
             var capabilities = result["capabilities"] as? [String: Any] ?? [:]
             var input = capabilities["input"] as? [String: Any] ?? [:]
             input["rawTouch"] = agentAvailable
+            input["multiTouch"] = agentAvailable
+            capabilities["input"] = input
+            result["capabilities"] = capabilities
+        } else {
+            var capabilities = result["capabilities"] as? [String: Any] ?? [:]
+            var input = capabilities["input"] as? [String: Any] ?? [:]
+            input["multiTouch"] = HIDInjector.multiTouchAvailable
             capabilities["input"] = input
             result["capabilities"] = capabilities
         }
@@ -1097,9 +1384,11 @@ final class SimViewServer: @unchecked Sendable {
 
     private func broadcast(_ frame: WireFrame, codec: String) {
         let data = frame.encoded
-        for connection in connections where connection.authenticated && connection.codec == codec {
+        for connection in connections
+        where connection.authenticated && connection.previewEnabled && connection.codec == codec {
             connection.sendEncoded(data, kind: frame.kind)
             metrics.didDeliver()
+            metrics.didCopyPreviewPacket()
         }
     }
 

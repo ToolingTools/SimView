@@ -8,6 +8,15 @@ final class Metrics: @unchecked Sendable {
     private var encoded: UInt64 = 0
     private var delivered: UInt64 = 0
     private var dropped: UInt64 = 0
+    private var imageEncodes: UInt64 = 0
+    private var previewPacketCopies: UInt64 = 0
+    private var adbFallbacks: UInt64 = 0
+    private var androidDecoderFailures: UInt64 = 0
+    private var observationReturns: UInt64 = 0
+    private var inputDispatches: UInt64 = 0
+    private var inputAcknowledgements: UInt64 = 0
+    private var lastInputDispatchedAt: Date?
+    private var lastInputAcknowledgedAt: Date?
     private var latencies = [Double](repeating: 0, count: latencyCapacity)
     private var latencyCount = 0
     private var nextLatencyIndex = 0
@@ -26,6 +35,23 @@ final class Metrics: @unchecked Sendable {
 
     func didDeliver() { mutate { delivered += 1 } }
     func didDrop() { mutate { dropped += 1 } }
+    func didEncodeImage() { mutate { imageEncodes += 1 } }
+    func didCopyPreviewPacket() { mutate { previewPacketCopies += 1 } }
+    func didUseADBFallback() { mutate { adbFallbacks += 1 } }
+    func didFailAndroidDecoder() { mutate { androidDecoderFailures += 1 } }
+    func didReturnObservation() { mutate { observationReturns += 1 } }
+    func didDispatchInput() {
+        mutate {
+            inputDispatches += 1
+            lastInputDispatchedAt = Date()
+        }
+    }
+    func didAcknowledgeInput() {
+        mutate {
+            inputAcknowledgements += 1
+            lastInputAcknowledgedAt = Date()
+        }
+    }
 
     var dictionary: [String: Any] {
         lock.lock()
@@ -40,6 +66,19 @@ final class Metrics: @unchecked Sendable {
             "encoded": encoded,
             "delivered": delivered,
             "dropped": dropped,
+            "imageEncodes": imageEncodes,
+            "previewPacketCopies": previewPacketCopies,
+            "adbFallbacks": adbFallbacks,
+            "androidDecoderFailures": androidDecoderFailures,
+            "observationReturns": observationReturns,
+            "inputDispatches": inputDispatches,
+            "inputAcknowledgements": inputAcknowledgements,
+            "lastInputDispatchedAt": lastInputDispatchedAt.map {
+                ISO8601DateFormatter().string(from: $0) as Any
+            } ?? NSNull(),
+            "lastInputAcknowledgedAt": lastInputAcknowledgedAt.map {
+                ISO8601DateFormatter().string(from: $0) as Any
+            } ?? NSNull(),
             "latencyMs": ["p50": percentile(0.5), "p95": percentile(0.95)],
             "uptimeSeconds": Date().timeIntervalSince(started),
         ]

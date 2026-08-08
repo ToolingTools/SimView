@@ -15,6 +15,7 @@ export const relayInputSchema = z.discriminatedUnion("method", [
     params: methodSchemas["input.longPress"].params,
   }),
   z.object({ method: z.literal("input.swipe"), params: methodSchemas["input.swipe"].params }),
+  z.object({ method: z.literal("input.gesture"), params: methodSchemas["input.gesture"].params }),
   z.object({ method: z.literal("input.typeText"), params: methodSchemas["input.typeText"].params }),
   z.object({ method: z.literal("input.key"), params: methodSchemas["input.key"].params }),
   z.object({ method: z.literal("input.button"), params: methodSchemas["input.button"].params }),
