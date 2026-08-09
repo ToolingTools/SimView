@@ -11,6 +11,7 @@ const compiledArtifacts = [
   "packages/core/bin/simview-core",
   "packages/core/bin/libSimViewProbe.dylib",
   "packages/core/bin/simview-android-agent.jar",
+  "packages/core/bin/xctest-provider/SimViewXCTestProvider.xctestrun",
 ];
 const compiledSourcePackages = ["app", "client", "contracts", "core", "mcp", "cli"];
 
@@ -38,6 +39,18 @@ sourceFiles.push(
     absolute: true,
   }),
   join(root, "native", "SimViewCore", "Package.swift"),
+  ...new Bun.Glob("Sources/**/*.swift").scanSync({
+    cwd: join(root, "native", "SimViewXCTestProvider"),
+    absolute: true,
+  }),
+  join(root, "native", "SimViewXCTestProvider", "project.yml"),
+  join(
+    root,
+    "native",
+    "SimViewXCTestProvider",
+    "SimViewXCTestProvider.xcodeproj",
+    "project.pbxproj",
+  ),
   join(root, "packages", "app", "src", "preview.html"),
   join(root, "package.json"),
   join(root, "manifest.json"),
@@ -74,6 +87,7 @@ await $`cp ${join(root, "packages/cli/dist/simview")} ${join(stage, "bin/simview
 await $`cp ${join(root, "packages/core/bin/simview-core")} ${join(stage, "bin/simview-core")}`;
 await $`cp ${join(root, "packages/core/bin/libSimViewProbe.dylib")} ${join(stage, "bin/libSimViewProbe.dylib")}`;
 await $`cp ${join(root, "packages/core/bin/simview-android-agent.jar")} ${join(stage, "bin/simview-android-agent.jar")}`;
+await $`cp -R ${join(root, "packages/core/bin/xctest-provider")} ${join(stage, "bin/xctest-provider")}`;
 await $`chmod +x ${join(stage, "bin/simview")} ${join(stage, "bin/simview-core")}`;
 for (const path of new Bun.Glob("**/.DS_Store").scanSync({ cwd: stage, absolute: true })) {
   await rm(path, { force: true });

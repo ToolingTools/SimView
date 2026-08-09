@@ -11,14 +11,21 @@ Android Emulator, or authorized Android device connected through ADB.
 1. Call `list_devices` and select an available device. Its default bounded
    response omits shutdown and unavailable inventory; request additional pages
    with `availableOnly: false` only when diagnosing device discovery. Prefer an
-   explicitly supplied device ID; otherwise SimView selects the first available
-   device and the user can switch devices in the preview. Always call `connect_device`
+   explicitly supplied device ID. If multiple available devices are returned
+   and no device ID was supplied, present them as a numbered list (including
+   each device's name, platform, and ID) and prompt the user to select one;
+   do not silently choose the first device. Once the user selects a device,
+   use its ID for the connection. Always call `connect_device`
    first and continue only after it succeeds. If the user asked to view the
    interactive preview, then call `open_simview` with the same device ID; its
    already-connected initial state requests fullscreen immediately. Otherwise,
    use the connected session without opening the preview. Normal navigation is
    semantic-only: use `observationMode: "semantic"` and do not call
    `open_simview` merely because the user says to use SimView.
+   On iOS, connection automatically starts a temporary XCTest runner and uses
+   it as the primary accessibility provider. This activates the foreground app
+   without relaunching it. If startup is unavailable, SimView reports the AX
+   fallback in `iosAccessibility`; do not ask the user for approval.
 2. Call `observe_screen` with `mode: "semantic"` to read compact prepared
    semantics without waiting for or returning an image.
    Pass the prior `observationId` as `sinceObservationId` to receive only a
@@ -69,6 +76,11 @@ Android Emulator, or authorized Android device connected through ADB.
    actions when no useful accessible target exists. Use `perform_gesture` for a
    timestamped pointer track. Two-track gestures require the device's
    `multiTouch` capability. Coordinates are normalized from 0 to 1.
+   `type_text` inserts at the current selection and rejects control characters.
+   Use `replace_text` with an identifier, name, value, or placeholder selector
+   when a field must be cleared and replaced exactly. Use `press_key` for Return,
+   Delete, Tab, Escape, arrows, and other named special keys; never paste
+   backspace characters.
 7. Use `inspect_point` to attach semantic context to a coordinate. Enable the
    UIKit probe only for an iOS Simulator when class, controller, window, or
    scene context is needed and relaunching an explicitly selected third-party
@@ -76,6 +88,9 @@ Android Emulator, or authorized Android device connected through ADB.
    UIKit probe.
 8. Treat React Native route, component, testID, and source context as optional;
    never block on Metro or require Metro MCP itself to be installed.
+   Native iOS output reports `context=native-ios` and the active element source
+   (`core-simulator-xctest` or `core-simulator-ax`); do not interpret the absence
+   of a Metro target as an error.
 9. Add point annotations at exact mismatch coordinates, or rectangular
    annotations when a bounded screen region is the relevant evidence. Keep
    comments brief and specific.

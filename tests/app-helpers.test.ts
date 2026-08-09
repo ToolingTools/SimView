@@ -20,8 +20,8 @@ import {
   claimFullscreenRequest,
   commentableNodeAtPoint,
   contextForNode,
+  createNativeIOSScreenContext,
   createNativeScreenContext,
-  createUIKitScreenContext,
   deviceGroups,
   deviceStatusLabel,
   elementPath,
@@ -437,7 +437,7 @@ describe("app helpers", () => {
       },
     };
     const context = annotationMessageContext(annotation);
-    const screenContextValue = createUIKitScreenContext(
+    const screenContextValue = createNativeIOSScreenContext(
       {
         device: {
           id: "ios:device-1",

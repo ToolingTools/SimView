@@ -37,7 +37,7 @@ The first request must be:
 ```json
 {
   "id": "uuid",
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "method": "hello",
   "params": {
     "token": "32-byte random session token",
@@ -58,7 +58,7 @@ After the handshake, each request has the following shape:
 ```json
 {
   "id": "uuid",
-  "protocolVersion": 3,
+  "protocolVersion": 4,
   "method": "devices.list",
   "params": {}
 }
@@ -93,6 +93,9 @@ method's result shape.
 - `accessibility.elementAtPoint`
 - `accessibility.find`
 - `accessibility.wait`
+- `accessibility.providerStatus`
+- `accessibility.enableXCTestProvider`
+- `accessibility.disableXCTestProvider`
 - `probe.status`
 - `probe.enable`
 - `probe.disable`
@@ -145,6 +148,21 @@ a still-changing confirmation is unstable.
 Transient root-only iOS trees are retried three times with a 25 ms delay;
 persistent root-only application placeholders are returned as degraded rather
 than complete. Event-backed observation debounces before one post-event capture.
+An iOS session automatically starts a temporary, authenticated XCTest runner
+for the foreground third-party application. The target application is activated
+but is not relaunched. XCTest becomes the authoritative snapshot and point
+provider for that session and reports `core-simulator-xctest`; warm captures are
+served by one persistent runner. If the runner, artifacts, or foreground target
+are unavailable, SimView retains `core-simulator-ax` as the automatic fallback.
+Provider status is exposed in MCP session state as `iosAccessibility`.
+XCTest observation uses `snapshot-diff` directly and does not wait for legacy
+AXP events. A normal `replace_text` operation verifies the exact final value
+with one post-write snapshot; placeholders are discovery hints and are not
+required to survive after text is entered. Placeholder-only fields are
+correlated by native role and their fresh hit-tested point/frame.
+When a successful `clear_text` or `replace_text` is the final batch action,
+`perform_actions` reuses that stable verification snapshot for its semantic
+observation instead of waiting for a second accessibility change.
 The current Android agent runs a bounded shell `uiautomator dump` and reports
 `android-agent-shell`; without the agent the host reports
 `android-uiautomator`. Shell observation polls from 150 ms with backoff to
@@ -153,7 +171,7 @@ direct agent `UiAutomation` capture is reserved as
 `android-agent-uiautomation`, but is not currently advertised.
 
 Accessibility selectors must include at least one of `ref`, `identifier`,
-`role`, `name`, or `value`. `accessibility.wait` uses `state: "visible"` or
+`role`, `name`, `value`, or `placeholder`. `accessibility.wait` uses `state: "visible"` or
 `state: "hidden"`; the same names are used by the CLI and MCP tools. Probe
 inspection exposes `probe.target` so callers can see the currently selected
 bundle before requesting context or changing it.
@@ -161,7 +179,8 @@ bundle before requesting context or changing it.
 At the MCP layer, `get_element_tree` and its app-only alias return a versioned
 element snapshot plus frame-scoped screen context. The snapshot source is
 `react-native-fiber` when a matching local Metro/Hermes development target can
-be inspected, otherwise `core-simulator-ax` on iOS or
+be inspected, otherwise `core-simulator-xctest` on iOS (`core-simulator-ax`
+when runner startup is unavailable) or
 `android-agent-shell` is used when the persistent Android agent is available;
 `android-uiautomator` is the bounded host fallback when it is not.
 React Native nodes use
@@ -195,9 +214,14 @@ An identity count above one returns the hard-stop code `destination_ambiguous`, 
 `safeToContinue: false`, and `retryable: false`; callers must strengthen the
 identity without repeating the accepted tap. Assertions may match multiple nodes,
 for example when an amount is displayed in both total and outstanding fields.
+Action batches report both `completedActionCount` and `dispatchedActionCount`.
+The latter includes a rejected action whose input was already sent; callers
+must never infer that a failed action is safe to repeat. Text receipts separate
+`retryObservation` from `retryInput`, which remains false after dispatch.
 When React Native supplies screen context while native AX supplies the
 rendered semantic nodes, compact text reports both as
-`context=react-native-fiber ... elements=core-simulator-ax`.
+`context=react-native-fiber ... elements=core-simulator-xctest` (or
+`elements=core-simulator-ax` when the XCTest runner is unavailable).
 
 `health.get` is a diagnostic response. It reports server status, native PID,
 instance ID, configured device ID, selected device, capture state, idle deadline,
@@ -209,7 +233,7 @@ The native server supports multiple authenticated clients and broadcasts one
 H.264 or MJPEG stream to clients that requested that codec. `capture.stop` is a
 process-global capture operation in the current protocol; callers should treat
 device selection, orientation, physical input, and probe state as device-global
-rather than review-local. Protocol version 3 supports both the explicit
+rather than review-local. Protocol version 4 supports both the explicit
 ephemeral client path and the shared daemon client path; the latter is selected
 by `SimViewClient.acquire` and is keyed by platform plus native identifier and compatible
 binary/protocol identity. Review isolation is provided above the native

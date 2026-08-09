@@ -235,6 +235,17 @@ static id SVJSONValue(id value) {
   return [value description] ?: [NSNull null];
 }
 
+NSString *SVAccessibilityStringValue(id value) {
+  if (!value || value == NSNull.null)
+    return nil;
+  if ([value isKindOfClass:NSString.class])
+    return [(NSString *) value length] > 0 ? value : nil;
+  if ([value isKindOfClass:NSNumber.class])
+    return [(NSNumber *) value stringValue];
+  NSString *description = [value description];
+  return description.length > 0 ? description : nil;
+}
+
 static void SVSetIfPresent(NSMutableDictionary *dictionary, NSString *key, id value) {
   if (!value)
     return;
@@ -257,13 +268,15 @@ static NSDictionary *SVFrameDictionary(NSRect frame, NSRect screenFrame) {
       @"width" : @(NSWidth(frame)),
       @"height" : @(NSHeight(frame))
     },
-    @"normalized" : @{
-      @"x" : @(MAX(0, MIN(1, nx))),
-      @"y" : @(MAX(0, MIN(1, ny))),
-      @"width" : @(MAX(0, MIN(1, nw))),
-      @"height" : @(MAX(0, MIN(1, nh)))
-    }
+    @"normalized" : @{@"x" : @(nx), @"y" : @(ny), @"width" : @(nw), @"height" : @(nh)}
   };
+}
+
+static double SVVisibleFraction(NSRect frame, NSRect screenFrame) {
+  NSRect intersection = NSIntersectionRect(frame, screenFrame);
+  double area = NSWidth(frame) * NSHeight(frame);
+  double visibleArea = NSWidth(intersection) * NSHeight(intersection);
+  return area > 0 ? MAX(0, MIN(1, visibleArea / area)) : 0;
 }
 
 static BOOL SVRootHasMeaningfulLeafSemantics(NSDictionary *root) {
@@ -300,7 +313,7 @@ static NSDictionary *SVSerializeElement(SVAXPlatformElement *element, NSString *
   BOOL protectedContent = [element respondsToSelector:@selector(isAccessibilityProtectedContent)] &&
                           [element isAccessibilityProtectedContent];
   if (!protectedContent)
-    SVSetIfPresent(node, @"value", [element accessibilityValue]);
+    SVSetIfPresent(node, @"value", SVAccessibilityStringValue([element accessibilityValue]));
   else
     node[@"valueRedacted"] = @YES;
 
@@ -324,8 +337,10 @@ static NSDictionary *SVSerializeElement(SVAXPlatformElement *element, NSString *
   }
 
   NSRect frame = [element accessibilityFrame];
-  if (!NSEqualRects(frame, NSZeroRect))
+  if (!NSEqualRects(frame, NSZeroRect)) {
     node[@"frame"] = SVFrameDictionary(frame, screenFrame);
+    node[@"visibleFraction"] = @(SVVisibleFraction(frame, screenFrame));
+  }
 
   NSArray *children = [element accessibilityChildren] ?: @[];
   NSMutableArray *serializedChildren = [NSMutableArray arrayWithCapacity:children.count];
@@ -379,8 +394,9 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
       screenFrame = [element accessibilityFrame];
     }
     if (NSWidth(screenFrame) <= 0 || NSHeight(screenFrame) <= 0) {
-      NSScreen *screen = NSScreen.mainScreen;
-      screenFrame = NSMakeRect(0, 0, NSWidth(screen.frame), NSHeight(screen.frame));
+      if (error)
+        *error = SVError(8, @"Accessibility screen bounds are unavailable");
+      return nil;
     }
     NSString *snapshotID = NSUUID.UUID.UUIDString;
     NSUInteger ordinal = 0;
@@ -411,7 +427,8 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
         @"nodeCount" : @(ordinal),
         @"truncated" : @(truncated),
         @"quality" : truncated ? @"partial" : @"complete",
-        @"capturedBudget" : @(MAX(1, maxNodes))
+        @"capturedBudget" : @(MAX(1, maxNodes)),
+        @"provider" : @"core-simulator-ax"
       }
     };
   } @catch (NSException *exception) {

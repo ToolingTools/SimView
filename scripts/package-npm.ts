@@ -45,6 +45,9 @@ await Promise.all([
     join(root, "packages/core/bin/simview-android-agent.jar"),
     join(stage, "bin/simview-android-agent.jar"),
   ),
+  cp(join(root, "packages/core/bin/xctest-provider"), join(stage, "bin/xctest-provider"), {
+    recursive: true,
+  }),
 ]);
 await Promise.all([
   chmod(join(stage, "bin/simview"), 0o755),

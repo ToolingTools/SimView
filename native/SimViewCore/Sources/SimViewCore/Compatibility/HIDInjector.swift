@@ -3,6 +3,15 @@ import Darwin
 import Foundation
 import ObjectiveC
 
+func validateLiteralTextInput(_ text: String) throws {
+    guard !text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+        throw SimViewError(
+            "SPECIAL_KEY_REQUIRES_PRESS_KEY",
+            "typeText accepts printable text only; use input.key for Return, Tab, Delete, or other control keys"
+        )
+    }
+}
+
 final class HIDInjector: @unchecked Sendable {
     private typealias MouseFunction =
         @convention(c) (
@@ -148,6 +157,7 @@ final class HIDInjector: @unchecked Sendable {
     }
 
     func typeText(_ text: String) throws -> String {
+        try validateLiteralTextInput(text)
         guard keyboard != nil else {
             throw SimViewError("HID_KEYBOARD_UNAVAILABLE", "SimulatorKit keyboard injection is unavailable")
         }
@@ -176,6 +186,51 @@ final class HIDInjector: @unchecked Sendable {
         queue.sync {
             guard let message = keyboard?(usage, down ? 1 : 2) else { return }
             send(message)
+        }
+    }
+
+    func pressKey(_ name: String, modifiers: [String] = [], repeatCount: Int = 1) throws {
+        guard keyboard != nil else {
+            throw SimViewError("HID_KEYBOARD_UNAVAILABLE", "SimulatorKit keyboard injection is unavailable")
+        }
+        let usage: UInt32
+        var effectiveModifiers = modifiers
+        switch name {
+        case "delete": usage = 0x2a
+        case "return", "enter": usage = 0x28
+        case "tab": usage = 0x2b
+        case "escape": usage = 0x29
+        case "arrow-right": usage = 0x4f
+        case "arrow-left": usage = 0x50
+        case "arrow-down": usage = 0x51
+        case "arrow-up": usage = 0x52
+        case "select-all":
+            usage = 0x04
+            if !effectiveModifiers.contains("command") { effectiveModifiers.append("command") }
+        default:
+            throw SimViewError("INPUT_KEY_INVALID", "Unsupported key: \(name)")
+        }
+        let modifierUsages = try effectiveModifiers.map { modifier -> UInt32 in
+            switch modifier {
+            case "control": return 0xe0
+            case "shift": return 0xe1
+            case "option": return 0xe2
+            case "command": return 0xe3
+            default:
+                throw SimViewError("INPUT_KEY_INVALID", "Unsupported key modifier: \(modifier)")
+            }
+        }
+        guard (1...100).contains(repeatCount) else {
+            throw SimViewError("INPUT_KEY_INVALID", "repeat must be between 1 and 100")
+        }
+        for modifier in modifierUsages { key(usage: modifier, down: true) }
+        defer {
+            for modifier in modifierUsages.reversed() { key(usage: modifier, down: false) }
+        }
+        for _ in 0..<repeatCount {
+            key(usage: usage, down: true)
+            key(usage: usage, down: false)
+            usleep(4_000)
         }
     }
 

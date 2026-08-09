@@ -52,6 +52,7 @@ import {
 import { z } from "zod";
 import { resolveAppRoot } from "./app-assets";
 import { inlineAppModule } from "./app-html";
+import { dispatchSemanticTextAction } from "./semantic-interactions";
 import {
   type AccessibilityObservation,
   type DestinationVerification,
@@ -279,7 +280,7 @@ function compactElementTree(
         ]
           .filter(Boolean)
           .join(" ")
-      : `source=${result.snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
+      : `context=${context.kind} elements=${snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
   const fallback = result.fallback ? fallbackMessages[result.fallback.reason] : undefined;
   return [summary, fallback, compactAccessibilityTree(snapshot)].filter(Boolean).join("\n");
 }
@@ -532,6 +533,11 @@ const destinationSelectorSchema = z
         "Native AX value expected on the destination. Use only when observe/search exposed it as a value; visible text is often an accessible name instead.",
       )
       .optional(),
+    placeholder: z
+      .string()
+      .min(1)
+      .describe("Native placeholder expected on an empty editable destination field.")
+      .optional(),
     exact: z
       .boolean()
       .default(true)
@@ -539,30 +545,42 @@ const destinationSelectorSchema = z
         "Exact matching is the default. Set false only for a known fragment of a composite native label, such as #30363063 within Invoice #30363063.",
       ),
   })
+  .strict()
   .refine(
-    (selector) => Boolean(selector.identifier || selector.role || selector.name || selector.value),
-    { message: "A destination selector requires identifier, role, name, or value" },
+    (selector) =>
+      Boolean(
+        selector.identifier ||
+          selector.role ||
+          selector.name ||
+          selector.value ||
+          selector.placeholder,
+      ),
+    {
+      message: "A destination selector requires identifier, role, name, value, or placeholder",
+    },
   );
 
-const destinationVerificationInputSchema = z.object({
-  identity: destinationSelectorSchema.describe(
-    "The stable native destination identity. It must match exactly one node; prefer a unique identifier or complete entity label.",
-  ),
-  assertions: z
-    .array(destinationSelectorSchema)
-    .max(4)
-    .default([])
-    .describe(
-      "Up to four supporting destination conditions such as amount or status. Each must be present, but may legitimately match multiple nodes.",
+const destinationVerificationInputSchema = z
+  .object({
+    identity: destinationSelectorSchema.describe(
+      "The stable native destination identity. It must match exactly one node; prefer a unique identifier or complete entity label.",
     ),
-  timeoutMs: z
-    .number()
-    .int()
-    .min(100)
-    .max(5_000)
-    .default(1_000)
-    .describe("Verification timeout in milliseconds: 100-5000 inclusive; maximum 5000."),
-});
+    assertions: z
+      .array(destinationSelectorSchema)
+      .max(4)
+      .default([])
+      .describe(
+        "Up to four supporting destination conditions such as amount or status. Each must be present, but may legitimately match multiple nodes.",
+      ),
+    timeoutMs: z
+      .number()
+      .int()
+      .min(100)
+      .max(5_000)
+      .default(1_000)
+      .describe("Verification timeout in milliseconds: 100-5000 inclusive; maximum 5000."),
+  })
+  .strict();
 
 function destinationVerificationWarnings(
   verification: DestinationVerification | undefined,
@@ -576,58 +594,209 @@ function destinationVerificationWarnings(
     : [];
 }
 
-const actionSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("tap"), x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
-  z.object({
-    type: z.literal("long_press"),
-    x: z.number().min(0).max(1),
-    y: z.number().min(0).max(1),
-    durationMs: z.number().int().min(100).max(5_000).default(600),
-  }),
-  z.object({
-    type: z.literal("swipe"),
-    from: normalizedPointSchema,
-    to: normalizedPointSchema,
-    durationMs: z.number().int().min(50).max(5_000).default(350),
-  }),
-  z.object({ type: z.literal("type_text"), text: z.string().max(10_000) }),
-  z.object({
-    type: z.literal("press_button"),
-    button: z.enum(["home", "back", "overview", "lock", "volume-up", "volume-down", "action"]),
-  }),
-  z.object({
-    type: z.literal("set_orientation"),
-    orientation: z.enum(["portrait", "portrait-upside-down", "landscape-left", "landscape-right"]),
-  }),
-  z.object({
-    type: z.literal("gesture"),
-    tracks: gestureTracksSchema,
-  }),
-  z.object({
-    type: z.literal("tap_element"),
-    ref: z.string().optional(),
-    identifier: z.string().optional(),
-    role: z.string().optional(),
-    name: z.string().optional(),
-    value: z.string().optional(),
-    exact: z.boolean().default(true),
-    index: z.number().int().min(0).optional(),
-    query: z.string().trim().min(1).max(200).optional(),
-    verifyDestination: destinationVerificationInputSchema.optional(),
-  }),
-  z.object({
-    type: z.literal("wait_for_element"),
-    ref: z.string().optional(),
-    identifier: z.string().optional(),
-    role: z.string().optional(),
-    name: z.string().optional(),
-    value: z.string().optional(),
-    exact: z.boolean().default(true),
-    index: z.number().int().min(0).optional(),
-    state: z.enum(["visible", "hidden"]).default("visible"),
-    timeoutMs: z.number().int().min(100).max(30_000).default(5_000),
-  }),
+const semanticSelectorFields = {
+  ref: z.string().min(1).optional(),
+  identifier: z.string().min(1).optional(),
+  role: z.string().min(1).optional(),
+  name: z.string().min(1).optional(),
+  value: z.string().min(1).optional(),
+  placeholder: z.string().min(1).optional(),
+  exact: z.boolean().default(true),
+  index: z.number().int().min(0).optional(),
+};
+
+const namedKeySchema = z.enum([
+  "delete",
+  "return",
+  "enter",
+  "tab",
+  "escape",
+  "arrow-up",
+  "arrow-down",
+  "arrow-left",
+  "arrow-right",
+  "select-all",
 ]);
+const keyModifierSchema = z.enum(["command", "shift", "option", "control"]);
+
+function containsUnsupportedTextControl(value: string): boolean {
+  return [...value].some((character) => {
+    const codePoint = character.codePointAt(0) ?? 0;
+    return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159);
+  });
+}
+
+const actionSchema = z.discriminatedUnion("type", [
+  z
+    .object({ type: z.literal("tap"), x: z.number().min(0).max(1), y: z.number().min(0).max(1) })
+    .strict(),
+  z
+    .object({
+      type: z.literal("long_press"),
+      x: z.number().min(0).max(1),
+      y: z.number().min(0).max(1),
+      durationMs: z.number().int().min(100).max(5_000).default(600),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("swipe"),
+      from: normalizedPointSchema,
+      to: normalizedPointSchema,
+      durationMs: z.number().int().min(50).max(5_000).default(350),
+    })
+    .strict(),
+  z.object({ type: z.literal("type_text"), text: z.string().max(10_000) }).strict(),
+  z
+    .object({
+      type: z.literal("press_key"),
+      key: namedKeySchema,
+      modifiers: z.array(keyModifierSchema).max(4).optional(),
+      repeat: z.number().int().min(1).max(100).default(1),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("press_button"),
+      button: z.enum(["home", "back", "overview", "lock", "volume-up", "volume-down", "action"]),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("set_orientation"),
+      orientation: z.enum([
+        "portrait",
+        "portrait-upside-down",
+        "landscape-left",
+        "landscape-right",
+      ]),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("gesture"),
+      tracks: gestureTracksSchema,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("tap_element"),
+      ...semanticSelectorFields,
+      query: z.string().trim().min(1).max(200).optional(),
+      verifyDestination: destinationVerificationInputSchema.optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("wait_for_element"),
+      ...semanticSelectorFields,
+      state: z.enum(["visible", "hidden"]).default("visible"),
+      timeoutMs: z.number().int().min(100).max(30_000).default(5_000),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("clear_text"),
+      ...semanticSelectorFields,
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("replace_text"),
+      ...semanticSelectorFields,
+      text: z.string().max(10_000),
+    })
+    .strict(),
+]);
+
+type SemanticSelectorInput = {
+  ref?: string | undefined;
+  identifier?: string | undefined;
+  role?: string | undefined;
+  name?: string | undefined;
+  value?: string | undefined;
+  placeholder?: string | undefined;
+  exact?: boolean | undefined;
+  index?: number | undefined;
+};
+
+function accessibilitySelectorFromInput(
+  input: SemanticSelectorInput,
+): z.output<typeof accessibilitySelectorSchema> {
+  return accessibilitySelectorSchema.parse({
+    ...(input.ref ? { ref: input.ref } : {}),
+    ...(input.identifier ? { identifier: input.identifier } : {}),
+    ...(input.role ? { role: input.role } : {}),
+    ...(input.name ? { name: input.name } : {}),
+    ...(input.value ? { value: input.value } : {}),
+    ...(input.placeholder ? { placeholder: input.placeholder } : {}),
+    exact: input.exact ?? true,
+    ...(input.index !== undefined ? { index: input.index } : {}),
+  });
+}
+
+type ActionPreflightFailure = {
+  index: number;
+  code: "invalid_action" | "reused_generation_ref" | "special_key_requires_press_key";
+  message: string;
+};
+
+function preflightActions(
+  actions: z.output<typeof actionSchema>[],
+): ActionPreflightFailure | undefined {
+  const generationRefs = new Map<string, number>();
+  for (const [index, action] of actions.entries()) {
+    if (action.type === "type_text" && containsUnsupportedTextControl(action.text)) {
+      return {
+        index,
+        code: "special_key_requires_press_key",
+        message:
+          "type_text accepts literal printable text only; use press_key for Return, Tab, or Delete",
+      };
+    }
+    if (
+      action.type === "tap_element" ||
+      action.type === "wait_for_element" ||
+      action.type === "clear_text" ||
+      action.type === "replace_text"
+    ) {
+      const hasSelector = Boolean(
+        action.ref ||
+          action.identifier ||
+          action.role ||
+          action.name ||
+          action.value ||
+          action.placeholder,
+      );
+      if (action.type === "tap_element" && action.query && hasSelector) {
+        return {
+          index,
+          code: "invalid_action",
+          message: "tap_element accepts either query or selector fields, not both",
+        };
+      }
+      if (!hasSelector && !(action.type === "tap_element" && action.query)) {
+        return {
+          index,
+          code: "invalid_action",
+          message: `${action.type} requires query or a supported selector field`,
+        };
+      }
+      if (action.ref && /^(?:ax|rn):/u.test(action.ref)) {
+        const firstIndex = generationRefs.get(action.ref);
+        if (firstIndex !== undefined) {
+          return {
+            index,
+            code: "reused_generation_ref",
+            message: `Generation-scoped ref was already used by action ${firstIndex}`,
+          };
+        }
+        generationRefs.set(action.ref, index);
+      }
+    }
+  }
+  return undefined;
+}
 
 export function createServer(
   session = new SimViewSession(),
@@ -711,7 +880,16 @@ export function createServer(
     observationMode: "hybrid" | "semantic" = "semantic",
   ) => {
     const state = await session.open(deviceId, { startRelay: false, observationMode });
-    return toolResult(`SimView is connected to ${state.device?.name}.`, state);
+    const accessibilityMessage =
+      state.iosAccessibility?.status === "enhanced-ready"
+        ? " XCTest is the active iOS accessibility provider."
+        : state.device?.platform === "ios"
+          ? " XCTest could not start, so SimView is using the built-in Simulator AX fallback."
+          : "";
+    return toolResult(
+      `SimView is connected to ${state.device?.name}.${accessibilityMessage}`,
+      state,
+    );
   };
   const listDevices = async (options: DeviceListOptions = {}) => {
     if (options.cursor) {
@@ -820,6 +998,7 @@ export function createServer(
     afterRevision,
     afterVisualRevision,
     postAction,
+    verifiedAccessibility,
     settleQuietMs = 75,
     maxWaitMs = 500,
   }: {
@@ -828,20 +1007,23 @@ export function createServer(
     afterRevision?: string | undefined;
     afterVisualRevision?: number | undefined;
     postAction?: { beforeSemanticHash?: string | undefined };
+    verifiedAccessibility?: AccessibilityObservation | undefined;
     settleQuietMs?: number | undefined;
     maxWaitMs?: number | undefined;
   }) => {
     const includeVision = mode === "visual";
-    const accessibilityPromise = session
-      .accessibilityObserve({
-        afterRevision,
-        scope: "interactive",
-        maxNodes: 1_200,
-        settleQuietMs,
-        maxWaitMs,
-      })
-      .then((value) => ({ value }))
-      .catch((error: unknown) => ({ error }));
+    const accessibilityPromise = verifiedAccessibility
+      ? Promise.resolve({ value: verifiedAccessibility })
+      : session
+          .accessibilityObserve({
+            afterRevision,
+            scope: "interactive",
+            maxNodes: 1_200,
+            settleQuietMs,
+            maxWaitMs,
+          })
+          .then((value) => ({ value }))
+          .catch((error: unknown) => ({ error }));
     const visualPromise = includeVision
       ? session.warmObservation({
           visual: true,
@@ -871,11 +1053,13 @@ export function createServer(
       visualObservation !== undefined &&
       visualObservation.changeRevision > afterVisualRevision;
     if (
-      postAction?.beforeSemanticHash &&
+      postAction &&
       accessibilityObservation &&
-      semanticHashForSnapshot(accessibilityObservation.snapshot) ===
-        postAction.beforeSemanticHash &&
-      (accessibilityObservation.eventChanged || visualChanged)
+      (!accessibilityObservation.stable ||
+        (postAction.beforeSemanticHash !== undefined &&
+          semanticHashForSnapshot(accessibilityObservation.snapshot) ===
+            postAction.beforeSemanticHash &&
+          (accessibilityObservation.eventChanged || visualChanged)))
     ) {
       forcedRetry = true;
       try {
@@ -884,6 +1068,7 @@ export function createServer(
           maxNodes: 1_200,
           settleQuietMs,
           maxWaitMs: 0,
+          requireChange: false,
         });
       } catch {
         // Keep the first bounded result when the forced retry is unavailable.
@@ -956,13 +1141,6 @@ export function createServer(
         : previous.hash === hash
           ? ("unchanged" as const)
           : ("delta" as const);
-    let postActionEvent: "changed" | "timed_out" | "unavailable" | undefined;
-    if (postAction) {
-      if (!accessibilityObservation) postActionEvent = "unavailable";
-      else if (accessibilityObservation.timedOut) postActionEvent = "timed_out";
-      else if (accessibilityObservation.eventChanged) postActionEvent = "changed";
-      else postActionEvent = "timed_out";
-    }
     let postActionSemantic: "changed" | "unchanged" | "unconfirmed" | "unavailable" | undefined;
     if (postAction) {
       if (!hash) postActionSemantic = "unavailable";
@@ -973,6 +1151,14 @@ export function createServer(
       } else {
         postActionSemantic = "unchanged";
       }
+    }
+    let postActionEvent: "changed" | "timed_out" | "unavailable" | undefined;
+    if (postAction) {
+      if (!accessibilityObservation) postActionEvent = "unavailable";
+      else if (postActionSemantic === "changed") postActionEvent = "changed";
+      else if (accessibilityObservation.timedOut) postActionEvent = "timed_out";
+      else if (accessibilityObservation.eventChanged) postActionEvent = "changed";
+      else postActionEvent = "timed_out";
     }
     const observationId = randomUUID();
     if (hash) {
@@ -1092,36 +1278,64 @@ export function createServer(
     };
   };
   const dispatchAction = async (action: z.output<typeof actionSchema>) => {
+    const acceptedInput = async (input: z.output<typeof relayInputSchema>) => {
+      const receipt = await session.dispatchInput(input);
+      return {
+        ...receipt,
+        accepted: true,
+        safeToContinue: true,
+        inputDispatched: true,
+        interaction: receipt,
+      };
+    };
     switch (action.type) {
       case "tap":
-        return session.dispatchInput({
+        return acceptedInput({
           method: "input.tap",
           params: { x: action.x, y: action.y },
         });
       case "long_press":
-        return session.dispatchInput({
+        return acceptedInput({
           method: "input.longPress",
           params: { x: action.x, y: action.y, durationMs: action.durationMs },
         });
       case "swipe":
-        return session.dispatchInput({
+        return acceptedInput({
           method: "input.swipe",
           params: { from: action.from, to: action.to, durationMs: action.durationMs },
         });
       case "type_text":
-        return session.dispatchInput({ method: "input.typeText", params: { text: action.text } });
+        return acceptedInput({ method: "input.typeText", params: { text: action.text } });
+      case "press_key":
+        return acceptedInput({
+          method: "input.key",
+          params: {
+            key: action.key,
+            ...(action.modifiers ? { modifiers: action.modifiers } : {}),
+            repeat: action.repeat,
+          },
+        });
       case "press_button":
-        return session.dispatchInput({
+        return acceptedInput({
           method: "input.button",
           params: { button: action.button },
         });
       case "set_orientation":
         session.requireCapability("orientation", "Orientation changes");
-        return session.requireClient().request("device.orientation.set", {
-          orientation: action.orientation,
-        });
+        return session
+          .requireClient()
+          .request("device.orientation.set", {
+            orientation: action.orientation,
+          })
+          .then((receipt) => ({
+            ...receipt,
+            accepted: true,
+            safeToContinue: true,
+            inputDispatched: true,
+            interaction: receipt,
+          }));
       case "gesture":
-        return session.dispatchInput({
+        return acceptedInput({
           method: "input.gesture",
           params: { tracks: action.tracks },
         });
@@ -1150,11 +1364,17 @@ export function createServer(
             ref: winner.element.ref,
           });
         } else {
-          selector = accessibilitySelectorSchema.parse(action);
+          selector = accessibilitySelectorFromInput(action);
         }
         const resolution = await session.resolveNativeTap(selector);
         if (!resolution.accepted || !resolution.point) {
-          return { ...resolution, interaction: resolution };
+          return {
+            ...resolution,
+            accepted: false,
+            safeToContinue: false,
+            inputDispatched: false,
+            interaction: resolution,
+          };
         }
         const verificationBaseline = action.verifyDestination
           ? await captureObservationBaseline(session)
@@ -1194,7 +1414,7 @@ export function createServer(
         };
       }
       case "wait_for_element": {
-        const selector = accessibilitySelectorSchema.parse(action);
+        const selector = accessibilitySelectorFromInput(action);
         const result = await session.requireClient().request("accessibility.wait", {
           ...(session.device?.id ? { deviceId: session.device.id } : {}),
           ...(session.device?.udid ? { udid: session.device.udid } : {}),
@@ -1204,7 +1424,12 @@ export function createServer(
         });
         // Refresh once so the match becomes the current semantic cache for the next action.
         await session.accessibilitySnapshot();
-        return result;
+        return { ...result, accepted: true, safeToContinue: true, inputDispatched: false };
+      }
+      case "clear_text":
+      case "replace_text": {
+        const selector = accessibilitySelectorFromInput(action);
+        return dispatchSemanticTextAction(session, action, selector);
       }
     }
   };
@@ -1259,6 +1484,47 @@ export function createServer(
       _meta: metadata.modelOnly,
     },
     ({ deviceId, observationMode }) => connectDevice(deviceId, observationMode),
+  );
+  server.registerTool(
+    "enable_ios_accessibility",
+    {
+      title: "Enable complete iOS accessibility",
+      description:
+        "Restart SimView's temporary XCTest accessibility session for the connected iOS Simulator if automatic startup fell back to AX. It activates, but does not relaunch, the foreground app and makes XCTest the authoritative semantic tree.",
+      inputSchema: {
+        bundleId: z
+          .string()
+          .min(3)
+          .optional()
+          .describe("Foreground app bundle ID; normally omit it"),
+      },
+      outputSchema: sessionStateSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      _meta: metadata.modelOnly,
+    },
+    async ({ bundleId }) => {
+      const state = await session.enableIOSAccessibilityProvider(bundleId);
+      return toolResult(
+        `XCTest accessibility is active for ${state.iosAccessibility?.bundleId ?? state.device?.name}.`,
+        state,
+      );
+    },
+  );
+  server.registerTool(
+    "disable_ios_accessibility",
+    {
+      title: "Disable XCTest accessibility",
+      description:
+        "Stop the temporary XCTest accessibility session and return to the built-in Simulator AX provider.",
+      inputSchema: {},
+      outputSchema: sessionStateSchema,
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+      _meta: metadata.modelOnly,
+    },
+    async () => {
+      const state = await session.disableIOSAccessibilityProvider();
+      return toolResult("The temporary XCTest accessibility session was stopped.", state);
+    },
   );
 
   server.registerTool(
@@ -1344,6 +1610,7 @@ export function createServer(
       outputSchema: z.object({
         actionCount: z.number().int().min(1).max(20),
         completedActionCount: z.number().int().min(0).max(20),
+        dispatchedActionCount: z.number().int().min(0).max(20),
         failedActionIndex: z.number().int().min(0).max(19).optional(),
         durationMs: z.number().nonnegative(),
         receipts: z.array(genericObjectOutputSchema),
@@ -1352,6 +1619,29 @@ export function createServer(
     },
     async ({ actions, observe: observationMode, settleQuietMs, maxWaitMs }) => {
       const started = performance.now();
+      const preflightFailure = preflightActions(actions);
+      if (preflightFailure) {
+        const receipt = {
+          accepted: false,
+          safeToContinue: false,
+          inputDispatched: false,
+          code: preflightFailure.code,
+          retryable: false,
+          message: preflightFailure.message,
+        };
+        return toolResult(
+          "Action batch validation failed; no input was dispatched.",
+          {
+            actionCount: actions.length,
+            completedActionCount: 0,
+            dispatchedActionCount: 0,
+            failedActionIndex: preflightFailure.index,
+            durationMs: performance.now() - started,
+            receipts: [receipt],
+          },
+          true,
+        );
+      }
       const baseline =
         observationMode === "none" ? undefined : await captureObservationBaseline(session);
       const receipts: unknown[] = [];
@@ -1373,20 +1663,37 @@ export function createServer(
           failedActionIndex = index;
           receipts.push({
             accepted: false,
-            code: error instanceof Error ? error.message : "action_rejected",
+            safeToContinue: false,
+            inputDispatched: false,
+            code: "action_rejected",
             retryable: false,
+            ...(error instanceof Error ? { message: error.message } : {}),
           });
           break;
         }
       }
-      const hardStop = receipts.some(
+      let hardStop = receipts.some(
         (receipt) =>
           receipt !== null &&
           typeof receipt === "object" &&
           "safeToContinue" in receipt &&
           receipt.safeToContinue === false,
       );
-      if (observationMode === "none") {
+      const inputDispatched = receipts.some(
+        (receipt) =>
+          receipt !== null &&
+          typeof receipt === "object" &&
+          "inputDispatched" in receipt &&
+          receipt.inputDispatched === true,
+      );
+      const dispatchedActionCount = receipts.filter(
+        (receipt) =>
+          receipt !== null &&
+          typeof receipt === "object" &&
+          "inputDispatched" in receipt &&
+          receipt.inputDispatched === true,
+      ).length;
+      if (observationMode === "none" || !inputDispatched) {
         return toolResult(
           failedActionIndex === undefined
             ? "Ordered actions completed."
@@ -1394,6 +1701,7 @@ export function createServer(
           {
             actionCount: actions.length,
             completedActionCount: failedActionIndex ?? receipts.length,
+            dispatchedActionCount,
             ...(failedActionIndex !== undefined ? { failedActionIndex } : {}),
             durationMs: performance.now() - started,
             receipts,
@@ -1401,11 +1709,27 @@ export function createServer(
           hardStop,
         );
       }
+      const finalAction = actions[receipts.length - 1];
+      const finalReceiptBeforeObservation = receipts.at(-1);
+      const verifiedAccessibility =
+        (finalAction?.type === "clear_text" || finalAction?.type === "replace_text") &&
+        finalReceiptBeforeObservation !== null &&
+        typeof finalReceiptBeforeObservation === "object" &&
+        "accepted" in finalReceiptBeforeObservation &&
+        finalReceiptBeforeObservation.accepted === true &&
+        "verification" in finalReceiptBeforeObservation &&
+        finalReceiptBeforeObservation.verification !== null &&
+        typeof finalReceiptBeforeObservation.verification === "object" &&
+        "stable" in finalReceiptBeforeObservation.verification &&
+        finalReceiptBeforeObservation.verification.stable === true
+          ? session.latestAccessibilityObservation
+          : undefined;
       const observed = await observe({
         mode: observationMode,
         afterRevision: baseline?.afterRevision,
         afterVisualRevision: baseline?.afterVisualRevision,
         postAction: { beforeSemanticHash: baseline?.beforeSemanticHash },
+        verifiedAccessibility,
         settleQuietMs,
         maxWaitMs,
       });
@@ -1420,11 +1744,29 @@ export function createServer(
         observeOutputSchema.parse(observed.structuredContent),
         finalVerification,
       );
+      if (!reconciledObservation.stability.stable) {
+        hardStop = true;
+        const finalIndex = receipts.length - 1;
+        const prior = receipts[finalIndex];
+        if (prior && typeof prior === "object") {
+          receipts[finalIndex] = {
+            ...prior,
+            accepted: false,
+            safeToContinue: false,
+            inputDispatched: true,
+            code: "post_action_unconfirmed",
+            retryable: true,
+            interaction: "interaction" in prior ? prior.interaction : prior,
+          };
+          failedActionIndex ??= finalIndex;
+        }
+      }
       return toolResultWithContent(
         observed.content,
         {
           actionCount: actions.length,
           completedActionCount: failedActionIndex ?? receipts.length,
+          dispatchedActionCount,
           ...(failedActionIndex !== undefined ? { failedActionIndex } : {}),
           durationMs: performance.now() - started,
           receipts,
@@ -1433,6 +1775,94 @@ export function createServer(
         hardStop,
       );
     },
+  );
+  const semanticTextInputSchema = {
+    ...semanticSelectorFields,
+  };
+  const runStandaloneSemanticAction = async (action: z.output<typeof actionSchema>) => {
+    const failure = preflightActions([action]);
+    if (failure) {
+      return toolResult(
+        "Semantic action validation failed; no input was dispatched.",
+        {
+          accepted: false,
+          safeToContinue: false,
+          inputDispatched: false,
+          code: failure.code,
+          retryable: false,
+          message: failure.message,
+        },
+        true,
+      );
+    }
+    try {
+      const receipt = await dispatchAction(action);
+      const failed =
+        receipt !== null &&
+        typeof receipt === "object" &&
+        "accepted" in receipt &&
+        receipt.accepted === false;
+      return toolResult(
+        failed ? "Semantic action was not confirmed." : "Semantic action accepted and verified.",
+        receipt,
+        failed,
+      );
+    } catch (error) {
+      return toolResult(
+        "Semantic action was rejected; no further action was attempted.",
+        {
+          accepted: false,
+          safeToContinue: false,
+          inputDispatched: false,
+          code: "action_rejected",
+          retryable: false,
+          ...(error instanceof Error ? { message: error.message } : {}),
+        },
+        true,
+      );
+    }
+  };
+  server.registerTool(
+    "clear_text",
+    {
+      title: "Clear text",
+      description:
+        "Focus an editable semantic target, clear its current text with native key input, and verify that it is empty.",
+      inputSchema: semanticTextInputSchema,
+      outputSchema: genericObjectOutputSchema,
+    },
+    (selector) =>
+      runStandaloneSemanticAction(actionSchema.parse({ type: "clear_text", ...selector })),
+  );
+  server.registerTool(
+    "replace_text",
+    {
+      title: "Replace text",
+      description:
+        "Focus and clear an editable semantic target, type replacement text, and verify its exact native value.",
+      inputSchema: { ...semanticTextInputSchema, text: z.string().max(10_000) },
+      outputSchema: genericObjectOutputSchema,
+    },
+    ({ text, ...selector }) =>
+      runStandaloneSemanticAction(actionSchema.parse({ type: "replace_text", ...selector, text })),
+  );
+  server.registerTool(
+    "press_key",
+    {
+      title: "Press key",
+      description:
+        "Press a named keyboard key. Use this for Return, Tab, Delete, Escape, or arrow-key navigation instead of embedding control characters in type_text.",
+      inputSchema: {
+        key: namedKeySchema,
+        modifiers: z.array(keyModifierSchema).max(4).optional(),
+        repeat: z.number().int().min(1).max(100).default(1),
+      },
+      outputSchema: genericObjectOutputSchema,
+    },
+    ({ key, modifiers, repeat }) =>
+      runStandaloneSemanticAction(
+        actionSchema.parse({ type: "press_key", key, modifiers, repeat }),
+      ),
   );
   registerAppBridgeTools(server, session, metadata);
   registerAccessibilityTools(server, session, metadata, observe);
@@ -1589,11 +2019,12 @@ function registerAccessibilityTools(
   }>,
 ): void {
   const selectorSchema = {
-    ref: z.string().optional(),
-    identifier: z.string().optional(),
-    role: z.string().optional(),
-    name: z.string().optional(),
-    value: z.string().optional(),
+    ref: z.string().min(1).optional(),
+    identifier: z.string().min(1).optional(),
+    role: z.string().min(1).optional(),
+    name: z.string().min(1).optional(),
+    value: z.string().min(1).optional(),
+    placeholder: z.string().min(1).optional(),
     exact: z.boolean().default(true),
     index: z.number().int().min(0).optional(),
   };
@@ -1685,7 +2116,7 @@ function registerAccessibilityTools(
     },
   );
   const tapElement = async (selector: unknown) => {
-    const input = z.object(tapElementInputSchema).parse(selector);
+    const input = z.object(tapElementInputSchema).strict().parse(selector);
     let parsedSelector: z.output<typeof accessibilitySelectorSchema>;
     if (input.query) {
       const search = await session.searchElements({
@@ -1709,7 +2140,7 @@ function registerAccessibilityTools(
         ref: winner.element.ref,
       });
     } else {
-      parsedSelector = accessibilitySelectorSchema.parse(input);
+      parsedSelector = accessibilitySelectorFromInput(input);
     }
     const resolution = await session.resolveNativeTap(parsedSelector);
     if (!resolution.accepted || !resolution.point || !resolution.target) {
@@ -1759,16 +2190,24 @@ function registerAccessibilityTools(
           destinationVerification,
         )
       : undefined;
+    const observationUnconfirmed = Boolean(
+      reconciledObservation && !reconciledObservation.stability.stable,
+    );
+    const hardStop = Boolean(verificationFailed || observationUnconfirmed);
     const structured = {
       ...resolution,
-      accepted: !verificationFailed,
-      code: verificationFailed ? verificationCode : resolution.code,
+      accepted: !hardStop,
+      code: verificationFailed
+        ? verificationCode
+        : observationUnconfirmed
+          ? "post_action_unconfirmed"
+          : resolution.code,
       retryable: verificationFailed
         ? destinationVerification?.status === "unstable" ||
           destinationVerification?.status === "unavailable"
-        : false,
+        : observationUnconfirmed,
       inputDispatched: true,
-      safeToContinue: !verificationFailed,
+      safeToContinue: !hardStop,
       interaction: resolution,
       selector: parsedSelector,
       receipt,
@@ -1790,9 +2229,9 @@ function registerAccessibilityTools(
             { type: "text" as const, text },
           ],
           structured,
-          Boolean(verificationFailed),
+          hardStop,
         )
-      : toolResult(text, structured, Boolean(verificationFailed));
+      : toolResult(text, structured, hardStop);
   };
   const inspectPoint = async (x: number, y: number) => {
     const accessibility = await session.inspectPoint(x, y);
@@ -1892,12 +2331,12 @@ function registerAccessibilityTools(
     {
       title: "Find elements",
       description:
-        "Find React Native or accessible elements by identifier, role, name, value, or a generation-scoped ref.",
+        "Find React Native or accessible elements by identifier, role, name, value, placeholder, or a generation-scoped ref.",
       inputSchema: selectorSchema,
       outputSchema: findElementsOutputSchema,
     },
     async (selector) => {
-      const result = await session.findElements(accessibilitySelectorSchema.parse(selector));
+      const result = await session.findElements(accessibilitySelectorFromInput(selector));
       return toolResult(`Matched ${result.count} accessible element(s).`, result);
     },
   );
@@ -2061,7 +2500,7 @@ function registerAccessibilityTools(
     },
     async ({ state, timeoutMs, ...selector }) => {
       const started = performance.now();
-      const parsedSelector = accessibilitySelectorSchema.parse(selector);
+      const parsedSelector = accessibilitySelectorFromInput(selector);
       const result = await session.requireClient().request("accessibility.wait", {
         deviceId: session.device?.id,
         udid: session.device?.udid,
@@ -2141,7 +2580,24 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
       inputSchema: { text: z.string().max(10_000) },
       outputSchema: acceptedOutputSchema,
     },
-    ({ text }) => input({ method: "input.typeText", params: { text } }),
+    ({ text }) => {
+      if (containsUnsupportedTextControl(text)) {
+        return Promise.resolve(
+          toolResult(
+            "type_text accepts literal printable text only; use press_key for Return, Tab, or Delete.",
+            {
+              accepted: false,
+              safeToContinue: false,
+              inputDispatched: false,
+              code: "special_key_requires_press_key",
+              retryable: false,
+            },
+            true,
+          ),
+        );
+      }
+      return input({ method: "input.typeText", params: { text } });
+    },
   );
   server.registerTool(
     "press_button",

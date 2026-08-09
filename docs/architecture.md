@@ -103,8 +103,12 @@ The process model has two layers:
   and prevents later batch actions.
   `perform_actions` combines up to 20 ordered inputs, post-action settling, and
   one semantic observation in a single MCP round trip by default.
-- Element inspection first captures the native accessibility snapshot as a
-  safe fallback,
+- Element inspection first captures the native accessibility snapshot. On iOS,
+  session establishment automatically starts an authenticated persistent XCTest
+  runner against the existing foreground app process; it becomes the primary
+  snapshot and retained-tree point provider without relaunching the app.
+  Simulator AX is retained as the startup/runtime fallback. Android uses its
+  bounded UIAutomator provider. Inspection
   then optionally discovers loopback Metro targets through `metro-bridge`. A
   target must match the selected device by logical device ID, device name,
   or be the sole unambiguous target. React Native inspection returns only a
@@ -116,8 +120,9 @@ The process model has two layers:
   If Metro MCP owns the older single-client Hermes connection,
   SimView validates and reuses its loopback CDP multiplexer record; newer
   multi-debugger targets connect directly. Any discovery, CDP, measurement, or
-  validation failure returns the complete native snapshot with a bounded fallback
-  reason instead of a partially merged tree. Every CDP evaluation is
+  validation failure returns the complete native snapshot instead of a partially
+  merged tree. The absence of a Metro target is normal native context, not a
+  fallback error. Every CDP evaluation is
   deadline-bounded so a stale Hermes session cannot leave the preview request
   pending indefinitely. Source paths are reduced relative to an explicit
   `SIMVIEW_PROJECT_ROOT` or the nearest package root inferred from symbolicated

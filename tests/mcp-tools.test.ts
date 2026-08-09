@@ -19,7 +19,7 @@ import {
   hasMcpUiCapability,
   isDesktopMcpAppHost,
 } from "../packages/mcp/src/server";
-import { SimViewSession } from "../packages/mcp/src/session";
+import { type AccessibilityObservation, SimViewSession } from "../packages/mcp/src/session";
 
 const appCalledTools = [
   "app_connect_device",
@@ -43,6 +43,8 @@ const appCalledTools = [
 const modelOnlyTools = [
   "add_annotation",
   "connect_device",
+  "disable_ios_accessibility",
+  "enable_ios_accessibility",
   "get_accessibility_tree",
   "get_simview_state",
   "get_ui_context",
@@ -998,7 +1000,7 @@ describe("MCP app tools", () => {
       snapshot,
       screenContext: {
         schemaVersion: 1,
-        kind: "uikit",
+        kind: "native-ios",
         platform: "ios",
         capturedAt: snapshot.capturedAt,
         frameId: "frame-observed",
@@ -1175,7 +1177,7 @@ describe("MCP app tools", () => {
         snapshot: refreshed,
         screenContext: {
           schemaVersion: 1,
-          kind: "uikit",
+          kind: "native-ios",
           platform: "ios",
           capturedAt: source.capturedAt,
           frameId: "frame-source",
@@ -1276,6 +1278,449 @@ describe("MCP app tools", () => {
     }
   });
 
+  test("preflights action batches before observation or input", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("batch-preflight", "Batch Preflight");
+    let observations = 0;
+    let dispatches = 0;
+    session.accessibilityObserve = async () => {
+      observations += 1;
+      throw new Error("preflight must not observe");
+    };
+    session.dispatchInput = async () => {
+      dispatches += 1;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "batch-preflight-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const duplicate = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          actions: [
+            { type: "tap_element", ref: "ax:generation:merchant" },
+            { type: "tap_element", ref: "ax:generation:merchant" },
+          ],
+          observe: "semantic",
+        },
+      });
+      expect(duplicate.isError).toBe(true);
+      expect(duplicate.structuredContent).toMatchObject({
+        completedActionCount: 0,
+        dispatchedActionCount: 0,
+        failedActionIndex: 1,
+        receipts: [
+          {
+            accepted: false,
+            safeToContinue: false,
+            inputDispatched: false,
+            code: "reused_generation_ref",
+          },
+        ],
+      });
+
+      const missingSelector = await client.callTool({
+        name: "perform_actions",
+        arguments: { actions: [{ type: "tap_element" }], observe: "semantic" },
+      });
+      expect(missingSelector.isError).toBe(true);
+      expect(missingSelector.structuredContent).toMatchObject({
+        completedActionCount: 0,
+        dispatchedActionCount: 0,
+        failedActionIndex: 0,
+        receipts: [{ code: "invalid_action", inputDispatched: false }],
+      });
+      expect(observations).toBe(0);
+      expect(dispatches).toBe(0);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("rejects control text and dispatches named key input", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("named-key", "Named Key");
+    const dispatched: unknown[] = [];
+    session.dispatchInput = async (input) => {
+      dispatched.push(input);
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "named-key-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const controlText = await client.callTool({
+        name: "type_text",
+        arguments: { text: "\b\b" },
+      });
+      expect(controlText.isError).toBe(true);
+      expect(controlText.structuredContent).toMatchObject({
+        accepted: false,
+        safeToContinue: false,
+        inputDispatched: false,
+        code: "special_key_requires_press_key",
+      });
+      const pressed = await client.callTool({
+        name: "press_key",
+        arguments: { key: "delete", modifiers: ["command"], repeat: 2 },
+      });
+      expect(pressed.isError).not.toBe(true);
+      expect(dispatched).toEqual([
+        {
+          method: "input.key",
+          params: { key: "delete", modifiers: ["command"], repeat: 2 },
+        },
+      ]);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("targets placeholder-only fields and verifies exact replacement text", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("replace-text", "Replace Text");
+    let value = "0.00";
+    const field = () => ({
+      ref: "ax:amount",
+      role: "AXTextField",
+      ...(value ? { value } : {}),
+      ...(value === "0.00" || value === "" ? { placeholder: "0.00" } : {}),
+      enabled: true,
+      actions: ["AXPress"],
+      frame: {
+        points: { x: 20, y: 200, width: 200, height: 44 },
+        normalized: { x: 0.05, y: 0.23, width: 0.5, height: 0.05 },
+      },
+    });
+    session.lastAccessibility = interactionSnapshot("replace-before", field() as never);
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: field(),
+        point: { x: 0.3, y: 0.25 },
+      }) as never;
+    let observations = 0;
+    session.accessibilityObserve = async () => {
+      observations += 1;
+      return {
+        snapshot: interactionSnapshot("replace-current", field() as never),
+        revision: "2",
+        eventChanged: true,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      } as never;
+    };
+    const dispatched: unknown[] = [];
+    session.dispatchInput = async (input) => {
+      dispatched.push(input);
+      if (input.method === "input.key" && input.params.key === "delete") value = "";
+      if (input.method === "input.typeText") value = input.params.text;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "replace-text-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "replace_text",
+        arguments: { placeholder: "0.00", text: "42.80" },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        accepted: true,
+        safeToContinue: true,
+        inputDispatched: true,
+        verification: { expectedValue: "42.80", actualValue: "42.80" },
+      });
+      expect(observations).toBe(1);
+      expect(dispatched).toEqual([
+        { method: "input.tap", params: { x: 0.3, y: 0.25 } },
+        { method: "input.key", params: { key: "select-all" } },
+        { method: "input.key", params: { key: "delete" } },
+        { method: "input.typeText", params: { text: "42.80" } },
+      ]);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("reuses the final verified text snapshot instead of waiting for another batch change", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("verified-text-batch", "Verified Text Batch");
+    let value = "0.00";
+    const field = () => ({
+      ref: `ax:amount:${value}`,
+      role: "AXTextField",
+      value,
+      ...(value === "0.00" ? { placeholder: "0.00" } : {}),
+      enabled: true,
+      actions: ["AXPress"],
+      frame: {
+        points: { x: 20, y: 200, width: 200, height: 44 },
+        normalized: { x: 0.05, y: 0.23, width: 0.5, height: 0.05 },
+      },
+    });
+    const baseline = interactionSnapshot("verified-text-before", field() as never);
+    session.lastAccessibility = baseline;
+    let latestObservation: AccessibilityObservation = {
+      snapshot: baseline,
+      revision: "1",
+      eventChanged: false,
+      stable: true,
+      timedOut: false,
+      strategy: "snapshot-diff",
+      settledAt: baseline.capturedAt,
+      fallbackUsed: false,
+      captureCount: 1,
+      changeSource: "none",
+    };
+    Object.defineProperty(session, "accessibilityRevision", {
+      get: () => latestObservation.revision,
+    });
+    Object.defineProperty(session, "latestAccessibilityObservation", {
+      get: () => latestObservation,
+    });
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: field(),
+        point: { x: 0.3, y: 0.25 },
+      }) as never;
+    let observations = 0;
+    session.accessibilityObserve = async () => {
+      observations += 1;
+      const snapshot = interactionSnapshot("verified-text-after", field() as never);
+      session.lastAccessibility = snapshot;
+      latestObservation = {
+        snapshot,
+        revision: "2",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "snapshot-diff",
+        settledAt: snapshot.capturedAt,
+        fallbackUsed: false,
+        captureCount: 1,
+        changeSource: "none",
+      };
+      return latestObservation as never;
+    };
+    session.preparedElementSnapshot = async () =>
+      ({
+        snapshot: session.lastAccessibility,
+        screenContext: {
+          schemaVersion: 1,
+          kind: "native-ios",
+          platform: "ios",
+          capturedAt: session.lastAccessibility?.capturedAt,
+          frameId: "verified-text-frame",
+          simulatorName: "Verified Text Batch",
+          viewport: { x: 0, y: 0, width: 402, height: 874 },
+          orientation: "portrait",
+        },
+      }) as never;
+    session.dispatchInput = async (input) => {
+      if (input.method === "input.key" && input.params.key === "delete") value = "";
+      if (input.method === "input.typeText") value = input.params.text;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "verified-text-batch-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          observe: "semantic",
+          actions: [{ type: "replace_text", placeholder: "0.00", text: "42.80" }],
+        },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        completedActionCount: 1,
+        dispatchedActionCount: 1,
+        receipts: [
+          {
+            accepted: true,
+            verification: { expectedValue: "42.80", actualValue: "42.80" },
+          },
+        ],
+        observation: {
+          sourceRevisions: { accessibility: "2" },
+          stability: { stable: true },
+          postAction: {
+            accessibility: {
+              event: "changed",
+              semantic: "changed",
+              strategy: "snapshot-diff",
+              stable: true,
+              forcedRetry: false,
+              fallbackUsed: false,
+              captureCount: 1,
+              changeSource: "none",
+            },
+          },
+        },
+      });
+      expect(observations).toBe(1);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("does not retry dispatched text when post-write target correlation is ambiguous", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("ambiguous-text", "Ambiguous Text");
+    const target = {
+      ref: "ax:notes-before",
+      role: "AXTextField",
+      placeholder: "What was this for?",
+      value: "",
+      enabled: true,
+      frame: {
+        points: { x: 32, y: 690, width: 338, height: 64 },
+        normalized: { x: 0.08, y: 0.79, width: 0.84, height: 0.08 },
+      },
+    };
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target,
+        point: { x: 0.5, y: 0.83 },
+      }) as never;
+    const postField = (ref: string, x: number) => ({
+      ...target,
+      ref,
+      placeholder: undefined,
+      value: "Dinner",
+      frame: {
+        points: { x: x * 402, y: 690, width: 220, height: 64 },
+        normalized: { x, y: 0.79, width: 0.55, height: 0.08 },
+      },
+    });
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: interactionSnapshot(
+          "ambiguous-current",
+          postField("ax:notes-left", 0.05) as never,
+          postField("ax:notes-right", 0.45) as never,
+        ),
+        revision: "2",
+        eventChanged: true,
+        stable: true,
+        timedOut: false,
+        strategy: "snapshot-diff",
+        settledAt: "2026-08-09T08:00:00.000Z",
+      }) as never;
+    const dispatched: unknown[] = [];
+    session.dispatchInput = async (input) => {
+      dispatched.push(input);
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "ambiguous-text-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          observe: "none",
+          actions: [{ type: "replace_text", placeholder: "What was this for?", text: "Dinner" }],
+        },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        actionCount: 1,
+        completedActionCount: 0,
+        dispatchedActionCount: 1,
+        failedActionIndex: 0,
+        receipts: [
+          {
+            accepted: false,
+            safeToContinue: false,
+            inputDispatched: true,
+            code: "text_replacement_unconfirmed",
+            retryable: false,
+            retryInput: false,
+            retryObservation: true,
+          },
+        ],
+      });
+      expect(dispatched).toHaveLength(4);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("hard-stops after one fresh observation cannot confirm post-action stability", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("unstable-post-action", "Unstable Post Action");
+    const target = interactionNode("ax:continue", "Continue", 0.3, 0.4);
+    let observations = 0;
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target,
+        point: { x: 0.4, y: 0.425 },
+      }) as never;
+    session.accessibilityObserve = async () => {
+      observations += 1;
+      const baseline = observations === 1;
+      return {
+        snapshot: interactionSnapshot(baseline ? "before" : `after-${observations}`, target),
+        revision: String(observations),
+        eventChanged: !baseline,
+        stable: baseline,
+        timedOut: !baseline,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      } as never;
+    };
+    session.dispatchInput = async () => ({ accepted: true });
+    const server = createServer(session);
+    const client = new Client({ name: "unstable-post-action-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: { identifier: "invoice-card", observe: "semantic" },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        accepted: false,
+        safeToContinue: false,
+        inputDispatched: true,
+        code: "post_action_unconfirmed",
+        retryable: true,
+        interaction: { accepted: true },
+        observation: {
+          stability: { stable: false },
+          postAction: { accessibility: { forcedRetry: true, stable: false } },
+        },
+      });
+      expect(observations).toBe(3);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
   test("re-resolves a generation-scoped ref and taps only the fresh native frame", async () => {
     const session = new SimViewSession();
     const oldTarget = interactionNode("ax:old", "Invoice #30363063", 0.1, 0.2);
@@ -1317,6 +1762,40 @@ describe("MCP app tools", () => {
     });
     expect(inspected).toEqual([{ x: 0.65, y: 0.625 }]);
     expect(observationRequests).toEqual([{ afterRevision: undefined }, { afterRevision: "2" }]);
+  });
+
+  test("re-resolves a native field identified only by its placeholder", async () => {
+    const session = new SimViewSession();
+    const field = {
+      ref: "ax:merchant",
+      role: "AXTextField",
+      placeholder: "Merchant",
+      enabled: true,
+      actions: ["AXPress"],
+      frame: {
+        points: { x: 20, y: 200, width: 200, height: 44 },
+        normalized: { x: 0.05, y: 0.23, width: 0.5, height: 0.05 },
+      },
+    };
+    session.lastAccessibility = interactionSnapshot("placeholder-before", field as never);
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: interactionSnapshot("placeholder-fresh", field as never),
+        revision: "2",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "ios-axp",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+    session.inspectPoint = async () => field;
+
+    expect(await session.resolveNativeTap({ placeholder: "Merchant", exact: true })).toMatchObject({
+      accepted: true,
+      fingerprint: { placeholder: "Merchant", role: "AXTextField" },
+      target: { ref: "ax:merchant" },
+      hitTest: true,
+    });
   });
 
   test("preserves indexed row identity when repeated invoices reorder during refresh", async () => {
@@ -2020,6 +2499,7 @@ describe("MCP app tools", () => {
       expect(result.structuredContent).toMatchObject({
         actionCount: 2,
         completedActionCount: 0,
+        dispatchedActionCount: 1,
         failedActionIndex: 0,
         receipts: [
           {

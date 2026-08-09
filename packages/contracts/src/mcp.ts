@@ -1,7 +1,12 @@
 import { z } from "zod";
 import { accessibilityNodeSchema } from "./accessibility";
 import { annotationSchema } from "./annotation";
-import { deviceDescriptionSchema, probeStatusSchema, probeTargetSchema } from "./protocol";
+import {
+  deviceDescriptionSchema,
+  iosAccessibilityStatusSchema,
+  probeStatusSchema,
+  probeTargetSchema,
+} from "./protocol";
 
 export const sessionStateSchema = z.object({
   reviewId: z.string().uuid(),
@@ -18,6 +23,7 @@ export const sessionStateSchema = z.object({
   annotations: z.array(annotationSchema),
   codec: z.enum(["h264", "mjpeg"]),
   connected: z.boolean(),
+  iosAccessibility: iosAccessibilityStatusSchema.optional(),
 });
 
 export const deviceListSchema = z.object({

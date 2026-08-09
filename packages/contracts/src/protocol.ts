@@ -176,6 +176,17 @@ const acceptedResultSchema = z.object({ accepted: z.literal(true) }).passthrough
 export const observationModeSchema = z.enum(["hybrid", "semantic"]);
 export type ObservationMode = z.infer<typeof observationModeSchema>;
 
+export const iosAccessibilityStatusSchema = z.object({
+  schemaVersion: z.literal(1),
+  status: z.enum(["native-ready", "enhanced-ready", "unavailable"]),
+  activeProvider: z.enum(["core-simulator-ax", "core-simulator-xctest"]),
+  xctestAvailability: z.enum(["ready", "unavailable"]).optional(),
+  legacyQuality: z.enum(["complete", "partial", "degraded"]).optional(),
+  reason: z.string().optional(),
+  bundleId: z.string().optional(),
+});
+export type IOSAccessibilityStatus = z.infer<typeof iosAccessibilityStatusSchema>;
+
 export const gestureWaypointSchema = normalizedPointSchema.extend({
   timestampMs: z.number().finite().min(0).max(5_000),
 });
@@ -396,8 +407,23 @@ export const methodSchemas = {
   },
   "input.key": {
     params: z.object({
-      usage: z.number().int().nonnegative(),
-      phase: z.enum(["down", "up"]),
+      key: z.enum([
+        "delete",
+        "return",
+        "enter",
+        "tab",
+        "escape",
+        "arrow-up",
+        "arrow-down",
+        "arrow-left",
+        "arrow-right",
+        "select-all",
+      ]),
+      modifiers: z
+        .array(z.enum(["command", "shift", "option", "control"]))
+        .max(4)
+        .optional(),
+      repeat: z.number().int().min(1).max(100).optional(),
     }),
     result: acceptedResultSchema,
   },
@@ -441,6 +467,18 @@ export const methodSchemas = {
       timeoutMs: z.number().int().min(1).max(30_000),
     }),
     result: waitResultSchema,
+  },
+  "accessibility.providerStatus": {
+    params: selectedDeviceParamsSchema,
+    result: iosAccessibilityStatusSchema,
+  },
+  "accessibility.enableXCTestProvider": {
+    params: selectedDeviceParamsSchema.extend({ bundleId: z.string().min(3).optional() }),
+    result: iosAccessibilityStatusSchema,
+  },
+  "accessibility.disableXCTestProvider": {
+    params: selectedDeviceParamsSchema,
+    result: iosAccessibilityStatusSchema,
   },
   "probe.status": { params: emptyParamsSchema, result: probeStatusSchema },
   "probe.target": { params: selectedDeviceParamsSchema, result: probeTargetSchema },

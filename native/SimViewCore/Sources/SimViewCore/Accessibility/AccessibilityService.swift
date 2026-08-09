@@ -60,7 +60,7 @@ func captureAccessibilitySnapshotWithRetry(
 }
 
 func validateAccessibilitySelector(_ selector: [String: Any]) throws {
-    let fields = ["ref", "identifier", "role", "name", "value"]
+    let fields = ["ref", "identifier", "role", "name", "value", "placeholder"]
     let hasMatchingField = fields.contains { key in
         guard let value = selector[key] as? String else { return false }
         return !value.isEmpty
@@ -68,13 +68,183 @@ func validateAccessibilitySelector(_ selector: [String: Any]) throws {
     guard hasMatchingField else {
         throw SimViewError(
             "PARAMETER_INVALID",
-            "An accessibility selector requires ref, identifier, role, name, or value"
+            "An accessibility selector requires ref, identifier, role, name, value, or placeholder"
         )
+    }
+}
+
+func normalizedAccessibilityTextValue(_ value: Any?) -> String? {
+    SVAccessibilityStringValue(value)
+}
+
+func projectAccessibilitySnapshot(
+    _ input: [String: Any],
+    scope: String
+) throws -> [String: Any] {
+    guard ["full", "visible", "interactive"].contains(scope) else {
+        throw SimViewError(
+            "PARAMETER_INVALID",
+            "accessibility scope must be full, visible, or interactive"
+        )
+    }
+    guard let root = input["root"] as? [String: Any] else { return input }
+
+    var snapshot = input
+    let classified = classifyAccessibilitySnapshot(snapshot)
+    snapshot = classified.snapshot
+
+    let projectedRoot: [String: Any]?
+    switch scope {
+    case "full":
+        projectedRoot = root
+    case "visible":
+        projectedRoot = projectAccessibilityNode(root, visibleOnly: true, interactiveOnly: false)
+    default:
+        projectedRoot = projectAccessibilityNode(root, visibleOnly: true, interactiveOnly: true)
+    }
+    snapshot["root"] = projectedRoot ?? rootWithoutChildren(root)
+
+    var stats = snapshot["stats"] as? [String: Any] ?? [:]
+    let capturedCount = (stats["nodeCount"] as? NSNumber)?.intValue ?? countAccessibilityNodes(root)
+    let projectedCount = countAccessibilityNodes(snapshot["root"] as? [String: Any] ?? [:])
+    stats["projectedNodeCount"] = projectedCount
+    stats["droppedChildCount"] = max(0, capturedCount - projectedCount)
+    stats["provider"] = stats["provider"] ?? snapshot["source"] ?? "core-simulator-ax"
+    snapshot["stats"] = stats
+    snapshot["scope"] = scope
+    return snapshot
+}
+
+func classifyAccessibilitySnapshot(
+    _ input: [String: Any]
+) -> (snapshot: [String: Any], hollowContainerCount: Int) {
+    guard let root = input["root"] as? [String: Any] else { return (input, 0) }
+    let hollowCount = countHollowAccessibilityContainers(root)
+    var snapshot = input
+    var stats = snapshot["stats"] as? [String: Any] ?? [:]
+    stats["hollowContainerCount"] = hollowCount
+    stats["provider"] = stats["provider"] ?? snapshot["source"] ?? "core-simulator-ax"
+    if hollowCount > 0, (stats["truncated"] as? Bool) != true {
+        stats["quality"] = "degraded"
+        stats["reason"] = "hollow-native-containers"
+    }
+    snapshot["stats"] = stats
+    return (snapshot, hollowCount)
+}
+
+private func projectAccessibilityNode(
+    _ node: [String: Any],
+    visibleOnly: Bool,
+    interactiveOnly: Bool
+) -> [String: Any]? {
+    guard node["hidden"] as? Bool != true else { return nil }
+    let children = accessibilityChildDictionaries(node).compactMap {
+        projectAccessibilityNode($0, visibleOnly: visibleOnly, interactiveOnly: interactiveOnly)
+    }
+    let isVisible = !visibleOnly || accessibilityNodeIsVisible(node)
+    let isUseful = !interactiveOnly || accessibilityNodeIsInteractive(node)
+    guard !children.isEmpty || (isVisible && isUseful) else { return nil }
+
+    var value = node
+    if children.isEmpty {
+        value.removeValue(forKey: "children")
+    } else {
+        value["children"] = children
+    }
+    return value
+}
+
+private func accessibilityNodeIsVisible(_ node: [String: Any]) -> Bool {
+    if let fraction = accessibilityNumber(node["visibleFraction"]) { return fraction > 0 }
+    return accessibilityFrameHasPositiveArea(node)
+}
+
+private func accessibilityNodeIsInteractive(_ node: [String: Any]) -> Bool {
+    let role = (node["role"] as? String ?? "").lowercased()
+    let usefulRoles = [
+        "button", "checkbox", "link", "menu", "radio", "search", "slider",
+        "switch", "textfield", "textarea", "tab", "statictext", "heading",
+    ]
+    return usefulRoles.contains { role.contains($0) }
+        || (node["actions"] as? [Any])?.isEmpty == false
+        || ["identifier", "label", "title"].contains { node[$0] != nil }
+}
+
+private func countHollowAccessibilityContainers(_ node: [String: Any]) -> Int {
+    let children = accessibilityChildDictionaries(node)
+    var count = children.reduce(0) { $0 + countHollowAccessibilityContainers($1) }
+    guard accessibilityNodeIsVisible(node), hollowContainerKind(node) != nil else { return count }
+    let hasExpectedDescendant = children.contains { accessibilitySubtreeHasActionableNode($0) }
+    if !hasExpectedDescendant { count += 1 }
+    return count
+}
+
+private func hollowContainerKind(_ node: [String: Any]) -> String? {
+    let description = ["role", "subrole", "roleDescription", "label", "title"]
+        .compactMap { node[$0] as? String }
+        .joined(separator: " ")
+        .lowercased()
+        .replacingOccurrences(of: "_", with: " ")
+    if description.contains("tabgroup") || description.contains("tab group")
+        || description.contains("tab bar")
+    {
+        return "tab"
+    }
+    if description.contains("navigation bar") || description.contains("nav bar")
+        || description.contains("toolbar")
+    {
+        return "navigation"
+    }
+    return nil
+}
+
+private func accessibilitySubtreeHasActionableNode(_ node: [String: Any]) -> Bool {
+    let role = (node["role"] as? String ?? "").lowercased()
+    if ["button", "radio", "tab", "menu"].contains(where: role.contains)
+        || (node["actions"] as? [Any])?.isEmpty == false
+    {
+        return true
+    }
+    return accessibilityChildDictionaries(node).contains(where: accessibilitySubtreeHasActionableNode)
+}
+
+private func accessibilityFrameHasPositiveArea(_ node: [String: Any]) -> Bool {
+    guard let points = (node["frame"] as? [String: Any])?["points"] as? [String: Any] else {
+        return false
+    }
+    return (accessibilityNumber(points["width"]) ?? 0) > 0
+        && (accessibilityNumber(points["height"]) ?? 0) > 0
+}
+
+private func countAccessibilityNodes(_ node: [String: Any]) -> Int {
+    guard !node.isEmpty else { return 0 }
+    return 1 + accessibilityChildDictionaries(node).reduce(0) { $0 + countAccessibilityNodes($1) }
+}
+
+private func rootWithoutChildren(_ root: [String: Any]) -> [String: Any] {
+    var value = root
+    value.removeValue(forKey: "children")
+    return value
+}
+
+private func accessibilityNumber(_ value: Any?) -> Double? {
+    if let value = value as? Double { return value }
+    if let value = value as? NSNumber { return value.doubleValue }
+    return nil
+}
+
+private func accessibilityChildDictionaries(_ node: [String: Any]) -> [[String: Any]] {
+    (node["children"] as? [Any] ?? []).compactMap { child in
+        if let child = child as? [String: Any] { return child }
+        if let child = child as? NSDictionary { return child as? [String: Any] }
+        return nil
     }
 }
 
 final class AccessibilityService: @unchecked Sendable {
     private var screenBounds: [String: (width: Double, height: Double)] = [:]
+    private var xctestProviders: [String: XCTestAccessibilityProviderSession] = [:]
+    private var xctestBundleIDs: [String: String] = [:]
     private let observation: AccessibilityObservationCoordinator
     private var observedUDID: String?
     private(set) var observationStrategy = "snapshot-diff"
@@ -83,10 +253,99 @@ final class AccessibilityService: @unchecked Sendable {
         self.observation = observation
     }
 
-    var available: Bool { SVAccessibilityBridge.isAvailable() }
+    deinit {
+        for provider in xctestProviders.values { provider.stop() }
+    }
+
+    var available: Bool {
+        SVAccessibilityBridge.isAvailable()
+            || XCTestAccessibilityProviderSession.availability().availability == .ready
+    }
+
+    func providerStatus(udid: String, assessLegacy: Bool = true) -> [String: Any] {
+        if xctestProviders[udid] != nil {
+            var result: [String: Any] = [
+                "schemaVersion": 1,
+                "status": "enhanced-ready",
+                "activeProvider": IOSAccessibilityProviderKind.xctest.rawValue,
+            ]
+            if let bundleID = xctestBundleIDs[udid] { result["bundleId"] = bundleID }
+            return result
+        }
+        let availability = XCTestAccessibilityProviderSession.availability()
+        guard assessLegacy else {
+            return [
+                "schemaVersion": 1,
+                "status": "native-ready",
+                "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
+                "xctestAvailability": availability.availability.rawValue,
+            ]
+        }
+        do {
+            let legacy = try captureLegacySnapshot(udid: udid, maxNodes: 240)
+            let classified = classifyAccessibilitySnapshot(legacy).snapshot
+            let stats = classified["stats"] as? [String: Any] ?? [:]
+            let quality = stats["quality"] as? String ?? "complete"
+            if quality != "degraded" && quality != "partial" {
+                return [
+                    "schemaVersion": 1,
+                    "status": "native-ready",
+                    "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
+                    "legacyQuality": quality,
+                    "reason": availability.reason ?? "xctest-primary-available",
+                ].compactMapValues { $0 }
+            }
+            return [
+                "schemaVersion": 1,
+                "status": "unavailable",
+                "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
+                "legacyQuality": quality,
+                "reason": availability.reason ?? "xctest-provider-unavailable",
+            ]
+        } catch {
+            return [
+                "schemaVersion": 1,
+                "status": "unavailable",
+                "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
+                "reason": error.localizedDescription,
+            ]
+        }
+    }
+
+    func enableXCTestProvider(udid: String, bundleID: String) throws -> [String: Any] {
+        if xctestBundleIDs[udid] != bundleID {
+            xctestProviders.removeValue(forKey: udid)?.stop()
+            xctestBundleIDs.removeValue(forKey: udid)
+        }
+        if xctestProviders[udid] == nil {
+            xctestProviders[udid] = try XCTestAccessibilityProviderSession.start(
+                udid: udid,
+                targetBundleID: bundleID
+            )
+            xctestBundleIDs[udid] = bundleID
+        }
+        // XCTest snapshots do not emit AXP revision events. Keeping the legacy
+        // observer active makes every wait take the bounded AXP fallback path
+        // and can also inject unrelated revisions into the XCTest session.
+        stopObservation(udid: udid)
+        var status = providerStatus(udid: udid, assessLegacy: false)
+        status["bundleId"] = bundleID
+        return status
+    }
+
+    func disableXCTestProvider(udid: String) -> [String: Any] {
+        xctestProviders.removeValue(forKey: udid)?.stop()
+        xctestBundleIDs.removeValue(forKey: udid)
+        return providerStatus(udid: udid, assessLegacy: false)
+    }
 
     @discardableResult
     func startObservation(udid: String, onEvent: @escaping @Sendable () -> Void) -> Bool {
+        if xctestProviders[udid] != nil {
+            stopObservation(udid: udid)
+            observationStrategy = "snapshot-diff"
+            return false
+        }
         if observedUDID == udid { return observationStrategy == "ios-axp" }
         if let observedUDID, let device = SimulatorRuntime.object(udid: observedUDID) {
             SVAccessibilityBridge.stopObservingDevice(device)
@@ -121,24 +380,27 @@ final class AccessibilityService: @unchecked Sendable {
         scope: String = "interactive",
         maxNodes: Int = 1_200
     ) throws -> [String: Any] {
-        guard let device = SimulatorRuntime.object(udid: udid) else {
-            throw SimViewError("DEVICE_NOT_BOOTED", "Simulator \(udid) is unavailable")
-        }
         do {
-            let boundedMaxNodes = UInt(max(1, min(maxNodes, 5_000)))
-            var snapshot = try captureAccessibilitySnapshotWithRetry {
-                try SVAccessibilityBridge.snapshot(forDevice: device, maxNodes: boundedMaxNodes)
+            let captured: [String: Any]
+            if let provider = xctestProviders[udid] {
+                do {
+                    captured = try provider.snapshot(maxNodes: maxNodes, timeout: 5)
+                } catch {
+                    provider.stop()
+                    xctestProviders.removeValue(forKey: udid)
+                    xctestBundleIDs.removeValue(forKey: udid)
+                    captured = try captureLegacySnapshot(udid: udid, maxNodes: maxNodes)
+                }
+            } else {
+                captured = try captureLegacySnapshot(udid: udid, maxNodes: maxNodes)
             }
-            if scope == "interactive", let root = snapshot["root"] as? [String: Any] {
-                snapshot["root"] = interactiveTree(root) ?? root
-            }
+            let snapshot = try projectAccessibilitySnapshot(captured, scope: scope)
             if let screen = snapshot["screen"] as? [String: Any],
                 let width = number(screen["width"]),
                 let height = number(screen["height"])
             {
                 screenBounds[udid] = (width, height)
             }
-            snapshot["scope"] = scope
             return snapshot
         } catch let error as SimViewError {
             throw error
@@ -152,6 +414,9 @@ final class AccessibilityService: @unchecked Sendable {
     }
 
     func elementAtPoint(udid: String, x: Double, y: Double) throws -> [String: Any] {
+        if let provider = xctestProviders[udid] {
+            return try provider.elementAtPoint(x: x, y: y, timeout: 5)
+        }
         guard let device = SimulatorRuntime.object(udid: udid) else {
             throw SimViewError("DEVICE_NOT_BOOTED", "Simulator \(udid) is unavailable")
         }
@@ -181,6 +446,16 @@ final class AccessibilityService: @unchecked Sendable {
             throw error
         } catch {
             throw SimViewError("ACCESSIBILITY_UNAVAILABLE", error.localizedDescription)
+        }
+    }
+
+    private func captureLegacySnapshot(udid: String, maxNodes: Int) throws -> [String: Any] {
+        guard let device = SimulatorRuntime.object(udid: udid) else {
+            throw SimViewError("DEVICE_NOT_BOOTED", "Simulator \(udid) is unavailable")
+        }
+        let boundedMaxNodes = UInt(max(1, min(maxNodes, 5_000)))
+        return try captureAccessibilitySnapshotWithRetry {
+            try SVAccessibilityBridge.snapshot(forDevice: device, maxNodes: boundedMaxNodes)
         }
     }
 
@@ -268,27 +543,6 @@ final class AccessibilityService: @unchecked Sendable {
         )
     }
 
-    private func interactiveTree(_ node: [String: Any]) -> [String: Any]? {
-        var value = node
-        let children = childDictionaries(node).compactMap(interactiveTree)
-        let role = (node["role"] as? String ?? "").lowercased()
-        let actions = node["actions"] as? [String] ?? []
-        let usefulRole = [
-            "button", "checkbox", "link", "menu", "radio", "search", "slider",
-            "switch", "textfield", "textarea", "tab", "statictext", "heading",
-        ].contains { role.contains($0) }
-        let useful =
-            usefulRole
-            || !actions.isEmpty
-            || node["identifier"] != nil
-            || node["label"] != nil
-            || node["title"] != nil
-            || !children.isEmpty
-        guard useful, node["hidden"] as? Bool != true else { return nil }
-        if children.isEmpty { value.removeValue(forKey: "children") } else { value["children"] = children }
-        return value
-    }
-
     private func collectMatches(
         _ node: [String: Any],
         selector: [String: Any],
@@ -301,6 +555,7 @@ final class AccessibilityService: @unchecked Sendable {
             ("role", ["role"]),
             ("name", ["label", "title"]),
             ("value", ["value"]),
+            ("placeholder", ["placeholder"]),
         ]
         let matched = fields.allSatisfy { selectorKey, nodeKeys in
             guard let expected = string(selector[selectorKey]) else { return true }

@@ -189,7 +189,7 @@ export function annotationMessageContext(annotation: Annotation): string[] {
   ].filter((value): value is string => Boolean(value));
 }
 
-export function createUIKitScreenContext(
+export function createNativeIOSScreenContext(
   state: Pick<SessionState, "device" | "frameId" | "route" | "component">,
   uiContext: UiContext | undefined,
   annotations: readonly Annotation[],
@@ -212,7 +212,7 @@ export function createUIKitScreenContext(
 
   return {
     schemaVersion: 1,
-    kind: "uikit",
+    kind: "native-ios",
     platform: "ios",
     capturedAt: new Date().toISOString(),
     frameId: state.frameId ?? "current",
@@ -251,7 +251,7 @@ export function createNativeScreenContext(
       source: state.component?.source,
     };
   }
-  return createUIKitScreenContext(state, uiContext, annotations);
+  return createNativeIOSScreenContext(state, uiContext, annotations);
 }
 
 export function annotationMessageScreenContext(context: ScreenContext | undefined): string[] {

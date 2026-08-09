@@ -2287,8 +2287,12 @@ function SimView() {
                 <span class="probe-live">React Native</span>
               ) : selectedPlatform === "android" ? (
                 <span class="probe-live">UIAutomator</span>
+              ) : state.iosAccessibility?.status === "enhanced-ready" ? (
+                <span class="probe-live">XCTest</span>
               ) : (
-                uiContext?.status.connected && <span class="probe-live">UIKit</span>
+                <span class="probe-live">
+                  {uiContext?.status.connected ? "UIKit + AX" : "Simulator AX"}
+                </span>
               )}
             </div>
             {sceneOpen &&

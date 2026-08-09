@@ -20,6 +20,7 @@ await mkdir(artifacts, { recursive: true });
 await $`bun run check`;
 await $`bun run build:packages`;
 await $`bun run build:probe`;
+await $`bun run build:xctest-provider`;
 await $`bun run build:android-agent`;
 await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64`;
 await $`bun run --cwd ${join(root, "packages/cli")} compile`;
@@ -35,6 +36,10 @@ const packagedProbe = join(root, "packages/core/bin/libSimViewProbe.dylib");
 const packagedAndroidAgent = join(root, "packages/core/bin/simview-android-agent.jar");
 const androidAgentSha256 = new Bun.CryptoHasher("sha256")
   .update(await Bun.file(packagedAndroidAgent).arrayBuffer())
+  .digest("hex");
+const xctestProviderManifest = join(root, "packages/core/bin/xctest-provider/manifest.json");
+const xctestProviderManifestSha256 = new Bun.CryptoHasher("sha256")
+  .update(await Bun.file(xctestProviderManifest).arrayBuffer())
   .digest("hex");
 const releaseBinaries = [
   { path: cliBinary, identifier: "com.simview.cli" },
@@ -78,6 +83,9 @@ await Promise.all([
   cp(packagedCore, join(archiveStage, "bin/simview-core")),
   cp(packagedProbe, join(archiveStage, "bin/libSimViewProbe.dylib")),
   cp(packagedAndroidAgent, join(archiveStage, "bin/simview-android-agent.jar")),
+  cp(join(root, "packages/core/bin/xctest-provider"), join(archiveStage, "bin/xctest-provider"), {
+    recursive: true,
+  }),
   cp(join(root, "README.md"), join(archiveStage, "README.md")),
   cp(join(root, "LICENSE"), join(archiveStage, "LICENSE")),
   cp(join(root, "THIRD_PARTY_NOTICES.md"), join(archiveStage, "THIRD_PARTY_NOTICES.md")),
@@ -115,6 +123,12 @@ await writeFile(
           version,
           protocolVersion: ANDROID_AGENT_PROTOCOL_VERSION,
           sha256: androidAgentSha256,
+        },
+        {
+          name: "xctest-provider/manifest.json",
+          version,
+          protocolVersion: 1,
+          sha256: xctestProviderManifestSha256,
         },
       ],
       files: releaseFiles,

@@ -83,8 +83,8 @@ export const reactNativeScreenContextSchema = screenContextCommonSchema.extend({
   activityName: z.string().optional(),
 });
 
-export const uiKitScreenContextSchema = screenContextCommonSchema.extend({
-  kind: z.literal("uikit"),
+export const nativeIOSScreenContextSchema = screenContextCommonSchema.extend({
+  kind: z.literal("native-ios"),
   route: z.string().optional(),
   component: z.string().optional(),
   testID: z.string().optional(),
@@ -109,7 +109,7 @@ export const androidScreenContextSchema = screenContextCommonSchema.extend({
 
 export const screenContextSchema = z.discriminatedUnion("kind", [
   reactNativeScreenContextSchema,
-  uiKitScreenContextSchema,
+  nativeIOSScreenContextSchema,
   androidScreenContextSchema,
 ]);
 
@@ -157,7 +157,7 @@ export type ReactNativeElementMetadata = z.infer<typeof reactNativeElementMetada
 export type ReactNativeElementSnapshot = z.infer<typeof reactNativeElementSnapshotSchema>;
 export type ElementSnapshot = z.infer<typeof elementSnapshotSchema>;
 export type ReactNativeScreenContext = z.infer<typeof reactNativeScreenContextSchema>;
-export type UiKitScreenContext = z.infer<typeof uiKitScreenContextSchema>;
+export type NativeIOSScreenContext = z.infer<typeof nativeIOSScreenContextSchema>;
 export type AndroidScreenContext = z.infer<typeof androidScreenContextSchema>;
 export type ScreenContext = z.infer<typeof screenContextSchema>;
 export type ElementFallbackReason = z.infer<typeof elementFallbackReasonSchema>;

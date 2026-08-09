@@ -610,12 +610,13 @@ final class SimViewServer: @unchecked Sendable {
             sendResult(["accepted": true, "inputMethod": method], requestID: request.id, to: connection)
         case "input.key":
             if selectedDevice?.platform == .android {
-                throw SimViewError("INPUT_KEY_UNSUPPORTED", "Raw HID usages require the Android agent")
+                throw SimViewError("INPUT_KEY_UNSUPPORTED", "Named keyboard input is unavailable on Android")
             }
             try prepareHID()
-            hid.key(
-                usage: UInt32(try request.params.int("usage")),
-                down: try request.params.string("phase") == "down"
+            try hid.pressKey(
+                request.params.string("key"),
+                modifiers: request.params["modifiers"]?.arrayValue?.compactMap(\.stringValue) ?? [],
+                repeatCount: request.params["repeat"]?.intValue ?? 1
             )
             sendResult(["accepted": true], requestID: request.id, to: connection)
         case "input.button":
@@ -696,6 +697,37 @@ final class SimViewServer: @unchecked Sendable {
                 : try accessibility.wait(
                     udid: device.nativeIdentifier, selector: selector, state: state, timeoutMs: timeout)
             sendResult(result, requestID: request.id, to: connection)
+        case "accessibility.providerStatus":
+            let device = try requireIOSDevice(request.deviceIdentifier)
+            sendResult(
+                accessibility.providerStatus(udid: device.nativeIdentifier),
+                requestID: request.id,
+                to: connection
+            )
+        case "accessibility.enableXCTestProvider":
+            let device = try requireIOSDevice(request.deviceIdentifier)
+            let detectedTarget = probe.target(udid: device.nativeIdentifier)["bundleId"] as? String
+            guard let bundleID = request.params["bundleId"]?.stringValue ?? detectedTarget else {
+                throw SimViewError(
+                    "ACCESSIBILITY_TARGET_UNAVAILABLE",
+                    "No foreground third-party application could be selected for XCTest accessibility"
+                )
+            }
+            sendResult(
+                try accessibility.enableXCTestProvider(
+                    udid: device.nativeIdentifier,
+                    bundleID: bundleID
+                ),
+                requestID: request.id,
+                to: connection
+            )
+        case "accessibility.disableXCTestProvider":
+            let device = try requireIOSDevice(request.deviceIdentifier)
+            sendResult(
+                accessibility.disableXCTestProvider(udid: device.nativeIdentifier),
+                requestID: request.id,
+                to: connection
+            )
         case "device.context":
             let device = try selectDevice(request.deviceIdentifier)
             guard device.platform == .android else {

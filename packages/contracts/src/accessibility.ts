@@ -27,6 +27,7 @@ export const accessibilityNodeSchema: z.ZodType<AccessibilityNode> = z.lazy(() =
       hidden: z.boolean().optional(),
       focused: z.boolean().optional(),
       expanded: z.boolean().optional(),
+      visibleFraction: z.number().finite().min(0).max(1).optional(),
       actions: z.array(z.string()).optional(),
       kind: z.enum(["component", "host"]).optional(),
       component: z.string().optional(),
@@ -69,6 +70,7 @@ export interface AccessibilityNode {
   hidden?: boolean | undefined;
   focused?: boolean | undefined;
   expanded?: boolean | undefined;
+  visibleFraction?: number | undefined;
   actions?: string[] | undefined;
   kind?: "component" | "host" | undefined;
   component?: string | undefined;
@@ -95,17 +97,22 @@ export function flattenAccessibilityTree(root: AccessibilityNode): Accessibility
   return nodes;
 }
 
+export const accessibilitySnapshotSourceSchema = z.enum([
+  "core-simulator-ax",
+  "core-simulator-xctest",
+  "android-uiautomator",
+  "android-agent-uiautomation",
+  "android-agent-shell",
+]);
+
+export type AccessibilitySnapshotSource = z.infer<typeof accessibilitySnapshotSourceSchema>;
+
 export const accessibilitySnapshotSchema = z
   .object({
     schemaVersion: z.literal(1),
     snapshotId: z.string(),
     capturedAt: z.string(),
-    source: z.enum([
-      "core-simulator-ax",
-      "android-uiautomator",
-      "android-agent-uiautomation",
-      "android-agent-shell",
-    ]),
+    source: accessibilitySnapshotSourceSchema,
     scope: z.enum(["interactive", "visible", "full"]),
     screen: normalizedRectSchema,
     root: accessibilityNodeSchema,
@@ -115,6 +122,10 @@ export const accessibilitySnapshotSchema = z
       quality: z.enum(["complete", "partial", "degraded"]).optional(),
       reason: z.string().optional(),
       capturedBudget: z.number().int().positive().optional(),
+      provider: z.string().min(1).optional(),
+      projectedNodeCount: z.number().int().nonnegative().optional(),
+      droppedChildCount: z.number().int().nonnegative().optional(),
+      hollowContainerCount: z.number().int().nonnegative().optional(),
     }),
   })
   .passthrough();
@@ -222,6 +233,7 @@ export function stableAccessibilityEntries(root: AccessibilityNode): StableAcces
       hidden: node.hidden,
       focused: node.focused,
       expanded: node.expanded,
+      visibleFraction: node.visibleFraction,
       actions: node.actions?.slice().sort(),
       frame: node.frame?.normalized,
     } satisfies Record<string, unknown>;
@@ -235,18 +247,28 @@ const selectorFields = {
   role: z.string().min(1).optional(),
   name: z.string().min(1).optional(),
   value: z.string().min(1).optional(),
+  placeholder: z.string().min(1).optional(),
   exact: z.boolean().default(true),
   index: z.number().int().nonnegative().optional(),
 };
 
 export const accessibilitySelectorSchema = z
   .object(selectorFields)
+  .strict()
   .refine(
     (selector) =>
       Boolean(
-        selector.ref || selector.identifier || selector.role || selector.name || selector.value,
+        selector.ref ||
+          selector.identifier ||
+          selector.role ||
+          selector.name ||
+          selector.value ||
+          selector.placeholder,
       ),
-    { message: "An accessibility selector requires ref, identifier, role, name, or value" },
+    {
+      message:
+        "An accessibility selector requires ref, identifier, role, name, value, or placeholder",
+    },
   );
 
 export type AccessibilitySelector = z.infer<typeof accessibilitySelectorSchema>;
@@ -265,6 +287,7 @@ export const semanticNodeSummarySchema = z.object({
   hidden: z.boolean().optional(),
   focused: z.boolean().optional(),
   expanded: z.boolean().optional(),
+  visibleFraction: z.number().finite().min(0).max(1).optional(),
   actions: z.array(z.string()).optional(),
   interactive: z.boolean().optional(),
   component: z.string().optional(),
@@ -300,6 +323,7 @@ export function summarizeAccessibilityNode(node: AccessibilityNode): SemanticNod
     ...(node.hidden !== undefined ? { hidden: node.hidden } : {}),
     ...(node.focused !== undefined ? { focused: node.focused } : {}),
     ...(node.expanded !== undefined ? { expanded: node.expanded } : {}),
+    ...(node.visibleFraction !== undefined ? { visibleFraction: node.visibleFraction } : {}),
     ...(node.actions?.length ? { actions: node.actions } : {}),
     ...(node.interactive !== undefined ? { interactive: node.interactive } : {}),
     ...(node.component ? { component: node.component } : {}),
@@ -325,13 +349,7 @@ export const elementSearchMatchSchema = z.object({
   exact: z.boolean(),
   // Search results can combine native and Fiber projections. Provenance keeps
   // a partial projection from being mistaken for a degraded native snapshot.
-  source: z.enum([
-    "core-simulator-ax",
-    "android-uiautomator",
-    "android-agent-uiautomation",
-    "android-agent-shell",
-    "react-native-fiber",
-  ]),
+  source: z.union([accessibilitySnapshotSourceSchema, z.literal("react-native-fiber")]),
   snapshotId: z.string().min(1),
 });
 

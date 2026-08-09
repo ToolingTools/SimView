@@ -631,6 +631,7 @@ final class ProtocolTests: XCTestCase {
     func testAccessibilitySelectorRequiresAMatchingField() throws {
         XCTAssertThrowsError(try validateAccessibilitySelector([:]))
         XCTAssertNoThrow(try validateAccessibilitySelector(["identifier": "submit"]))
+        XCTAssertNoThrow(try validateAccessibilitySelector(["placeholder": "Merchant"]))
         XCTAssertThrowsError(try validateAccessibilitySelector(["exact": true]))
     }
 

@@ -11,6 +11,12 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
+/// Converts an accessibility text attribute to the stable wire representation.
+/// Accessibility values are occasionally returned as NSNumber (for example,
+/// SwiftUI tab selection state), but the public accessibility node contract is
+/// intentionally textual.
+FOUNDATION_EXPORT NSString *_Nullable SVAccessibilityStringValue(id _Nullable value);
+
 @interface SVAccessibilityBridge : NSObject
 
 + (BOOL)isAvailable;

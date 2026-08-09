@@ -5,13 +5,16 @@ import {
   accessibilityObserveResultSchema,
   accessibilityResourceSchema,
   accessibilitySelectorSchema,
+  accessibilitySnapshotSchema,
   annotationGeometrySchema,
   deviceDescriptionSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
+  elementSearchMatchSchema,
   elementSearchQuerySchema,
   elementTreeOutputSchema,
   elementTreePageSchema,
   inspectPointOutputSchema,
+  iosAccessibilityStatusSchema,
   methodSchemas,
   parseDeviceDescription,
   parseMethodParams,
@@ -33,12 +36,38 @@ describe("shared protocol contracts", () => {
 
     expect(params.codecs).toEqual(["h264", "mjpeg"]);
     expect(result.codec).toBe("h264");
-    expect(result.protocolVersion).toBe(3);
+    expect(result.protocolVersion).toBe(4);
   });
 
   test("rejects empty accessibility selectors", () => {
     expect(accessibilitySelectorSchema.safeParse({}).success).toBe(false);
     expect(accessibilitySelectorSchema.parse({ identifier: "submit" }).exact).toBe(true);
+    expect(accessibilitySelectorSchema.parse({ placeholder: "Merchant" })).toMatchObject({
+      placeholder: "Merchant",
+      exact: true,
+    });
+    expect(
+      accessibilitySelectorSchema.safeParse({ identifier: "submit", unsupported: true }).success,
+    ).toBe(false);
+  });
+
+  test("uses named bounded key input instead of raw HID usages", () => {
+    expect(
+      methodSchemas["input.key"].params.parse({
+        key: "delete",
+        modifiers: ["command"],
+        repeat: 100,
+      }),
+    ).toEqual({ key: "delete", modifiers: ["command"], repeat: 100 });
+    expect(
+      methodSchemas["input.key"].params.safeParse({ key: "delete", repeat: 101 }).success,
+    ).toBe(false);
+    expect(methodSchemas["input.key"].params.parse({ key: "select-all" })).toEqual({
+      key: "select-all",
+    });
+    expect(methodSchemas["input.key"].params.safeParse({ usage: 42, phase: "down" }).success).toBe(
+      false,
+    );
   });
 
   test("bounds semantic element searches", () => {
@@ -194,6 +223,60 @@ describe("shared protocol contracts", () => {
         },
       }),
     ).toMatchObject({ id: "android:emulator-5554", serial: "emulator-5554" });
+  });
+
+  test("reports the primary iOS accessibility provider without approval state", () => {
+    expect(
+      iosAccessibilityStatusSchema.parse({
+        schemaVersion: 1,
+        status: "enhanced-ready",
+        activeProvider: "core-simulator-xctest",
+        bundleId: "studio.churro.spenny",
+      }),
+    ).toMatchObject({
+      status: "enhanced-ready",
+      activeProvider: "core-simulator-xctest",
+    });
+    expect(
+      iosAccessibilityStatusSchema.safeParse({
+        schemaVersion: 1,
+        status: "approval-required",
+        activeProvider: "core-simulator-ax",
+      }).success,
+    ).toBe(false);
+  });
+
+  test("accepts XCTest as native snapshot and search provenance", () => {
+    const snapshot = {
+      schemaVersion: 1,
+      snapshotId: "xctest-snapshot",
+      capturedAt: "2026-08-09T01:11:24Z",
+      source: "core-simulator-xctest",
+      scope: "visible",
+      screen: { x: 0, y: 0, width: 402, height: 874 },
+      root: { ref: "ax:xctest-snapshot:0", role: "AXApplication", label: "Spenny" },
+      stats: {
+        nodeCount: 1,
+        truncated: false,
+        quality: "complete",
+        provider: "core-simulator-xctest",
+      },
+    };
+
+    expect(accessibilitySnapshotSchema.parse(snapshot).source).toBe("core-simulator-xctest");
+    expect(parseMethodResult("accessibility.snapshot", snapshot).source).toBe(
+      "core-simulator-xctest",
+    );
+    expect(
+      elementSearchMatchSchema.parse({
+        element: { ref: "ax:xctest-snapshot:1", role: "AXButton", label: "Continue" },
+        score: 1,
+        matchedFields: ["name"],
+        exact: true,
+        source: "core-simulator-xctest",
+        snapshotId: "xctest-snapshot",
+      }).source,
+    ).toBe("core-simulator-xctest");
   });
 
   test("accepts bounded rectangular annotations", () => {

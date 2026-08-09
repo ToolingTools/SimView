@@ -23,6 +23,7 @@ import {
   annotationMutationSchema,
   type ElementFallbackReason,
   type ElementTreeOutput,
+  type IOSAccessibilityStatus,
   normalizedPointSchema,
   relayAuthenticationSchema,
   relayInputSchema,
@@ -153,6 +154,7 @@ type DestinationSelectorSuggestion = {
   role?: string;
   name?: string;
   value?: string;
+  placeholder?: string;
   exact: true;
 };
 
@@ -194,6 +196,7 @@ export class SimViewSession {
   #semanticRefresh = new Map<string, Promise<ElementTreeOutput>>();
   #semanticGeneration = 0;
   #visualObservationTail: Promise<void> = Promise.resolve();
+  #iosAccessibility: IOSAccessibilityStatus | undefined;
 
   get connectionGeneration(): number {
     return this.#connectionGeneration;
@@ -205,6 +208,10 @@ export class SimViewSession {
 
   get accessibilityStrategy(): AccessibilityObservation["strategy"] | undefined {
     return this.#latestAccessibilityObservation?.strategy;
+  }
+
+  get latestAccessibilityObservation(): AccessibilityObservation | undefined {
+    return this.#latestAccessibilityObservation;
   }
 
   get accessibilityResourceUri(): string {
@@ -259,6 +266,7 @@ export class SimViewSession {
           observationMode: this.#observationMode,
         });
         this.device = capture.device;
+        await this.#refreshIOSAccessibilityStatus();
         if (options.startRelay === true) this.startRelay();
         void this.#primeObservation();
       } catch (error) {
@@ -316,6 +324,7 @@ export class SimViewSession {
       if (this.client) await this.client.close();
       this.client = nextClient;
       this.device = capture.device;
+      await this.#refreshIOSAccessibilityStatus();
       this.frameId = undefined;
       this.#latestObservation = undefined;
       this.#clearSemanticState();
@@ -359,7 +368,52 @@ export class SimViewSession {
       annotations: [...this.annotations.values()],
       codec: this.codec,
       connected: this.client?.connected === true,
+      iosAccessibility: this.#iosAccessibility,
     };
+  }
+
+  async enableIOSAccessibilityProvider(bundleId?: string): Promise<SessionState> {
+    const client = this.requireClient();
+    const device = this.device;
+    if (device?.platform !== "ios") {
+      throw new Error("The XCTest accessibility provider is available only for iOS Simulators");
+    }
+    this.#iosAccessibility = await client.request("accessibility.enableXCTestProvider", {
+      ...selectedDeviceParams(device),
+      bundleId,
+    });
+    this.#clearSemanticState();
+    await this.#primeObservation();
+    return this.state();
+  }
+
+  async disableIOSAccessibilityProvider(): Promise<SessionState> {
+    const client = this.requireClient();
+    const device = this.device;
+    if (device?.platform !== "ios") return this.state();
+    this.#iosAccessibility = await client.request("accessibility.disableXCTestProvider", {
+      ...selectedDeviceParams(device),
+    });
+    this.#clearSemanticState();
+    return this.state();
+  }
+
+  async #refreshIOSAccessibilityStatus(): Promise<void> {
+    const device = this.device;
+    if (device?.platform !== "ios") {
+      this.#iosAccessibility = undefined;
+      return;
+    }
+    const client = this.requireClient();
+    try {
+      this.#iosAccessibility = await client.request("accessibility.enableXCTestProvider", {
+        ...selectedDeviceParams(device),
+      });
+    } catch {
+      this.#iosAccessibility = await client.request("accessibility.providerStatus", {
+        ...selectedDeviceParams(device),
+      });
+    }
   }
 
   browserUrl(): string | undefined {
@@ -664,10 +718,11 @@ export class SimViewSession {
       return output;
     }
 
+    const fallbackReason = this.#metroInspector.fallbackReason;
     return this.#accessibilityElementOutput(
       accessibility,
       frameId,
-      this.#metroInspector.fallbackReason ?? "metro-target-unavailable",
+      fallbackReason === "metro-target-unavailable" ? undefined : fallbackReason,
     );
   }
 
@@ -718,7 +773,7 @@ export class SimViewSession {
     frameId: string,
     fallbackReason?: ElementFallbackReason,
   ): Promise<ElementTreeOutput> {
-    const screenContext = await this.#uiKitScreenContext(accessibility, frameId);
+    const screenContext = await this.#nativeIOSScreenContext(accessibility, frameId);
     this.lastElements = accessibility;
     this.lastScreenContext = screenContext;
     return {
@@ -882,7 +937,12 @@ export class SimViewSession {
       return { accepted: false, code: "target_not_found", retryable: true };
     }
     const fingerprint = semanticFingerprint(discovery);
-    if (!fingerprint.identifier && !fingerprint.name && !fingerprint.value) {
+    if (
+      !fingerprint.identifier &&
+      !fingerprint.name &&
+      !fingerprint.value &&
+      !fingerprint.placeholder
+    ) {
       return { accepted: false, code: "native_target_unconfirmed", retryable: false };
     }
     const corroboration =
@@ -1731,7 +1791,7 @@ export class SimViewSession {
     this.#reviewImageDirectories.clear();
   }
 
-  async #uiKitScreenContext(
+  async #nativeIOSScreenContext(
     accessibility: AccessibilitySnapshot,
     frameId: string,
   ): Promise<ScreenContext> {
@@ -1775,7 +1835,7 @@ export class SimViewSession {
     }
     const base = {
       schemaVersion: 1 as const,
-      kind: "uikit" as const,
+      kind: "native-ios" as const,
       platform: "ios" as const,
       capturedAt: new Date().toISOString(),
       frameId,
@@ -2020,6 +2080,8 @@ function strategyForSnapshot(
   switch (snapshot.source) {
     case "core-simulator-ax":
       return "ios-axp";
+    case "core-simulator-xctest":
+      return "snapshot-diff";
     case "android-agent-shell":
       return "android-shell-dump";
     case "android-uiautomator":
@@ -2054,7 +2116,8 @@ function matchingElements(
       matches(node.testID ?? node.identifier, selector.identifier) &&
       matches(node.role, selector.role) &&
       matchesAccessibleName(node.label ?? node.title, selector.name, exact) &&
-      matches(node.value, selector.value),
+      matches(node.value, selector.value) &&
+      matches(node.placeholder, selector.placeholder),
   );
 }
 
@@ -2062,7 +2125,13 @@ function destinationSelectorSuggestions(
   snapshot: AccessibilitySnapshot,
   selector: AccessibilitySelector,
 ): DestinationSelectorSuggestion[] {
-  const requested = [selector.identifier, selector.name, selector.value, selector.role]
+  const requested = [
+    selector.identifier,
+    selector.name,
+    selector.value,
+    selector.placeholder,
+    selector.role,
+  ]
     .filter(isDefined)
     .map(normalizeSearchText)
     .filter(Boolean);
@@ -2075,8 +2144,9 @@ function destinationSelectorSuggestions(
       const identifier = node.testID ?? node.identifier;
       const name = node.label ?? node.title;
       const value = node.valueRedacted ? undefined : node.value;
+      const placeholder = node.placeholder;
       const role = node.role ?? node.roleDescription;
-      const fields = [identifier, name, value, role]
+      const fields = [identifier, name, value, placeholder, role]
         .filter(isDefined)
         .map(normalizeSearchText)
         .filter(Boolean);
@@ -2093,11 +2163,20 @@ function destinationSelectorSuggestions(
         value
           ? { suggestion: { value, exact: true } as DestinationSelectorSuggestion, weight: 1 }
           : undefined,
+        placeholder
+          ? {
+              suggestion: { placeholder, exact: true } as DestinationSelectorSuggestion,
+              weight: 0.9,
+            }
+          : undefined,
       ].filter(isDefined);
       const best = options
         .map((option) => {
           const raw =
-            option.suggestion.identifier ?? option.suggestion.name ?? option.suggestion.value;
+            option.suggestion.identifier ??
+            option.suggestion.name ??
+            option.suggestion.value ??
+            option.suggestion.placeholder;
           const normalized = normalizeSearchText(raw ?? "");
           const optionTokens = new Set(normalized.split(" ").filter(Boolean));
           const optionOverlap = [...requestedTokens].filter((token) =>
@@ -2152,6 +2231,7 @@ type SemanticFingerprint = {
   role?: string | undefined;
   name?: string | undefined;
   value?: string | undefined;
+  placeholder?: string | undefined;
 };
 
 function semanticFingerprint(node: AccessibilityNode): SemanticFingerprint {
@@ -2160,6 +2240,7 @@ function semanticFingerprint(node: AccessibilityNode): SemanticFingerprint {
     ...((node.role ?? node.roleDescription) ? { role: node.role ?? node.roleDescription } : {}),
     ...((node.label ?? node.title) ? { name: node.label ?? node.title } : {}),
     ...(!node.valueRedacted && node.value ? { value: node.value } : {}),
+    ...(node.placeholder ? { placeholder: node.placeholder } : {}),
   };
 }
 
@@ -2174,7 +2255,8 @@ function matchesFingerprint(node: AccessibilityNode, fingerprint: SemanticFinger
         normalizeFingerprintRole(nodeRole) === normalizeFingerprintRole(fingerprint.role))) &&
     (!fingerprint.name ||
       matchesAccessibleName(node.label ?? node.title, fingerprint.name, true)) &&
-    (!fingerprint.value || (!node.valueRedacted && node.value === fingerprint.value))
+    (!fingerprint.value || (!node.valueRedacted && node.value === fingerprint.value)) &&
+    (!fingerprint.placeholder || node.placeholder === fingerprint.placeholder)
   );
 }
 

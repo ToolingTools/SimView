@@ -160,9 +160,11 @@ bun packages/cli/src/index.ts daemon prune
 
 `tree` and `observe` use the same unified inspection path as the preview: they
 return a matching development-mode React Native Fiber tree and screen/route
-context when Metro is available, with a diagnostic native accessibility
-fallback otherwise. `ax-tree` explicitly bypasses Metro and reads the iOS AX or
-Android UIAutomator hierarchy.
+context when Metro is available, with the native accessibility tree otherwise.
+`ax-tree` explicitly bypasses Metro. iOS sessions automatically start a
+temporary XCTest runner against the existing foreground app process and use it
+as the primary tree and point provider; Simulator AX is the startup fallback.
+Android reads UIAutomator.
 
 `preview` binds an authenticated relay to a random port on `127.0.0.1`. The
 session token is random, endpoints reject unauthenticated requests, and the
@@ -272,8 +274,11 @@ SimView reuses its loopback CDP multiplexer instead of competing for Hermes'
 debugger connection; Metro MCP itself is not required. SimView never
 starts Metro, serializes component props or navigation params, or attaches an
 ambiguous target to a Simulator.
-Without a matching target it atomically falls back to the frontmost
-accessibility hierarchy read through CoreSimulator or UIAutomator. An optional
+Without a matching target it uses the frontmost native accessibility hierarchy:
+the automatically started XCTest provider on iOS or UIAutomator on Android.
+XCTest activates but does not relaunch the target app, and the packaged runner
+is reused for warm snapshots during the session. Simulator AX remains available
+when XCTest cannot start. An optional
 bundled UIKit probe can explicitly relaunch one third-party app to add concrete
 view class, hit-test, controller, window, and scene context on iOS only. Android
 screen context reports the foreground package and activity when available.
