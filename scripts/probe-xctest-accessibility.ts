@@ -47,6 +47,7 @@ const temporaryProject = join(temporaryRoot, basename(sourceProject));
 
 try {
   await cp(sourceProject, temporaryProject, { recursive: true });
+  await $`xcodegen generate --spec ${join(temporaryProject, "project.yml")} --project ${temporaryProject} --quiet`;
   const scheme = join(
     temporaryProject,
     "SimViewXCTestProvider.xcodeproj/xcshareddata/xcschemes/SimViewXCTestProbe.xcscheme",

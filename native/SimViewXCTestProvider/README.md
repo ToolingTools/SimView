@@ -21,9 +21,9 @@ twice by default in the same testmanagerd session; pass `--captures 1` through
 `--captures 10` to change that diagnostic count. It exits non-zero if the test
 fails or no marked snapshot is emitted.
 
-`project.yml` is the source of truth for the committed Xcode project. After
-changing it, regenerate with `xcodegen generate --spec project.yml` from this
-directory and commit the resulting project changes.
+`project.yml` is the source of truth. Build and probe scripts generate the
+ignored Xcode project in their private temporary directories, so clean
+checkouts never depend on local generated project files.
 
 This probe is deliberately not a production provider. Productization is gated
 on proving, on every supported runtime, that the snapshot exposes controls

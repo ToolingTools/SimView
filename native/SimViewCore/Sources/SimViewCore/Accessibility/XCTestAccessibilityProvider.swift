@@ -89,10 +89,7 @@ enum XCTestProviderConfiguration {
     }
 }
 
-final class XCTestAccessibilityProviderSession: IOSAccessibilityProviding, @unchecked Sendable {
-    let kind = IOSAccessibilityProviderKind.xctest
-    let status = IOSAccessibilityProviderStatus(kind: .xctest, availability: .ready, reason: nil)
-
+final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @unchecked Sendable {
     private let lock = NSLock()
     private let connection: Int32
     private let process: Process
@@ -105,12 +102,11 @@ final class XCTestAccessibilityProviderSession: IOSAccessibilityProviding, @unch
     ) -> IOSAccessibilityProviderStatus {
         guard XCTestProviderArtifacts.locate(environment: environment) != nil else {
             return IOSAccessibilityProviderStatus(
-                kind: .xctest,
                 availability: .unavailable,
                 reason: "xctest-provider-artifacts-missing"
             )
         }
-        return IOSAccessibilityProviderStatus(kind: .xctest, availability: .ready, reason: nil)
+        return IOSAccessibilityProviderStatus(availability: .ready, reason: nil)
     }
 
     static func start(

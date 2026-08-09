@@ -620,10 +620,11 @@ const namedKeySchema = z.enum([
 const keyModifierSchema = z.enum(["command", "shift", "option", "control"]);
 
 function containsUnsupportedTextControl(value: string): boolean {
-  return [...value].some((character) => {
+  for (const character of value) {
     const codePoint = character.codePointAt(0) ?? 0;
-    return codePoint <= 31 || (codePoint >= 127 && codePoint <= 159);
-  });
+    if (codePoint <= 31 || (codePoint >= 127 && codePoint <= 159)) return true;
+  }
+  return false;
 }
 
 const actionSchema = z.discriminatedUnion("type", [
@@ -796,6 +797,18 @@ function preflightActions(
     }
   }
   return undefined;
+}
+
+function rejectedDispatchedAction(error: unknown) {
+  return {
+    accepted: false,
+    safeToContinue: false,
+    inputDispatched: true,
+    code: "action_rejected",
+    retryable: false,
+    retryInput: false,
+    ...(error instanceof Error ? { message: error.message } : {}),
+  } as const;
 }
 
 export function createServer(
@@ -1661,14 +1674,7 @@ export function createServer(
           }
         } catch (error) {
           failedActionIndex = index;
-          receipts.push({
-            accepted: false,
-            safeToContinue: false,
-            inputDispatched: false,
-            code: "action_rejected",
-            retryable: false,
-            ...(error instanceof Error ? { message: error.message } : {}),
-          });
+          receipts.push(rejectedDispatchedAction(error));
           break;
         }
       }
@@ -1810,14 +1816,7 @@ export function createServer(
     } catch (error) {
       return toolResult(
         "Semantic action was rejected; no further action was attempted.",
-        {
-          accepted: false,
-          safeToContinue: false,
-          inputDispatched: false,
-          code: "action_rejected",
-          retryable: false,
-          ...(error instanceof Error ? { message: error.message } : {}),
-        },
+        rejectedDispatchedAction(error),
         true,
       );
     }
@@ -2018,16 +2017,7 @@ function registerAccessibilityTools(
     structuredContent: Record<string, unknown>;
   }>,
 ): void {
-  const selectorSchema = {
-    ref: z.string().min(1).optional(),
-    identifier: z.string().min(1).optional(),
-    role: z.string().min(1).optional(),
-    name: z.string().min(1).optional(),
-    value: z.string().min(1).optional(),
-    placeholder: z.string().min(1).optional(),
-    exact: z.boolean().default(true),
-    index: z.number().int().min(0).optional(),
-  };
+  const selectorSchema = semanticSelectorFields;
   const tapElementInputSchema = {
     ...selectorSchema,
     query: z.string().trim().min(1).max(200).optional(),

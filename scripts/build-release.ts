@@ -38,6 +38,9 @@ const androidAgentSha256 = new Bun.CryptoHasher("sha256")
   .update(await Bun.file(packagedAndroidAgent).arrayBuffer())
   .digest("hex");
 const xctestProviderManifest = join(root, "packages/core/bin/xctest-provider/manifest.json");
+const xctestProviderMetadata = (await Bun.file(xctestProviderManifest).json()) as {
+  protocolVersion: number;
+};
 const xctestProviderManifestSha256 = new Bun.CryptoHasher("sha256")
   .update(await Bun.file(xctestProviderManifest).arrayBuffer())
   .digest("hex");
@@ -127,7 +130,7 @@ await writeFile(
         {
           name: "xctest-provider/manifest.json",
           version,
-          protocolVersion: 1,
+          protocolVersion: xctestProviderMetadata.protocolVersion,
           sha256: xctestProviderManifestSha256,
         },
       ],

@@ -22,7 +22,7 @@ consume its versioned binary protocol.
 - Full Xcode with an installed iOS Simulator runtime for iOS support
 - Android SDK Platform Tools (`adb`) for Android support
 - Bun 1.3.14 for source development only
-- JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
+- XcodeGen, JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
 
 Android support targets API 26 or later. SimView uses the user's existing ADB
 server and authorization keys; it does not pair devices, enable legacy

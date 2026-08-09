@@ -4,61 +4,34 @@ import XCTest
 
 @testable import SimViewCore
 
+private final class FailingPointProvider: XCTestAccessibilityProviding {
+    private(set) var pointRequestCount = 0
+    private(set) var stopCount = 0
+
+    func snapshot(maxNodes _: Int, timeout _: TimeInterval) throws -> [String: Any] {
+        [:]
+    }
+
+    func elementAtPoint(x _: Double, y _: Double, timeout _: TimeInterval) throws -> [String: Any] {
+        pointRequestCount += 1
+        throw SimViewError("XCTEST_PROVIDER_DISCONNECTED", "Provider disconnected")
+    }
+
+    func stop() {
+        stopCount += 1
+    }
+}
+
 final class XCTestAccessibilityProviderTests: XCTestCase {
-    func testRouterUsesXCTestAsPrimaryForCompleteSnapshot() {
-        let status = IOSAccessibilityProviderStatus(
-            kind: .xctest,
-            availability: .ready,
-            reason: nil
-        )
-        let selection = IOSAccessibilityProviderRouter.selection(
-            legacySnapshot: ["stats": ["quality": "complete"]],
-            xctestStatus: status,
-            environment: [:]
-        )
-        XCTAssertEqual(selection, .xctest)
-    }
+    func testPointFailureStopsAndEvictsProviderBeforeLegacyFallback() throws {
+        let provider = FailingPointProvider()
+        let service = AccessibilityService { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "missing-simulator", bundleID: "dev.example.app")
 
-    func testRouterUsesXCTestForDegradedSnapshot() {
-        let status = IOSAccessibilityProviderStatus(
-            kind: .xctest,
-            availability: .ready,
-            reason: nil
-        )
-        let selection = IOSAccessibilityProviderRouter.selection(
-            legacySnapshot: ["stats": ["quality": "degraded"]],
-            xctestStatus: status,
-            environment: [:]
-        )
-        XCTAssertEqual(selection, .xctest)
-    }
-
-    func testRouterFallsBackToAXPWhenXCTestIsUnavailableAndLegacyIsComplete() {
-        let status = IOSAccessibilityProviderStatus(
-            kind: .xctest,
-            availability: .unavailable,
-            reason: "artifacts-missing"
-        )
-        let selection = IOSAccessibilityProviderRouter.selection(
-            legacySnapshot: ["stats": ["quality": "complete"]],
-            xctestStatus: status,
-            environment: [:]
-        )
-        XCTAssertEqual(selection, .axp)
-    }
-
-    func testRouterFailsClosedWhenForcedProviderIsUnavailable() {
-        let status = IOSAccessibilityProviderStatus(
-            kind: .xctest,
-            availability: .unavailable,
-            reason: "artifacts-missing"
-        )
-        let selection = IOSAccessibilityProviderRouter.selection(
-            legacySnapshot: ["stats": ["quality": "complete"]],
-            xctestStatus: status,
-            environment: ["SIMVIEW_IOS_AX_PROVIDER": "xctest"]
-        )
-        XCTAssertEqual(selection, .unavailable(reason: "artifacts-missing"))
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
+        XCTAssertEqual(provider.pointRequestCount, 1)
+        XCTAssertEqual(provider.stopCount, 1)
     }
 
     func testRuntimeConfigurationAddsPrivateSessionValuesAndAbsolutePaths() throws {

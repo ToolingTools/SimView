@@ -106,7 +106,7 @@ The process model has two layers:
 - Element inspection first captures the native accessibility snapshot. On iOS,
   session establishment automatically starts an authenticated persistent XCTest
   runner against the existing foreground app process; it becomes the primary
-  snapshot and retained-tree point provider without relaunching the app.
+  snapshot provider and performs point hit-testing against a fresh tree without relaunching the app.
   Simulator AX is retained as the startup/runtime fallback. Android uses its
   bounded UIAutomator provider. Inspection
   then optionally discovers loopback Metro targets through `metro-bridge`. A

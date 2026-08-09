@@ -1,16 +1,20 @@
 import { cp, mkdir, mkdtemp, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { $ } from "bun";
 
 const root = resolve(import.meta.dir, "..");
-const project = join(root, "native/SimViewXCTestProvider/SimViewXCTestProvider.xcodeproj");
+const sourceProject = join(root, "native/SimViewXCTestProvider");
 const temporaryRoot = await mkdtemp(join(tmpdir(), "simview-xctest-provider-build-"));
+const temporaryProject = join(temporaryRoot, basename(sourceProject));
+const project = join(temporaryProject, "SimViewXCTestProvider.xcodeproj");
 const derivedData = join(temporaryRoot, "DerivedData");
 const products = join(derivedData, "Build/Products");
 const destination = join(root, "packages/core/bin/xctest-provider");
 
 try {
+  await cp(sourceProject, temporaryProject, { recursive: true });
+  await $`xcodegen generate --spec ${join(temporaryProject, "project.yml")} --project ${temporaryProject} --quiet`;
   await $`xcodebuild build-for-testing -project ${project} -scheme SimViewXCTestProbe -destination ${"generic/platform=iOS Simulator"} -derivedDataPath ${derivedData} CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES`;
   const xctestrun = (await readdir(products)).find((name) => name.endsWith(".xctestrun"));
   if (!xctestrun) throw new Error("Xcode did not produce an XCTest provider xctestrun file");

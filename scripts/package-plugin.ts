@@ -44,13 +44,6 @@ sourceFiles.push(
     absolute: true,
   }),
   join(root, "native", "SimViewXCTestProvider", "project.yml"),
-  join(
-    root,
-    "native",
-    "SimViewXCTestProvider",
-    "SimViewXCTestProvider.xcodeproj",
-    "project.pbxproj",
-  ),
   join(root, "packages", "app", "src", "preview.html"),
   join(root, "package.json"),
   join(root, "manifest.json"),

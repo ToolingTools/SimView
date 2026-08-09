@@ -20,6 +20,16 @@ if (Bun.version !== expected) {
 
 console.log(`Bun ${Bun.version}`);
 
+const xcodegen = Bun.spawn(["xcodegen", "--version"], { stdout: "pipe", stderr: "pipe" });
+const [xcodegenVersion, xcodegenStatus] = await Promise.all([
+  new Response(xcodegen.stdout).text(),
+  xcodegen.exited,
+]);
+if (xcodegenStatus !== 0) {
+  throw new Error("SimView requires XcodeGen to build the XCTest accessibility provider");
+}
+console.log(xcodegenVersion.trim());
+
 const sdkCandidates = [
   process.env.SIMVIEW_ANDROID_SDK_ROOT,
   process.env.ANDROID_SDK_ROOT,

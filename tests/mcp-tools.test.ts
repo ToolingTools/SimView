@@ -64,6 +64,38 @@ describe("MCP app tools", () => {
     );
   });
 
+  test("reports AX after an active XCTest provider falls back during capture", async () => {
+    const session = new SimViewSession();
+    session.device = iosDevice("provider-fallback", "Provider Fallback");
+    const fallbackSnapshot = resourceSnapshot("ax-fallback", "ax:root", "Fallback");
+    session.client = {
+      connected: true,
+      close: async () => {},
+      request: async (method: string) => {
+        if (method === "accessibility.enableXCTestProvider") {
+          return {
+            schemaVersion: 1,
+            status: "enhanced-ready",
+            activeProvider: "core-simulator-xctest",
+            bundleId: "dev.example.app",
+          };
+        }
+        if (method === "accessibility.snapshot") return fallbackSnapshot;
+        throw new Error(`Unexpected method ${method}`);
+      },
+    } as never;
+
+    await session.enableIOSAccessibilityProvider("dev.example.app");
+    expect(session.state().iosAccessibility?.activeProvider).toBe("core-simulator-xctest");
+    await session.accessibilitySnapshot();
+    expect(session.state().iosAccessibility).toMatchObject({
+      status: "native-ready",
+      activeProvider: "core-simulator-ax",
+      xctestAvailability: "ready",
+      reason: "xctest-provider-runtime-fallback",
+    });
+  });
+
   test("bounds device discovery and defaults to available devices", () => {
     const ready = iosDevice("00000000-0000-4000-8000-000000000001", "Ready iPhone");
     const shutdown = Array.from({ length: 40 }, (_, index) => ({
@@ -1374,6 +1406,61 @@ describe("MCP app tools", () => {
           params: { key: "delete", modifiers: ["command"], repeat: 2 },
         },
       ]);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("reports dispatched input conservatively when a semantic action throws", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("dispatched-error", "Dispatched Error");
+    session.resolveNativeTap = async () =>
+      ({
+        accepted: true,
+        code: "ready",
+        retryable: false,
+        target: {
+          ref: "ax:field",
+          identifier: "field",
+          role: "AXTextField",
+          value: "Before",
+        },
+        point: { x: 0.5, y: 0.5 },
+      }) as never;
+    session.dispatchInput = async (input) => {
+      if (input.method === "input.typeText") throw new Error("Input transport disconnected");
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "dispatched-error-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const standalone = await client.callTool({
+        name: "replace_text",
+        arguments: { identifier: "field", text: "After" },
+      });
+      expect(standalone.isError).toBe(true);
+      expect(standalone.structuredContent).toMatchObject({
+        inputDispatched: true,
+        retryInput: false,
+        code: "action_rejected",
+      });
+
+      const batch = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          observe: "none",
+          actions: [{ type: "replace_text", identifier: "field", text: "After" }],
+        },
+      });
+      expect(batch.isError).toBe(true);
+      expect(batch.structuredContent).toMatchObject({
+        completedActionCount: 0,
+        dispatchedActionCount: 1,
+        failedActionIndex: 0,
+        receipts: [{ inputDispatched: true, retryInput: false, code: "action_rejected" }],
+      });
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }

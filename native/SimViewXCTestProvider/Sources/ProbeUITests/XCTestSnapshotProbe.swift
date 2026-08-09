@@ -10,8 +10,6 @@ private let maximumFrameBytes = 16 * 1_024 * 1_024
 
 @MainActor
 final class XCTestSnapshotProbe: XCTestCase {
-    private var retainedSnapshot: [String: Any]?
-
     func testSnapshotArbitraryApplication() throws {
         XCTAssertFalse(
             targetBundleIdentifier.isEmpty,
@@ -80,7 +78,6 @@ final class XCTestSnapshotProbe: XCTestCase {
                 let budget = max(1, min(requestedBudget, 5_000))
                 do {
                     let result = try contractSnapshot(application: application, maxNodes: budget)
-                    retainedSnapshot = result
                     try writeJSON(["id": identifier, "result": result], to: socket)
                 } catch {
                     try writeJSON(
@@ -96,13 +93,7 @@ final class XCTestSnapshotProbe: XCTestCase {
                 }
             case "elementAtPoint":
                 do {
-                    let snapshot: [String: Any]
-                    if let retainedSnapshot {
-                        snapshot = retainedSnapshot
-                    } else {
-                        snapshot = try contractSnapshot(application: application, maxNodes: 5_000)
-                        retainedSnapshot = snapshot
-                    }
+                    let snapshot = try contractSnapshot(application: application, maxNodes: 5_000)
                     guard
                         let x = (request["x"] as? NSNumber)?.doubleValue,
                         let y = (request["y"] as? NSNumber)?.doubleValue,
@@ -164,11 +155,16 @@ final class XCTestSnapshotProbe: XCTestCase {
             CGRect(x: x, y: y, width: width, height: height).contains(point)
         else { return nil }
 
-        let children = node["children"] as? [[String: Any]] ?? []
-        let matches = children.compactMap { deepestActionableElement(in: $0, point: point) }
-        return matches.min { left, right in
-            frameArea(left) < frameArea(right)
-        } ?? (isActionable(node) ? node : nil)
+        var bestMatch: [String: Any]?
+        for child in node["children"] as? [[String: Any]] ?? [] {
+            guard let match = deepestActionableElement(in: child, point: point) else { continue }
+            if let currentBest = bestMatch {
+                if frameArea(match) < frameArea(currentBest) { bestMatch = match }
+            } else {
+                bestMatch = match
+            }
+        }
+        return bestMatch ?? (isActionable(node) ? node : nil)
     }
 
     private func isActionable(_ node: [String: Any]) -> Bool {

@@ -243,14 +243,22 @@ private func accessibilityChildDictionaries(_ node: [String: Any]) -> [[String: 
 
 final class AccessibilityService: @unchecked Sendable {
     private var screenBounds: [String: (width: Double, height: Double)] = [:]
-    private var xctestProviders: [String: XCTestAccessibilityProviderSession] = [:]
+    private var xctestProviders: [String: any XCTestAccessibilityProviding] = [:]
     private var xctestBundleIDs: [String: String] = [:]
+    private let xctestProviderFactory: (String, String) throws -> any XCTestAccessibilityProviding
     private let observation: AccessibilityObservationCoordinator
     private var observedUDID: String?
     private(set) var observationStrategy = "snapshot-diff"
 
-    init(observation: AccessibilityObservationCoordinator = AccessibilityObservationCoordinator()) {
+    init(
+        observation: AccessibilityObservationCoordinator = AccessibilityObservationCoordinator(),
+        xctestProviderFactory: @escaping (String, String) throws -> any XCTestAccessibilityProviding = {
+            udid, bundleID in
+            try XCTestAccessibilityProviderSession.start(udid: udid, targetBundleID: bundleID)
+        }
+    ) {
         self.observation = observation
+        self.xctestProviderFactory = xctestProviderFactory
     }
 
     deinit {
@@ -314,14 +322,10 @@ final class AccessibilityService: @unchecked Sendable {
 
     func enableXCTestProvider(udid: String, bundleID: String) throws -> [String: Any] {
         if xctestBundleIDs[udid] != bundleID {
-            xctestProviders.removeValue(forKey: udid)?.stop()
-            xctestBundleIDs.removeValue(forKey: udid)
+            stopXCTestProvider(udid: udid)
         }
         if xctestProviders[udid] == nil {
-            xctestProviders[udid] = try XCTestAccessibilityProviderSession.start(
-                udid: udid,
-                targetBundleID: bundleID
-            )
+            xctestProviders[udid] = try xctestProviderFactory(udid, bundleID)
             xctestBundleIDs[udid] = bundleID
         }
         // XCTest snapshots do not emit AXP revision events. Keeping the legacy
@@ -334,8 +338,7 @@ final class AccessibilityService: @unchecked Sendable {
     }
 
     func disableXCTestProvider(udid: String) -> [String: Any] {
-        xctestProviders.removeValue(forKey: udid)?.stop()
-        xctestBundleIDs.removeValue(forKey: udid)
+        stopXCTestProvider(udid: udid)
         return providerStatus(udid: udid, assessLegacy: false)
     }
 
@@ -386,9 +389,7 @@ final class AccessibilityService: @unchecked Sendable {
                 do {
                     captured = try provider.snapshot(maxNodes: maxNodes, timeout: 5)
                 } catch {
-                    provider.stop()
-                    xctestProviders.removeValue(forKey: udid)
-                    xctestBundleIDs.removeValue(forKey: udid)
+                    stopXCTestProvider(udid: udid)
                     captured = try captureLegacySnapshot(udid: udid, maxNodes: maxNodes)
                 }
             } else {
@@ -396,8 +397,8 @@ final class AccessibilityService: @unchecked Sendable {
             }
             let snapshot = try projectAccessibilitySnapshot(captured, scope: scope)
             if let screen = snapshot["screen"] as? [String: Any],
-                let width = number(screen["width"]),
-                let height = number(screen["height"])
+                let width = accessibilityNumber(screen["width"]),
+                let height = accessibilityNumber(screen["height"])
             {
                 screenBounds[udid] = (width, height)
             }
@@ -415,7 +416,11 @@ final class AccessibilityService: @unchecked Sendable {
 
     func elementAtPoint(udid: String, x: Double, y: Double) throws -> [String: Any] {
         if let provider = xctestProviders[udid] {
-            return try provider.elementAtPoint(x: x, y: y, timeout: 5)
+            do {
+                return try provider.elementAtPoint(x: x, y: y, timeout: 5)
+            } catch {
+                stopXCTestProvider(udid: udid)
+            }
         }
         guard let device = SimulatorRuntime.object(udid: udid) else {
             throw SimViewError("DEVICE_NOT_BOOTED", "Simulator \(udid) is unavailable")
@@ -457,6 +462,11 @@ final class AccessibilityService: @unchecked Sendable {
         return try captureAccessibilitySnapshotWithRetry {
             try SVAccessibilityBridge.snapshot(forDevice: device, maxNodes: boundedMaxNodes)
         }
+    }
+
+    private func stopXCTestProvider(udid: String) {
+        xctestProviders.removeValue(forKey: udid)?.stop()
+        xctestBundleIDs.removeValue(forKey: udid)
     }
 
     func find(
@@ -567,15 +577,9 @@ final class AccessibilityService: @unchecked Sendable {
             }
         }
         if matched { matches.append(node) }
-        for child in childDictionaries(node) {
+        for child in accessibilityChildDictionaries(node) {
             collectMatches(child, selector: selector, matches: &matches)
         }
-    }
-
-    private func number(_ value: Any?) -> Double? {
-        if let value = value as? Double { return value }
-        if let value = value as? NSNumber { return value.doubleValue }
-        return nil
     }
 
     private func string(_ value: Any?) -> String? {
@@ -584,11 +588,4 @@ final class AccessibilityService: @unchecked Sendable {
         return nil
     }
 
-    private func childDictionaries(_ node: [String: Any]) -> [[String: Any]] {
-        (node["children"] as? [Any] ?? []).compactMap { child in
-            if let child = child as? [String: Any] { return child }
-            if let child = child as? NSDictionary { return child as? [String: Any] }
-            return nil
-        }
-    }
 }

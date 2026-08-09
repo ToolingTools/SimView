@@ -117,7 +117,7 @@ export type NativeTapResolution = {
   viewport?: AccessibilitySnapshot["screen"];
   scrollRequired?: boolean;
   suggestedScrollDirection?: "up" | "down" | "left" | "right";
-  corroboratedBy?: Array<"identifier" | "name" | "role" | "value">;
+  corroboratedBy?: SemanticFingerprintField[];
   stable?: boolean;
   hitTest?: boolean;
 };
@@ -597,6 +597,19 @@ export class SimViewSession {
       scope,
       maxNodes,
     });
+    if (
+      snapshot.source === "core-simulator-ax" &&
+      this.#iosAccessibility?.activeProvider === "core-simulator-xctest"
+    ) {
+      this.#iosAccessibility = {
+        schemaVersion: 1,
+        status: "native-ready",
+        activeProvider: "core-simulator-ax",
+        xctestAvailability: "ready",
+        ...(snapshot.stats.quality ? { legacyQuality: snapshot.stats.quality } : {}),
+        reason: "xctest-provider-runtime-fallback",
+      };
+    }
     if (semanticGeneration === this.#semanticGeneration) {
       this.lastAccessibility = snapshot;
       this.#rememberAccessibilitySnapshot(snapshot, {
@@ -952,7 +965,7 @@ export class SimViewSession {
             matches: flattenAccessibilityTree(observation.snapshot.root).filter((node) =>
               matchesFingerprint(node, fingerprint),
             ),
-            fields: Object.keys(fingerprint) as Array<"identifier" | "name" | "role" | "value">,
+            fields: Object.keys(fingerprint) as SemanticFingerprintField[],
           };
     const nativeMatches = corroboration.matches;
     if (nativeMatches.length === 0) {
@@ -2234,6 +2247,8 @@ type SemanticFingerprint = {
   placeholder?: string | undefined;
 };
 
+type SemanticFingerprintField = keyof SemanticFingerprint;
+
 function semanticFingerprint(node: AccessibilityNode): SemanticFingerprint {
   return {
     ...((node.testID ?? node.identifier) ? { identifier: node.testID ?? node.identifier } : {}),
@@ -2265,7 +2280,7 @@ function corroborateFiberTarget(
   fingerprint: SemanticFingerprint,
 ): {
   matches: AccessibilityNode[];
-  fields: Array<"identifier" | "name" | "role" | "value">;
+  fields: SemanticFingerprintField[];
 } {
   const nodes = flattenAccessibilityTree(snapshot.root);
   if (fingerprint.identifier) {
@@ -2281,7 +2296,7 @@ function corroborateFiberTarget(
   // When that happens, an exact accessible name may bridge discovery to the
   // native target, but only if optional role/value evidence does not conflict.
   if (!fingerprint.name) return { matches: [], fields: [] };
-  const fields: Array<"identifier" | "name" | "role" | "value"> = ["name"];
+  const fields: SemanticFingerprintField[] = ["name"];
   const matches = nodes.filter((node) => {
     if (!hasActionSemantics(node)) return false;
     if (!matchesAccessibleName(node.label ?? node.title, fingerprint.name, true)) return false;

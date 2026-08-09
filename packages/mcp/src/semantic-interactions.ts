@@ -139,6 +139,10 @@ async function observeTextTarget(
   };
 }
 
+function isTextCleared(target: AccessibilityNode | undefined): boolean {
+  return Boolean(target && (!target.value || target.value === target.placeholder));
+}
+
 async function clearTextWithVerification(
   session: SimViewSession,
   target: AccessibilityNode,
@@ -148,9 +152,7 @@ async function clearTextWithVerification(
   await session.dispatchInput({ method: "input.key", params: { key: "select-all" } });
   await session.dispatchInput({ method: "input.key", params: { key: "delete" } });
   let result = await observeTextTarget(session, target, point);
-  let cleared = Boolean(
-    result.target && (!result.target.value || result.target.value === result.target.placeholder),
-  );
+  let cleared = isTextCleared(result.target);
   if (!cleared && result.target && currentValue.length > 0) {
     await session.dispatchInput({
       method: "input.key",
@@ -161,9 +163,7 @@ async function clearTextWithVerification(
       params: { key: "delete", repeat: Math.min(100, currentValue.length) },
     });
     result = await observeTextTarget(session, target, point);
-    cleared = Boolean(
-      result.target && (!result.target.value || result.target.value === result.target.placeholder),
-    );
+    cleared = isTextCleared(result.target);
   }
   if (!cleared && result.target) {
     for (let tap = 0; tap < 3; tap += 1) {
@@ -171,9 +171,7 @@ async function clearTextWithVerification(
     }
     await session.dispatchInput({ method: "input.key", params: { key: "delete" } });
     result = await observeTextTarget(session, target, point);
-    cleared = Boolean(
-      result.target && (!result.target.value || result.target.value === result.target.placeholder),
-    );
+    cleared = isTextCleared(result.target);
   }
   return { ...result, cleared };
 }
