@@ -277,12 +277,17 @@ post-action tree; callers should consume it instead of immediately observing
 again. Non-dispatched failures expose `retryInput: false`, `recoveryAllowed`, an
 optional `recoveryAction`, and bounded actionability diagnostics. Only failures
 that report `inputDispatched: true` use the dispatched-input hard stop. Prefer
-`perform_actions` with `observe: "semantic"` for ordered input plus a coherent post-action
-observation. Images are never an automatic fallback; use explicit `visual`
+`tap_known_coordinate` only when SimView returns a `coordinateFallback` derived
+from the fresh semantic target center. It permits one raw tap at that exact point
+when the requested action is already authorized, followed immediately by a
+semantic observation; callers must not repeat it or substitute hit-test/image
+coordinates. Prefer
+`perform_actions` with `observe: "semantic"` for ordered input plus a coherent
+post-action observation. Images are never an automatic input fallback; use explicit `visual`
 mode only when the user requests visual inspection. iOS input uses SimulatorKit
 HID; Android uses the SimView agent with ADB shell input as a reduced-capability
 fallback. Pixel coordinates remain an explicit last resort for inaccessible
-targets.
+targets except for the bounded native-semantic recovery above.
 Android currently declares ASCII text support; iOS supports the full Unicode
 typing path. Callers should inspect the selected device capability before typing.
 

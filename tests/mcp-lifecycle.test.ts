@@ -21,7 +21,9 @@ describe("MCP process lifecycle", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    await Bun.sleep(250);
+    // Cold Bun transpilation can exceed 250 ms on a loaded release builder.
+    // Give the entrypoint time to install its signal handlers before testing shutdown.
+    await Bun.sleep(750);
     child.kill("SIGTERM");
     const exitCode = await Promise.race([child.exited, Bun.sleep(2_000).then(() => undefined)]);
     if (exitCode === undefined) child.kill(9);

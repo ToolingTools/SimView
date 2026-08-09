@@ -238,8 +238,13 @@ after ranking normalization. A missing native target may include bounded
 nodes without relaxing the requirement that every field match one node.
 Non-dispatched semantic failures set `retryInput: false`, retain
 `safeToContinue: false` as a batch-stop signal, and expose `recoveryAllowed`
-plus an optional `recoveryAction` of `search_again`, `scroll_then_search`, or
-`observe_then_search`. Bounded `actionabilityDiagnostics` identify whether the
+plus an optional `recoveryAction` of `search_again`, `scroll_then_search`,
+`observe_then_search`, or `tap_known_coordinate`. The last action includes a
+`coordinateFallback` whose normalized point is the center of the uniquely
+resolved fresh semantic target. It permits one separately dispatched raw tap
+only when the action is already user-authorized and requires an immediate
+post-action observation; hit-test and image coordinates are never substitutes.
+Bounded `actionabilityDiagnostics` identify whether the
 matched target is actionable and include at most two actionable ancestors or
 descendants without redirecting input automatically.
 Destination selectors use exact matching by default. Callers that know only a

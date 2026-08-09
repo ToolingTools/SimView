@@ -1664,7 +1664,7 @@ function SimView() {
   const visibleController = keyWindow?.visibleControllerPath?.at(-1);
   const displayedScreenContext = frozenScreenContext ?? screenContext;
   const inlineHeight = embedded ? preferredInlineHeight(hostContext) : undefined;
-  const groupedDevices = deviceGroups(availableDevices);
+  const groupedDevices = deviceGroups(availableDevices.filter((device) => device.available));
   const selectedPlatform = state.device?.platform;
 
   return (
@@ -1824,7 +1824,7 @@ function SimView() {
                     </section>
                   ))
                 ) : (
-                  <p>No iOS Simulators or Android devices found.</p>
+                  <p>No booted devices found.</p>
                 )}
               </div>
             )}

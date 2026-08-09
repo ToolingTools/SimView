@@ -106,6 +106,16 @@ describe("release distribution", () => {
     expect(skill).toContain("changed to `enabled: true`");
   });
 
+  test("permits one authorized native-semantic coordinate fallback", async () => {
+    const skill = await Bun.file("skills/simview/SKILL.md").text();
+    expect(skill).toContain("`tap_known_coordinate` permits exactly one raw `tap`");
+    expect(skill).toContain("`fresh-semantic-target-center`");
+    expect(skill).toMatch(/original user\s+request already authorizes that action/u);
+    expect(skill).toContain("perform the fallback automatically");
+    expect(skill).toMatch(/Never use the hit node's\s+coordinates/u);
+    expect(skill).toMatch(/Observe semantically\s+immediately after the fallback tap/u);
+  });
+
   test("guards compiled plugin binaries with dependency manifests and isolated startup", async () => {
     const packaging = await Bun.file("scripts/package-plugin.ts").text();
     expect(packaging).toContain('join(root, "bun.lock")');

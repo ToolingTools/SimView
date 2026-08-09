@@ -41,7 +41,9 @@ Android Emulator, or authorized Android device connected through ADB.
    may establish existence, visible text, or selection state, but it must not
    justify coordinate input while a semantic target is available or authorize
    a consequential action such as submitting a payment. Do not repeat visual
-   observations as a substitute for unresolved semantics. When a
+   observations as a substitute for unresolved semantics. A tool-provided
+   `coordinateFallback` is native semantic geometry, not vision evidence; use
+   it only under the bounded recovery rule in step 4. When a
    matching development-mode React Native target is available through Metro,
    SimView uses its visual Fiber tree and screen/route context; otherwise it
    uses the platform accessibility tree. Prefer identifier, role, and
@@ -134,21 +136,33 @@ Android Emulator, or authorized Android device connected through ADB.
    `recoveryAllowed` and `recoveryAction`: `search_again` requests a new semantic
    resolution, `scroll_then_search` permits one bounded scroll before resolving
    again, and `observe_then_search` permits a fresh observation before resolving
-   again. Use the returned `hitNode`, `actionableHitNode`, `hitRelationship`,
+   again. `tap_known_coordinate` permits exactly one raw `tap` at the returned
+   `coordinateFallback.point` when its source is
+   `fresh-semantic-target-center`, `maxAttempts` is `1`, and the original user
+   request already authorizes that action. This includes an authorized final
+   submission. When those conditions hold, perform the fallback automatically
+   without asking for separate confirmation; if the prompt does not authorize
+   the consequential action, ask before tapping. Never use the hit node's
+   coordinates or a point inferred from an image. Observe semantically
+   immediately after the fallback tap and verify the intended state change;
+   never repeat the fallback if verification is missing, unstable, or negative.
+   Use the returned `hitNode`,
+   `actionableHitNode`, `hitRelationship`,
    `selectorDiagnostics`, and `actionabilityDiagnostics`; the latter contains at
    most two actionable ancestors or descendants and reports ambiguity. Every
    selector field must match one native node; do not combine a container
    identifier with a child's accessible name. If diagnostics show split nodes,
    use `search_elements` and pass its generation-scoped ref. Never redirect input
-   to a diagnostic relative automatically. Disabled, ambiguous, or hit-mismatched
-   targets require a new semantic resolution, an independent UI change, or user
-   direction.
+   to a diagnostic relative automatically. Disabled or ambiguous targets, and
+   hit mismatches without an explicit `tap_known_coordinate` recovery, require
+   a new semantic resolution, an independent UI change, or user direction.
 5. If an accepted semantic tap's embedded observation reports unstable or
    unavailable post-action state, make one fresh semantic observation. Never
    repeat the accepted tap, and never fall back to coordinates merely because
    its embedded observation was stale.
 6. Use `tap`, `swipe`, `long_press`, `type_text`, and `press_button` for isolated
-   actions when no useful accessible target exists. Use `perform_gesture` for a
+   actions when no useful accessible target exists, or for the single
+   `tap_known_coordinate` recovery described above. Use `perform_gesture` for a
    timestamped pointer track. Two-track gestures require the device's
    `multiTouch` capability. Coordinates are normalized from 0 to 1.
    `type_text` inserts at the current selection and rejects control characters.

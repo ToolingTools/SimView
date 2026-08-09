@@ -20,7 +20,11 @@ import {
   hasMcpUiCapability,
   isDesktopMcpAppHost,
 } from "../packages/mcp/src/server";
-import { type AccessibilityObservation, SimViewSession } from "../packages/mcp/src/session";
+import {
+  type AccessibilityObservation,
+  nativeTapRecovery,
+  SimViewSession,
+} from "../packages/mcp/src/session";
 
 const appCalledTools = [
   "app_connect_device",
@@ -431,6 +435,8 @@ describe("MCP app tools", () => {
       expect(performActionsTool?.description).toContain("such as Invoices, Orders, Card, or Pay");
       expect(tapElementTool?.description).toContain("inputDispatched is false");
       expect(performActionsTool?.description).toContain("recoveryAllowed and recoveryAction");
+      expect(tapElementTool?.description).toContain("tap_known_coordinate");
+      expect(performActionsTool?.description).toContain("coordinateFallback.point");
       expect(performActionsTool?.description).toContain(
         "stable compact post-action tree exactly once",
       );
@@ -1616,8 +1622,8 @@ describe("MCP app tools", () => {
       hitMethod: "provider-element-at-point",
       hitTest: false,
       actionabilityDiagnostics: {
-        targetActionable: false,
-        ambiguous: true,
+        targetActionable: true,
+        ambiguous: false,
         candidates: [
           {
             relationship: "ancestor",
@@ -1659,7 +1665,15 @@ describe("MCP app tools", () => {
         safeToContinue: false,
         inputDispatched: false,
         retryInput: false,
-        recoveryAllowed: false,
+        recoveryAllowed: true,
+        recoveryAction: "tap_known_coordinate",
+        coordinateFallback: {
+          point: { x: 0.5, y: 0.9 },
+          source: "fresh-semantic-target-center",
+          targetRef: "ax:invoices",
+          maxAttempts: 1,
+          requiresPostActionObservation: true,
+        },
         code: "hit_target_mismatch",
         retryable: false,
         interaction: {
@@ -1668,13 +1682,16 @@ describe("MCP app tools", () => {
           actionableHitNode: { ref: "ax:other" },
           hitRelationship: "unrelated",
           actionabilityDiagnostics: {
-            targetActionable: false,
-            ambiguous: true,
+            targetActionable: true,
+            ambiguous: false,
             candidates: [{ relationship: "ancestor", node: { ref: "ax:ancestor" } }],
           },
         },
       };
       expect(standalone.isError).toBe(true);
+      expect((standalone.content as Array<{ text?: string }>)[0]?.text).toContain(
+        "One coordinate fallback is permitted",
+      );
       expect(standalone.structuredContent).toMatchObject(expected);
       expect(batch.isError).toBe(true);
       expect(batch.structuredContent).toMatchObject({
@@ -2489,15 +2506,18 @@ describe("MCP app tools", () => {
         settledAt: "2026-08-08T10:00:00.075Z",
       }) as never;
 
-    expect(
-      await session.resolveNativeTap({ ref: oldTarget.target.ref, exact: true }),
-    ).toMatchObject({
+    const resolution = await session.resolveNativeTap({ ref: oldTarget.target.ref, exact: true });
+    expect(resolution).toMatchObject({
       accepted: false,
       code: "hit_target_mismatch",
       retryable: false,
       hitRelationship: "ambiguous",
       hitMethod: "snapshot-actionable",
       hitTest: false,
+    });
+    expect(nativeTapRecovery(resolution)).toEqual({
+      retryInput: false,
+      recoveryAllowed: false,
     });
   });
 

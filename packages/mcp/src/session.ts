@@ -133,12 +133,25 @@ export type NativeTapResolution = {
   candidates?: ElementSearchMatch[];
 };
 
-export type NativeTapRecoveryAction = "search_again" | "scroll_then_search" | "observe_then_search";
+export type NativeTapRecoveryAction =
+  | "search_again"
+  | "scroll_then_search"
+  | "observe_then_search"
+  | "tap_known_coordinate";
+
+export type NativeCoordinateFallback = {
+  point: { x: number; y: number };
+  source: "fresh-semantic-target-center";
+  targetRef: string;
+  maxAttempts: 1;
+  requiresPostActionObservation: true;
+};
 
 export type NativeTapRecovery = {
   retryInput: false;
   recoveryAllowed: boolean;
   recoveryAction?: NativeTapRecoveryAction;
+  coordinateFallback?: NativeCoordinateFallback;
 };
 
 export function nativeTapRecovery(resolution: NativeTapResolution): NativeTapRecovery {
@@ -147,8 +160,30 @@ export function nativeTapRecovery(resolution: NativeTapResolution): NativeTapRec
       return { retryInput: false, recoveryAllowed: true, recoveryAction: "scroll_then_search" };
     case "unstable_snapshot":
       return { retryInput: false, recoveryAllowed: true, recoveryAction: "observe_then_search" };
-    case "target_disabled":
     case "hit_target_mismatch":
+      if (
+        resolution.point &&
+        resolution.target &&
+        resolution.target.enabled !== false &&
+        resolution.target.hidden !== true &&
+        resolution.actionabilityDiagnostics?.targetActionable !== false &&
+        resolution.hitRelationship !== "ambiguous"
+      ) {
+        return {
+          retryInput: false,
+          recoveryAllowed: true,
+          recoveryAction: "tap_known_coordinate",
+          coordinateFallback: {
+            point: resolution.point,
+            source: "fresh-semantic-target-center",
+            targetRef: resolution.target.ref,
+            maxAttempts: 1,
+            requiresPostActionObservation: true,
+          },
+        };
+      }
+      return { retryInput: false, recoveryAllowed: false };
+    case "target_disabled":
     case "ready":
       return { retryInput: false, recoveryAllowed: false };
     default:
