@@ -270,7 +270,13 @@ one native node. Assertions only need to be present and may match multiple nodes
 such as an amount repeated in total and outstanding fields. An ambiguous identity
 hard-stops as `destination_ambiguous` with `safeToContinue: false`; strengthen it
 without repeating the already accepted tap. Use `checked` or `selected` to verify
-control state when native accessibility exposes it. Prefer
+control state when native accessibility exposes it, or `enabled` to verify an
+independently identifiable downstream control. Successful standalone and batch
+semantic taps return the interaction summary followed by one stable compact
+post-action tree; callers should consume it instead of immediately observing
+again. Non-dispatched failures expose `retryInput: false`, `recoveryAllowed`, an
+optional `recoveryAction`, and bounded actionability diagnostics. Only failures
+that report `inputDispatched: true` use the dispatched-input hard stop. Prefer
 `perform_actions` with `observe: "semantic"` for ordered input plus a coherent post-action
 observation. Images are never an automatic fallback; use explicit `visual`
 mode only when the user requests visual inspection. iOS input uses SimulatorKit
@@ -288,6 +294,11 @@ SimView reuses its loopback CDP multiplexer instead of competing for Hermes'
 debugger connection; Metro MCP itself is not required. SimView never
 starts Metro, serializes component props or navigation params, or attaches an
 ambiguous target to a Simulator.
+Discovery uses `localhost` through the packaged `metro-bridge`, including its
+IPv4 fallback, and probes the bridge's pinned ports without extending successful
+discovery. Native fallback keeps the coarse Metro status and may add a bounded
+detail distinguishing unreachable Metro, no debug targets, device mismatch,
+missing Fiber roots, and CDP inspection failures.
 Without a matching target it uses the frontmost native accessibility hierarchy:
 the automatically started XCTest provider on iOS or UIAutomator on Android.
 For Android semantic taps, the raw deepest hit and selected actionable hit are

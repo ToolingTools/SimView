@@ -119,7 +119,11 @@ The process model has two layers:
   first scene cannot starve later roots or bottom navigation tabs.
   If Metro MCP owns the older single-client Hermes connection,
   SimView validates and reuses its loopback CDP multiplexer record; newer
-  multi-debugger targets connect directly. Any discovery, CDP, measurement, or
+  multi-debugger targets connect directly. Discovery goes through the packaged
+  `metro-bridge` using `localhost` (including the bridge's IPv4 fallback), while
+  concurrent status probes classify empty discovery without delaying a usable
+  target. Per-device negative results are cached for five seconds. Any discovery,
+  CDP, measurement, or
   validation failure returns the complete native snapshot instead of a partially
   merged tree. The absence of a Metro target is normal native context, not a
   fallback error. Every CDP evaluation is

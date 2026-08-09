@@ -59,6 +59,7 @@ import {
   type AccessibilityObservation,
   type DestinationVerification,
   type NativeTapResolution,
+  nativeTapRecovery,
   SimViewSession,
   type WarmObservation,
 } from "./session";
@@ -257,6 +258,15 @@ const fallbackMessages = {
   "metro-inspection-failed": "React Native inspection failed; retrying can reconnect Hermes.",
 } as const;
 
+const fallbackDetailMessages = {
+  "metro-unreachable": "Metro was not reachable on the packaged bridge's discovery ports.",
+  "metro-running-no-debug-targets": "Metro is running, but it exposed no compatible debug targets.",
+  "metro-target-mismatch": "Metro targets were found, but none matched the connected device.",
+  "metro-fiber-root-missing": "The matching debug target exposed no React Native Fiber root.",
+  "metro-connect-or-evaluate-failed":
+    "The matching debug target could not be connected to or inspected.",
+} as const;
+
 function compactElementTree(
   result: ElementTreeOutput,
   preferredSnapshot?: z.output<typeof accessibilitySnapshotSchema>,
@@ -283,8 +293,12 @@ function compactElementTree(
         ]
           .filter(Boolean)
           .join(" ")
-      : `context=${context.kind} elements=${snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
-  const fallback = result.fallback ? fallbackMessages[result.fallback.reason] : undefined;
+      : `context=${context.kind} elements=${snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}${result.fallback.detail ? ` detail=${result.fallback.detail}` : ""}` : ""}`;
+  const fallback = result.fallback
+    ? result.fallback.detail
+      ? fallbackDetailMessages[result.fallback.detail]
+      : fallbackMessages[result.fallback.reason]
+    : undefined;
   return [summary, fallback, compactAccessibilityTree(snapshot)].filter(Boolean).join("\n");
 }
 
@@ -563,6 +577,10 @@ const destinationSelectorSchema = z
       .boolean()
       .describe("Required selected state for a selectable control or tab.")
       .optional(),
+    enabled: z
+      .boolean()
+      .describe("Required enabled state for an independently identifiable destination control.")
+      .optional(),
     exact: z
       .boolean()
       .default(true)
@@ -580,11 +598,12 @@ const destinationSelectorSchema = z
           selector.value ||
           selector.placeholder ||
           selector.checked !== undefined ||
+          selector.enabled !== undefined ||
           selector.selected !== undefined,
       ),
     {
       message:
-        "A destination selector requires identifier, role, name, value, placeholder, checked, or selected",
+        "A destination selector requires identifier, role, name, value, placeholder, checked, selected, or enabled",
     },
   );
 
@@ -846,12 +865,21 @@ function rejectedSemanticTap(
   resolution: NativeTapResolution,
   selector?: z.output<typeof accessibilitySelectorSchema>,
 ) {
+  const recovery =
+    resolution.searchScope && resolution.candidates?.length === 0
+      ? ({
+          retryInput: false,
+          recoveryAllowed: true,
+          recoveryAction: "scroll_then_search",
+        } as const)
+      : nativeTapRecovery(resolution);
   return {
     accepted: false,
     safeToContinue: false,
     inputDispatched: false,
     code: resolution.code,
     retryable: resolution.retryable,
+    ...recovery,
     interaction: {
       ...compactNativeTapResolution(resolution),
       ...(selector ? { selector } : {}),
@@ -860,7 +888,14 @@ function rejectedSemanticTap(
 }
 
 function compactNativeTapResolution(resolution: NativeTapResolution) {
-  const { target, hitNode, actionableHitNode, selectorDiagnostics, ...receipt } = resolution;
+  const {
+    target,
+    hitNode,
+    actionableHitNode,
+    selectorDiagnostics,
+    actionabilityDiagnostics,
+    ...receipt
+  } = resolution;
   return {
     ...receipt,
     ...(target ? { target: summarizeAccessibilityNode(target) } : {}),
@@ -875,6 +910,17 @@ function compactNativeTapResolution(resolution: NativeTapResolution) {
             fields: selectorDiagnostics.fields.map((field) => ({
               ...field,
               matches: field.matches.map(summarizeAccessibilityNode),
+            })),
+          },
+        }
+      : {}),
+    ...(actionabilityDiagnostics
+      ? {
+          actionabilityDiagnostics: {
+            ...actionabilityDiagnostics,
+            candidates: actionabilityDiagnostics.candidates.map((candidate) => ({
+              ...candidate,
+              node: summarizeAccessibilityNode(candidate.node),
             })),
           },
         }
@@ -1697,7 +1743,7 @@ export function createServer(
     {
       title: "Perform actions",
       description:
-        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation. Semantic tap receipts contain compact node summaries for both iOS and Android. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a payment, invoice, order, or account flow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires one unique native identity and accepts up to four supporting assertions plus a 100-5000 ms timeout (maximum 5000); name falls back to non-redacted native text, and checked/selected can verify exposed control state. Assertions must be present but may match more than one node; an ambiguous identity hard-stops later actions. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. When inputDispatched is false, use the returned hit and selector diagnostics and do not observe, search, and retry the unchanged target; retry only after an independent UI change or a genuinely transient error.",
+        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation. Semantic tap receipts contain compact node summaries for both iOS and Android, followed by the stable compact post-action tree exactly once; consume that embedded tree instead of immediately calling observe_screen. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a payment, invoice, order, or account flow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires one unique native identity and accepts up to four supporting assertions plus a 100-5000 ms timeout (maximum 5000); name falls back to non-redacted native text, and checked/selected/enabled can verify exposed control state. Assertions must be present but may match more than one node; an ambiguous identity hard-stops later actions. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. When inputDispatched is false, follow recoveryAllowed and recoveryAction using the bounded actionability, hit, and selector diagnostics; never redirect input automatically or retry a disabled, ambiguous, or hit-mismatched target without a new semantic resolution, independent UI change, or user direction.",
       inputSchema: {
         actions: z.array(actionSchema).min(1).max(20),
         observe: z.enum(["auto", "semantic", "visual", "none"]).default("semantic"),
@@ -1722,6 +1768,8 @@ export function createServer(
           accepted: false,
           safeToContinue: false,
           inputDispatched: false,
+          retryInput: false,
+          recoveryAllowed: false,
           code: preflightFailure.code,
           retryable: false,
           message: preflightFailure.message,
@@ -1855,15 +1903,15 @@ export function createServer(
         }
       }
       return toolResultWithContent(
-        hardStop
-          ? [
-              ...observed.content.filter((item) => item.type !== "text"),
-              {
-                type: "text" as const,
-                text: `${DISPATCHED_INPUT_HARD_STOP} The action batch stopped after the failed action.`,
-              },
-            ]
-          : observed.content,
+        [
+          {
+            type: "text" as const,
+            text: hardStop
+              ? `${DISPATCHED_INPUT_HARD_STOP} The action batch stopped after the failed action.`
+              : "Ordered actions completed and the stable post-action observation follows.",
+          },
+          ...observed.content,
+        ],
         {
           actionCount: actions.length,
           completedActionCount: failedActionIndex ?? receipts.length,
@@ -1889,6 +1937,8 @@ export function createServer(
           accepted: false,
           safeToContinue: false,
           inputDispatched: false,
+          retryInput: false,
+          recoveryAllowed: false,
           code: failure.code,
           retryable: false,
           message: failure.message,
@@ -2323,10 +2373,7 @@ function registerAccessibilityTools(
     const text = hardStop ? `${DISPATCHED_INPUT_HARD_STOP} ${detail}` : detail;
     return observed
       ? toolResultWithContent(
-          [
-            ...observed.content.filter((item) => item.type !== "text"),
-            { type: "text" as const, text },
-          ],
+          [{ type: "text" as const, text }, ...observed.content],
           structured,
           hardStop,
         )
@@ -2470,7 +2517,7 @@ function registerAccessibilityTools(
     {
       title: "Tap element",
       description:
-        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through native device input; returned target/hit diagnostics are compact node summaries on both iOS and Android. All supplied selector fields must match one node; target_not_found may report bounded selectorDiagnostics for split nodes, after which use search_elements and its generation-scoped ref. When inputDispatched is false, do not observe, search, and retry the unchanged target; retry only after an independent UI change or a genuinely transient error. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a sensitive workflow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires a unique native identity, accepts up to four supporting assertions, and has a 100-5000 ms timeout (maximum 5000). Name matches label/title and falls back to non-redacted text values; checked/selected can verify exposed control state. Assertions such as amount/status must be present but may match multiple nodes. Prefer a stable identifier or complete entity label for identity, and use exact:false only for a known composite-label fragment.",
+        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through native device input; returned target/hit diagnostics are compact node summaries on both iOS and Android, followed by the stable compact post-action tree exactly once. Consume that embedded tree instead of immediately calling observe_screen. All supplied selector fields must match one node; target_not_found may report bounded selectorDiagnostics for split nodes, after which use search_elements and its generation-scoped ref. When inputDispatched is false, follow recoveryAllowed and recoveryAction using the bounded actionability, hit, and selector diagnostics; never redirect input automatically or retry a disabled, ambiguous, or hit-mismatched target without a new semantic resolution, independent UI change, or user direction. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a sensitive workflow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires a unique native identity, accepts up to four supporting assertions, and has a 100-5000 ms timeout (maximum 5000). Name matches label/title and falls back to non-redacted text values; checked/selected/enabled can verify exposed control state. Assertions such as amount/status must be present but may match multiple nodes. Prefer a stable identifier or complete entity label for identity, and use exact:false only for a known composite-label fragment.",
       inputSchema: tapElementInputSchema,
       outputSchema: genericObjectOutputSchema,
       _meta: metadata.modelOnly,
@@ -2689,6 +2736,8 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
               accepted: false,
               safeToContinue: false,
               inputDispatched: false,
+              retryInput: false,
+              recoveryAllowed: false,
               code: "special_key_requires_press_key",
               retryable: false,
             },

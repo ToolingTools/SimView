@@ -539,7 +539,7 @@ export function formatElementTree(result: ElementTreeOutput): string {
         ]
           .filter(Boolean)
           .join(" ")
-      : `context=${context.kind} elements=${result.snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
+      : `context=${context.kind} elements=${result.snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}${result.fallback.detail ? ` detail=${result.fallback.detail}` : ""}` : ""}`;
   return `${summary}\n${compactAccessibilityTree(result.snapshot)}`;
 }
 

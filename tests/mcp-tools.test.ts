@@ -430,7 +430,11 @@ describe("MCP app tools", () => {
       expect(searchElementsTool?.description).toContain("one-swipe-at-a-time");
       expect(performActionsTool?.description).toContain("such as Invoices, Orders, Card, or Pay");
       expect(tapElementTool?.description).toContain("inputDispatched is false");
-      expect(performActionsTool?.description).toContain("retry the unchanged target");
+      expect(performActionsTool?.description).toContain("recoveryAllowed and recoveryAction");
+      expect(performActionsTool?.description).toContain(
+        "stable compact post-action tree exactly once",
+      );
+      expect(tapElementTool?.description).toContain("checked/selected/enabled");
       expect(listDevicesTool?.description).toContain("Omit platform");
       expect(appListDevicesTool?.description).toContain("filtering prematurely");
       expect(JSON.stringify(listDevicesTool?.inputSchema)).toContain(
@@ -866,7 +870,10 @@ describe("MCP app tools", () => {
       session.preparedElementSnapshot = async () =>
         ({
           snapshot,
-          fallback: { reason: "metro-target-unavailable" },
+          fallback: {
+            reason: "metro-target-unavailable",
+            detail: "metro-running-no-debug-targets",
+          },
           screenContext: {
             schemaVersion: 1,
             kind: "native-ios",
@@ -879,8 +886,14 @@ describe("MCP app tools", () => {
       expect(nativeResult.structuredContent).toMatchObject({
         elementSource: "core-simulator-ax",
         metroStatus: "metro-target-unavailable",
-        fallback: { reason: "metro-target-unavailable" },
+        fallback: {
+          reason: "metro-target-unavailable",
+          detail: "metro-running-no-debug-targets",
+        },
       });
+      expect((nativeResult.content as Array<{ text?: string }>)[0]?.text).toContain(
+        "Metro is running, but it exposed no compatible debug targets",
+      );
       const nativeStructured = nativeResult.structuredContent as {
         sourceRevisions: Record<string, unknown>;
         timestamps: Record<string, unknown>;
@@ -1071,21 +1084,22 @@ describe("MCP app tools", () => {
       }) as never;
     session.findElements = async (selector) =>
       ({ snapshotId: snapshot.snapshotId, selector, matches: [element], count: 1 }) as never;
-    session.warmObservation = async () => ({
+    session.warmObservation = async ({ visual }) => ({
       observationId: "warm-observed",
       frameId: "frame-observed",
       frameRevision: 2,
       changeRevision: 2,
-      imageRevision: 0,
+      imageRevision: visual ? 2 : 0,
       capturedAt: "2026-08-08T10:00:00.000Z",
       settledAt: "2026-08-08T10:00:00.075Z",
       stable: true,
       ageMs: 75,
       width: 402,
       height: 874,
-      byteLength: 0,
-      imageIncluded: false,
+      byteLength: visual ? 4 : 0,
+      imageIncluded: visual,
       cacheHit: true,
+      image: visual ? new Uint8Array([0xff, 0xd8, 0xff, 0xd9]) : undefined,
     });
     session.preparedElementSnapshot = async () => ({
       snapshot,
@@ -1167,6 +1181,40 @@ describe("MCP app tools", () => {
         },
         destinationVerification: { status: "matched", verified: true, revision: "5" },
       });
+      const content = result.content as Array<{ type: string; text?: string }>;
+      expect(content.filter((item) => item.type === "text")).toHaveLength(2);
+      expect(content[0]?.text).toContain("Physical element tap accepted");
+      expect(content[1]?.text).toContain("Continue");
+      expect(content[1]?.text?.match(/context=native-ios/g)).toHaveLength(1);
+
+      session.accessibilityObserve = async () => verificationObservation as never;
+      const batch = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          actions: [{ type: "tap_element", identifier: "continue-button" }],
+          observe: "semantic",
+        },
+      });
+      expect(batch.isError).not.toBe(true);
+      const batchContent = batch.content as Array<{ type: string; text?: string }>;
+      expect(batchContent.filter((item) => item.type === "text")).toHaveLength(2);
+      expect(batchContent[1]?.text).toContain("Continue");
+      expect(batchContent[1]?.text?.match(/context=native-ios/g)).toHaveLength(1);
+
+      const visualBatch = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          actions: [{ type: "tap_element", identifier: "continue-button" }],
+          observe: "visual",
+        },
+      });
+      expect(visualBatch.isError).not.toBe(true);
+      const visualContent = visualBatch.content as Array<{ type: string; text?: string }>;
+      expect(visualContent.filter((item) => item.type === "image")).toHaveLength(1);
+      expect(visualContent.filter((item) => item.type === "text")).toHaveLength(2);
+      expect(
+        visualContent.filter((item) => item.text?.includes("context=native-ios")),
+      ).toHaveLength(1);
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }
@@ -1513,6 +1561,9 @@ describe("MCP app tools", () => {
       );
       expect(tap.structuredContent).toMatchObject({
         inputDispatched: false,
+        retryInput: false,
+        recoveryAllowed: true,
+        recoveryAction: "scroll_then_search",
         interaction: {
           searchScope: "current-rendered-tree",
           absenceConclusive: false,
@@ -1533,6 +1584,9 @@ describe("MCP app tools", () => {
         receipts: [
           {
             inputDispatched: false,
+            retryInput: false,
+            recoveryAllowed: true,
+            recoveryAction: "scroll_then_search",
             interaction: {
               searchScope: "current-rendered-tree",
               absenceConclusive: false,
@@ -1561,6 +1615,20 @@ describe("MCP app tools", () => {
       hitRelationship: "unrelated",
       hitMethod: "provider-element-at-point",
       hitTest: false,
+      actionabilityDiagnostics: {
+        targetActionable: false,
+        ambiguous: true,
+        candidates: [
+          {
+            relationship: "ancestor",
+            node: {
+              ref: "ax:ancestor",
+              role: "button",
+              children: [{ ref: "ax:private-child", label: "Must stay compact" }],
+            },
+          },
+        ],
+      },
     } as const;
     session.resolveNativeTap = async () => interaction as never;
     let dispatches = 0;
@@ -1590,6 +1658,8 @@ describe("MCP app tools", () => {
         accepted: false,
         safeToContinue: false,
         inputDispatched: false,
+        retryInput: false,
+        recoveryAllowed: false,
         code: "hit_target_mismatch",
         retryable: false,
         interaction: {
@@ -1597,6 +1667,11 @@ describe("MCP app tools", () => {
           hitNode: { ref: "ax:other" },
           actionableHitNode: { ref: "ax:other" },
           hitRelationship: "unrelated",
+          actionabilityDiagnostics: {
+            targetActionable: false,
+            ambiguous: true,
+            candidates: [{ relationship: "ancestor", node: { ref: "ax:ancestor" } }],
+          },
         },
       };
       expect(standalone.isError).toBe(true);
@@ -1610,6 +1685,9 @@ describe("MCP app tools", () => {
       });
       expect(batch.structuredContent).not.toHaveProperty("receipts.0.target");
       expect(batch.structuredContent).not.toHaveProperty("receipts.0.fingerprint");
+      expect(standalone.structuredContent).not.toHaveProperty(
+        "interaction.actionabilityDiagnostics.candidates.0.node.children",
+      );
       expect(dispatches).toBe(0);
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
@@ -1664,6 +1742,9 @@ describe("MCP app tools", () => {
         accepted: false,
         code: "target_not_found",
         inputDispatched: false,
+        retryInput: false,
+        recoveryAllowed: true,
+        recoveryAction: "search_again",
         interaction: {
           selectorDiagnostics: {
             splitAcrossNodes: true,
@@ -2869,6 +2950,7 @@ describe("MCP app tools", () => {
       value: "Invoice #30363063",
       checked: true,
       selected: true,
+      enabled: true,
     };
     delete selectedInvoice.label;
     const destination = interactionSnapshot("android-destination", selectedInvoice);
@@ -2895,6 +2977,7 @@ describe("MCP app tools", () => {
             exact: false,
             checked: true,
             selected: true,
+            enabled: true,
           },
         },
         { observation },

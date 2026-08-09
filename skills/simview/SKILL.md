@@ -73,9 +73,13 @@ Android Emulator, or authorized Android device connected through ADB.
    that no matching item exists.
 4. Prefer `perform_actions` with `observe: "semantic"` for ordered navigation.
    It sends up to 20 actions, waits for post-action stability, and returns one
-   coherent post-action observation. Use `tap_element` for a single semantic
-   target; it re-resolves the target before input. Input acknowledgement alone
-   is not proof that navigation completed. `verifyDestination` is optional; do
+   coherent post-action observation. A successful `tap_element` or tap batch
+   returns its interaction summary followed by the stable compact semantic tree
+   exactly once. Consume that embedded tree instead of immediately calling
+   `observe_screen`; make a fresh observation only when the embedded result is
+   unavailable or unstable. Use `tap_element` for a single semantic target; it
+   re-resolves the target before input. Input acknowledgement alone is not proof
+   that navigation or selection completed. `verifyDestination` is optional; do
    not attach it to every tap merely because the overall flow involves a
    payment, invoice, order, or account. For generic section/menu navigation,
    such as opening Invoices, omit it and rely on the stable semantic post-action
@@ -101,10 +105,23 @@ Android Emulator, or authorized Android device connected through ADB.
    Assertions only need to be present and may match multiple nodes, such as the
    same amount shown in total and outstanding fields. Strengthen an ambiguous
    identity and do not repeat the accepted tap.
-   For a checkbox, radio control, switch, or selectable tab, add `checked` or
-   `selected` to the identity/assertion when native accessibility exposes that
-   state. If the state is not exposed, treat selection as unconfirmed and rely
-   on a later independently verifiable destination instead of repeating the tap.
+   For a checkbox, radio control, switch, selectable tab, or payment option, add
+   `checked` or `selected` to the identity/assertion when native accessibility
+   exposes that state. `enabled` may prove that an independently identifiable
+   downstream control became available.
+   Before choosing a saved payment card, enumerate the enabled, unexpired masked
+   cards exposed in semantics. Automatically choose one only when the user's
+   prompt uniquely identifies that card or exactly one eligible card exists. If
+   multiple eligible cards remain, show only their masked identifiers and ask
+   the user to choose. Never request or expose a full card number or CVV. Prior
+   approval of the payment task or card choice does not waive post-tap proof.
+   Explicit `checked` or `selected` state proves the approved card was selected.
+   When neither is exposed, accept proxy proof only when all of these hold: the
+   approved card was uniquely targeted; input was dispatched; the snapshot
+   changed and stabilized; that card remains present; and an independently
+   identifiable next control appeared or changed to `enabled: true`. A decorative
+   check icon alone is not proof. Pause when proof is incomplete; never repeat
+   the accepted tap.
    Verify entity identity on the last screen where that identifier is exposed,
    before any consequential follow-up action. Treat MCP `isError` or
    `safeToContinue: false` as an unconditional stop even when the nested
@@ -112,17 +129,24 @@ Android Emulator, or authorized Android device connected through ADB.
    `HARD STOP — INPUT WAS DISPATCHED` and `retryInput: false` mean no further
    device input may be sent until the user supplies new direction or an
    independent UI change occurs.
-   When `inputDispatched` is false, use the returned `hitNode`,
-   `actionableHitNode`, `hitRelationship`, and `selectorDiagnostics`
-   diagnostics. Every selector field must match one native node; do not combine
-   a container identifier with a child's accessible name. If diagnostics show
-   split nodes, use `search_elements` and pass its generation-scoped ref. Do not
-   immediately observe, search, and retry the unchanged target; retry only
-   after an independent UI change or when the error is genuinely transient.
-5. If an accepted semantic tap reports unstable or unavailable post-action
-   observation, make one fresh semantic observation. Never repeat the accepted
-   tap, and never fall back to coordinates merely because its embedded
-   observation was stale.
+   When `inputDispatched` is false, `safeToContinue: false` still stops the
+   current batch but is not a dispatched-input hard stop. Follow
+   `recoveryAllowed` and `recoveryAction`: `search_again` requests a new semantic
+   resolution, `scroll_then_search` permits one bounded scroll before resolving
+   again, and `observe_then_search` permits a fresh observation before resolving
+   again. Use the returned `hitNode`, `actionableHitNode`, `hitRelationship`,
+   `selectorDiagnostics`, and `actionabilityDiagnostics`; the latter contains at
+   most two actionable ancestors or descendants and reports ambiguity. Every
+   selector field must match one native node; do not combine a container
+   identifier with a child's accessible name. If diagnostics show split nodes,
+   use `search_elements` and pass its generation-scoped ref. Never redirect input
+   to a diagnostic relative automatically. Disabled, ambiguous, or hit-mismatched
+   targets require a new semantic resolution, an independent UI change, or user
+   direction.
+5. If an accepted semantic tap's embedded observation reports unstable or
+   unavailable post-action state, make one fresh semantic observation. Never
+   repeat the accepted tap, and never fall back to coordinates merely because
+   its embedded observation was stale.
 6. Use `tap`, `swipe`, `long_press`, `type_text`, and `press_button` for isolated
    actions when no useful accessible target exists. Use `perform_gesture` for a
    timestamped pointer track. Two-track gestures require the device's
@@ -148,7 +172,12 @@ Android Emulator, or authorized Android device connected through ADB.
    `observe_screen.elementSource` is the authoritative provenance field;
    `metroStatus: "active"` confirms Fiber enrichment, while a
    `metro-target-unavailable`, `metro-fiber-unavailable`, or
-   `metro-inspection-failed` status explains native fallback.
+   `metro-inspection-failed` status explains native fallback. Optional fallback
+   detail distinguishes `metro-unreachable`, `metro-running-no-debug-targets`,
+   `metro-target-mismatch`, `metro-fiber-root-missing`, and
+   `metro-connect-or-evaluate-failed`. These diagnostics never make Metro
+   authoritative: continue using the complete native tree whenever enrichment
+   is unavailable.
 9. Add point annotations at exact mismatch coordinates, or rectangular
    annotations when a bounded screen region is the relevant evidence. Keep
    comments brief and specific.

@@ -21,6 +21,7 @@ import {
   accessibilityObserveResultSchema,
   accessibilityResourceSchema,
   annotationMutationSchema,
+  type ElementFallbackDetail,
   type ElementFallbackReason,
   type ElementTreeOutput,
   type IOSAccessibilityStatus,
@@ -126,9 +127,34 @@ export type NativeTapResolution = {
   hitRelationship?: "self" | "descendant" | "ancestor" | "unrelated" | "ambiguous";
   hitMethod?: "snapshot-actionable" | "provider-element-at-point";
   selectorDiagnostics?: SelectorDiagnostics;
+  actionabilityDiagnostics?: ActionabilityDiagnostics;
   searchScope?: "current-rendered-tree";
   absenceConclusive?: boolean;
+  candidates?: ElementSearchMatch[];
 };
+
+export type NativeTapRecoveryAction = "search_again" | "scroll_then_search" | "observe_then_search";
+
+export type NativeTapRecovery = {
+  retryInput: false;
+  recoveryAllowed: boolean;
+  recoveryAction?: NativeTapRecoveryAction;
+};
+
+export function nativeTapRecovery(resolution: NativeTapResolution): NativeTapRecovery {
+  switch (resolution.code) {
+    case "target_offscreen":
+      return { retryInput: false, recoveryAllowed: true, recoveryAction: "scroll_then_search" };
+    case "unstable_snapshot":
+      return { retryInput: false, recoveryAllowed: true, recoveryAction: "observe_then_search" };
+    case "target_disabled":
+    case "hit_target_mismatch":
+    case "ready":
+      return { retryInput: false, recoveryAllowed: false };
+    default:
+      return { retryInput: false, recoveryAllowed: true, recoveryAction: "search_again" };
+  }
+}
 
 type SelectorDiagnosticField = "ref" | "identifier" | "role" | "name" | "value" | "placeholder";
 
@@ -140,6 +166,15 @@ type SelectorDiagnostics = {
   }>;
   splitAcrossNodes: boolean;
   relationship?: "ancestor-descendant" | "separate";
+};
+
+type ActionabilityDiagnostics = {
+  targetActionable: boolean;
+  ambiguous: boolean;
+  candidates: Array<{
+    relationship: "ancestor" | "descendant";
+    node: AccessibilityNode;
+  }>;
 };
 
 export type DestinationVerification = {
@@ -166,6 +201,7 @@ export type DestinationVerification = {
 
 export type DestinationSelector = AccessibilitySelector & {
   checked?: boolean | undefined;
+  enabled?: boolean | undefined;
   selected?: boolean | undefined;
 };
 
@@ -757,7 +793,8 @@ export class SimViewSession {
     }
 
     const fallbackReason = this.#metroInspector.fallbackReason;
-    return this.#accessibilityElementOutput(accessibility, frameId, fallbackReason);
+    const fallbackDetail = this.#metroInspector.fallbackDetail;
+    return this.#accessibilityElementOutput(accessibility, frameId, fallbackReason, fallbackDetail);
   }
 
   async preparedElementSnapshot(maxNodes = 240): Promise<ElementTreeOutput> {
@@ -806,6 +843,7 @@ export class SimViewSession {
     accessibility: AccessibilitySnapshot,
     frameId: string,
     fallbackReason?: ElementFallbackReason,
+    fallbackDetail?: ElementFallbackDetail,
   ): Promise<ElementTreeOutput> {
     const screenContext = await this.#nativeIOSScreenContext(accessibility, frameId);
     this.lastElements = accessibility;
@@ -813,7 +851,14 @@ export class SimViewSession {
     return {
       snapshot: accessibility,
       screenContext,
-      ...(fallbackReason ? { fallback: { reason: fallbackReason } } : {}),
+      ...(fallbackReason
+        ? {
+            fallback: {
+              reason: fallbackReason,
+              ...(fallbackDetail ? { detail: fallbackDetail } : {}),
+            },
+          }
+        : {}),
     };
   }
 
@@ -1024,6 +1069,7 @@ export class SimViewSession {
     if (!target) {
       return { accepted: false, code: "target_not_found", retryable: true };
     }
+    const targetActionability = actionabilityDiagnostics(observation.snapshot, target);
     const frame = target.frame?.normalized;
     if (target.enabled === false || target.hidden === true) {
       return {
@@ -1032,6 +1078,7 @@ export class SimViewSession {
         retryable: false,
         fingerprint,
         target,
+        actionabilityDiagnostics: targetActionability,
       };
     }
     if (!frame || frame.width <= 0 || frame.height <= 0) {
@@ -1041,6 +1088,7 @@ export class SimViewSession {
         retryable: false,
         fingerprint,
         target,
+        actionabilityDiagnostics: targetActionability,
         rawFrame: target.frame,
         viewport: observation.snapshot.screen,
       };
@@ -1053,6 +1101,7 @@ export class SimViewSession {
         retryable: true,
         fingerprint,
         target,
+        actionabilityDiagnostics: targetActionability,
         rawFrame: target.frame,
         viewport: observation.snapshot.screen,
         scrollRequired: true,
@@ -1069,6 +1118,7 @@ export class SimViewSession {
         target,
         rawFrame: target.frame,
         viewport: observation.snapshot.screen,
+        actionabilityDiagnostics: targetActionability,
       };
     }
     const nativeFingerprint = semanticFingerprint(target);
@@ -1085,6 +1135,7 @@ export class SimViewSession {
         target,
         point,
         hitTest: false,
+        actionabilityDiagnostics: targetActionability,
         ...hitResolution.diagnostics,
       };
     }
@@ -2177,6 +2228,7 @@ function matchingElements(
       matches(node.value, selector.value) &&
       matches(node.placeholder, selector.placeholder) &&
       (selector.checked === undefined || node.checked === selector.checked) &&
+      (selector.enabled === undefined || node.enabled === selector.enabled) &&
       (selector.selected === undefined || node.selected === selector.selected),
   );
 }
@@ -2511,6 +2563,59 @@ function isFrameOffscreen(frame: NonNullable<AccessibilityNode["frame"]>["normal
 function isActionableSearchCandidate(node: AccessibilityNode): boolean {
   if (node.enabled === false || node.hidden === true) return false;
   return hasActionSemantics(node);
+}
+
+function actionabilityDiagnostics(
+  snapshot: AccessibilitySnapshot,
+  target: AccessibilityNode,
+): ActionabilityDiagnostics {
+  let targetPath: AccessibilityNode[] | undefined;
+  const findTarget = (node: AccessibilityNode, path: AccessibilityNode[]): void => {
+    if (targetPath) return;
+    const nextPath = [...path, node];
+    if (node === target || node.ref === target.ref) {
+      targetPath = nextPath;
+      return;
+    }
+    for (const child of node.children ?? []) findTarget(child, nextPath);
+  };
+  findTarget(snapshot.root, []);
+
+  const candidates: Array<{
+    relationship: "ancestor" | "descendant";
+    node: AccessibilityNode;
+    distance: number;
+  }> = [];
+  const path = targetPath as AccessibilityNode[] | undefined;
+  if (path) {
+    path
+      .slice(0, -1)
+      .toReversed()
+      .forEach((node, index) => {
+        if (isActionableSearchCandidate(node)) {
+          candidates.push({ relationship: "ancestor", node, distance: index + 1 });
+        }
+      });
+  }
+  const visitDescendants = (node: AccessibilityNode, distance: number): void => {
+    for (const child of node.children ?? []) {
+      if (isActionableSearchCandidate(child)) {
+        candidates.push({ relationship: "descendant", node: child, distance });
+      }
+      visitDescendants(child, distance + 1);
+    }
+  };
+  visitDescendants(target, 1);
+  candidates.sort(
+    (left, right) =>
+      left.distance - right.distance ||
+      Number(left.relationship === "ancestor") - Number(right.relationship === "ancestor"),
+  );
+  return {
+    targetActionable: isActionableSearchCandidate(target),
+    ambiguous: candidates.length > 1,
+    candidates: candidates.slice(0, 2).map(({ relationship, node }) => ({ relationship, node })),
+  };
 }
 
 type SnapshotHit = { node: AccessibilityNode; path: AccessibilityNode[]; depth: number };

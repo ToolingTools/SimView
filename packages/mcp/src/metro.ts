@@ -6,6 +6,7 @@ import type {
   AccessibilityNode,
   AccessibilitySnapshot,
   DeviceDescription,
+  ElementFallbackDetail,
   ElementFallbackReason,
   ReactNativeElementSnapshot,
   ReactNativeScreenContext,
@@ -13,6 +14,7 @@ import type {
 } from "@simview/contracts";
 import {
   CDPSession,
+  checkMetroStatus,
   fetchTargets,
   type MetroServerInfo,
   type MetroTarget,
@@ -62,13 +64,18 @@ type InspectorSession = {
   close(): void;
 };
 type MetroInspectorDependencies = {
-  scan?: (() => Promise<MetroServerInfo[]>) | undefined;
+  scan?: ((host: string) => Promise<MetroServerInfo[]>) | undefined;
+  status?: ((host: string, port: number) => Promise<string | null>) | undefined;
   connect?: ((target: MetroTarget) => Promise<InspectorSession>) | undefined;
   projectRoot?: string | undefined;
+  now?: (() => number) | undefined;
 };
 type MetroTargetWithAppId = MetroTarget & { appId?: unknown };
 
 const METRO_PROXY_RECORD = `${tmpdir()}/metro-mcp-proxy.json`;
+const METRO_HOST = "localhost";
+export const METRO_DISCOVERY_PORTS = [8081, 8082, 19000, 19001, 19002] as const;
+const NEGATIVE_DISCOVERY_TTL_MS = 5_000;
 const INTERNAL_NAMES = new Set([
   "AppContainer",
   "BaseNavigationContainer",
@@ -91,14 +98,22 @@ export class MetroInspector {
   #deviceId: string | undefined;
   #lastError: string | undefined;
   #fallbackReason: ElementFallbackReason | undefined;
-  readonly #scan: () => Promise<MetroServerInfo[]>;
+  #fallbackDetail: ElementFallbackDetail | undefined;
+  #negativeDiscovery:
+    | { deviceId: string; expiresAt: number; detail: ElementFallbackDetail }
+    | undefined;
+  readonly #scan: (host: string) => Promise<MetroServerInfo[]>;
+  readonly #status: (host: string, port: number) => Promise<string | null>;
   readonly #connectSession: (target: MetroTarget) => Promise<InspectorSession>;
   readonly #projectRoot: string | undefined;
+  readonly #now: () => number;
 
   constructor(dependencies: MetroInspectorDependencies = {}) {
-    this.#scan = dependencies.scan ?? (() => scanMetroPorts("127.0.0.1"));
+    this.#scan = dependencies.scan ?? ((host) => scanMetroPorts(host));
+    this.#status = dependencies.status ?? ((host, port) => checkMetroStatus(host, port));
     this.#connectSession = dependencies.connect ?? ((target) => CDPSession.connect(target));
     this.#projectRoot = dependencies.projectRoot ?? process.env.SIMVIEW_PROJECT_ROOT;
+    this.#now = dependencies.now ?? Date.now;
   }
 
   async inspect(
@@ -114,14 +129,37 @@ export class MetroInspector {
     | undefined
   > {
     try {
-      const selected =
-        this.#session?.isConnected && this.#deviceId === device.id
-          ? this.#selected
-          : selectMetroTarget(await this.#scan(), device);
+      if (this.#negativeDiscovery && this.#negativeDiscovery.deviceId !== device.id) {
+        this.#negativeDiscovery = undefined;
+      }
+      let selected =
+        this.#session?.isConnected && this.#deviceId === device.id ? this.#selected : undefined;
       if (!selected) {
-        this.#lastError = "No matching React Native Metro target was found";
-        this.#fallbackReason = "metro-target-unavailable";
-        return undefined;
+        const cached = this.#negativeDiscovery;
+        if (cached && cached.deviceId === device.id && cached.expiresAt > this.#now()) {
+          this.#setUnavailable(cached.detail);
+          return undefined;
+        }
+        const statusPromise = Promise.all(
+          METRO_DISCOVERY_PORTS.map((port) => this.#status(METRO_HOST, port).catch(() => null)),
+        );
+        const servers = await this.#scan(METRO_HOST);
+        selected = selectMetroTarget(servers, device);
+        if (!selected) {
+          const detail: ElementFallbackDetail =
+            servers.length > 0
+              ? "metro-target-mismatch"
+              : (await statusPromise).some((status) => status !== null)
+                ? "metro-running-no-debug-targets"
+                : "metro-unreachable";
+          this.#negativeDiscovery = {
+            deviceId: device.id,
+            expiresAt: this.#now() + NEGATIVE_DISCOVERY_TTL_MS,
+            detail,
+          };
+          this.#setUnavailable(detail);
+          return undefined;
+        }
       }
       const session = await this.#connect(selected);
       this.#deviceId = device.id;
@@ -135,6 +173,7 @@ export class MetroInspector {
       if (!raw?.root) {
         this.#lastError = "The React Native inspector returned no Fiber root";
         this.#fallbackReason = "metro-fiber-unavailable";
+        this.#fallbackDetail = "metro-fiber-root-missing";
         return undefined;
       }
       scaleMetroPointFrames(raw.root, measurementViewport.scaleX, measurementViewport.scaleY);
@@ -192,12 +231,15 @@ export class MetroInspector {
       };
       this.#lastError = undefined;
       this.#fallbackReason = undefined;
+      this.#fallbackDetail = undefined;
+      this.#negativeDiscovery = undefined;
       return { snapshot, screenContext };
     } catch (error) {
       this.#lastError = error instanceof Error ? error.message : String(error);
       this.#fallbackReason = "metro-inspection-failed";
+      this.#fallbackDetail = "metro-connect-or-evaluate-failed";
       console.error(`[simview:metro] ${this.#lastError}`);
-      this.#disconnect();
+      this.#disconnectSession();
       return undefined;
     }
   }
@@ -210,14 +252,23 @@ export class MetroInspector {
     return this.#fallbackReason;
   }
 
+  get fallbackDetail(): ElementFallbackDetail | undefined {
+    return this.#fallbackDetail;
+  }
+
   close(): void {
-    this.#disconnect();
+    this.#disconnectSession();
+    this.#negativeDiscovery = undefined;
+    this.#lastError = undefined;
+    this.#fallbackReason = undefined;
+    this.#fallbackDetail = undefined;
   }
 
   async #connect(selected: SelectedTarget): Promise<InspectorSession> {
     const targetKey = `${selected.server.host}:${selected.server.port}:${selected.target.id}`;
     if (this.#session?.isConnected && this.#targetKey === targetKey) return this.#session;
-    this.#disconnect();
+    this.#disconnectSession();
+    this.#negativeDiscovery = undefined;
 
     const target = supportsMultipleDebuggers(selected.target)
       ? selected.target
@@ -228,7 +279,13 @@ export class MetroInspector {
     return this.#session;
   }
 
-  #disconnect(): void {
+  #setUnavailable(detail: ElementFallbackDetail): void {
+    this.#lastError = "No matching React Native Metro target was found";
+    this.#fallbackReason = "metro-target-unavailable";
+    this.#fallbackDetail = detail;
+  }
+
+  #disconnectSession(): void {
     this.#session?.close();
     this.#session = undefined;
     this.#targetKey = undefined;

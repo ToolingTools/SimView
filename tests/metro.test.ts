@@ -10,6 +10,7 @@ import {
 } from "@simview/contracts";
 import {
   fiberInspectionExpression,
+  METRO_DISCOVERY_PORTS,
   MetroInspector,
   metroMeasurementViewport,
   normalizeProjectSource,
@@ -84,14 +85,76 @@ describe("Metro React Native target selection", () => {
   });
 
   test("returns no Fiber result when Metro is unavailable", async () => {
+    const scanHosts: string[] = [];
+    const statusCalls: Array<{ host: string; port: number }> = [];
     const inspector = new MetroInspector({
-      scan: async () => [],
+      scan: async (host) => {
+        scanHosts.push(host);
+        return [];
+      },
+      status: async (host, port) => {
+        statusCalls.push({ host, port });
+        return null;
+      },
       connect: async () => {
         throw new Error("should not connect");
       },
     });
 
     expect(await inspector.inspect(device, accessibilitySnapshot(), "frame-1")).toBeUndefined();
+    expect(scanHosts).toEqual(["localhost"]);
+    expect(statusCalls).toEqual(METRO_DISCOVERY_PORTS.map((port) => ({ host: "localhost", port })));
+    expect(inspector.fallbackReason).toBe("metro-target-unavailable");
+    expect(inspector.fallbackDetail).toBe("metro-unreachable");
+  });
+
+  test("distinguishes a running Metro server with no debug targets", async () => {
+    const inspector = new MetroInspector({
+      scan: async () => [],
+      status: async (_host, port) => (port === 8081 ? "running" : null),
+    });
+
+    expect(await inspector.inspect(device, accessibilitySnapshot(), "frame-1")).toBeUndefined();
+    expect(inspector.fallbackReason).toBe("metro-target-unavailable");
+    expect(inspector.fallbackDetail).toBe("metro-running-no-debug-targets");
+  });
+
+  test("distinguishes targets that belong to a different device", async () => {
+    const inspector = new MetroInspector({
+      scan: async () => [server(target({ deviceName: "Pixel 9" }))],
+      status: async () => "running",
+    });
+
+    expect(await inspector.inspect(device, accessibilitySnapshot(), "frame-1")).toBeUndefined();
+    expect(inspector.fallbackDetail).toBe("metro-target-mismatch");
+  });
+
+  test("caches negative discovery for five seconds and invalidates by device or close", async () => {
+    let now = 1_000;
+    let scans = 0;
+    const inspector = new MetroInspector({
+      scan: async () => {
+        scans += 1;
+        return [];
+      },
+      status: async () => null,
+      now: () => now,
+    });
+
+    await inspector.inspect(device, accessibilitySnapshot(), "frame-1");
+    await inspector.inspect(device, accessibilitySnapshot(), "frame-2");
+    expect(scans).toBe(1);
+
+    now += 5_001;
+    await inspector.inspect(device, accessibilitySnapshot(), "frame-3");
+    expect(scans).toBe(2);
+
+    await inspector.inspect(androidDevice(), accessibilitySnapshot(), "frame-4");
+    expect(scans).toBe(3);
+
+    inspector.close();
+    await inspector.inspect(androidDevice(), accessibilitySnapshot(), "frame-5");
+    expect(scans).toBe(4);
   });
 
   test("disconnects a failed target and reconnects after reload", async () => {
@@ -180,6 +243,21 @@ describe("Metro React Native target selection", () => {
     expect(await inspector.inspect(device, accessibilitySnapshot(), "frame-1")).toBeUndefined();
     expect(performance.now() - started).toBeLessThan(1_600);
     expect(inspector.fallbackReason).toBe("metro-inspection-failed");
+    expect(inspector.fallbackDetail).toBe("metro-connect-or-evaluate-failed");
+  });
+
+  test("reports a matching target whose Fiber root is missing", async () => {
+    const inspector = new MetroInspector({
+      scan: async () => [server(target())],
+      connect: async () =>
+        new FakeInspectorSession({
+          result: { value: { renderer: "fabric", nodeCount: 0, truncated: false } },
+        }),
+    });
+
+    expect(await inspector.inspect(device, accessibilitySnapshot(), "frame-1")).toBeUndefined();
+    expect(inspector.fallbackReason).toBe("metro-fiber-unavailable");
+    expect(inspector.fallbackDetail).toBe("metro-fiber-root-missing");
   });
 });
 

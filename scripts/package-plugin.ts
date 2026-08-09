@@ -16,6 +16,7 @@ const compiledArtifacts = [
 const compiledSourcePackages = ["app", "client", "contracts", "core", "mcp", "cli"];
 
 const sourceFiles = compiledSourcePackages.flatMap((packageName) => [
+  join(root, "packages", packageName, "package.json"),
   ...new Bun.Glob("src/**/*.ts").scanSync({
     cwd: join(root, "packages", packageName),
     absolute: true,
@@ -45,6 +46,7 @@ sourceFiles.push(
   }),
   join(root, "native", "SimViewXCTestProvider", "project.yml"),
   join(root, "packages", "app", "src", "preview.html"),
+  join(root, "bun.lock"),
   join(root, "package.json"),
   join(root, "manifest.json"),
   join(root, ".codex-plugin", "plugin.json"),
@@ -87,6 +89,7 @@ await $`cp ${join(root, "packages/core/bin/libSimViewProbe.dylib")} ${join(stage
 await $`cp ${join(root, "packages/core/bin/simview-android-agent.jar")} ${join(stage, "bin/simview-android-agent.jar")}`;
 await $`cp -R ${join(root, "packages/core/bin/xctest-provider")} ${join(stage, "bin/xctest-provider")}`;
 await $`chmod +x ${join(stage, "bin/simview")} ${join(stage, "bin/simview-core")}`;
+await $`bun ${join(root, "scripts", "smoke-semantic-mcp.ts")} --binary=${join(stage, "bin", "simview")} --startup-only --isolated`;
 for (const path of new Bun.Glob("**/.DS_Store").scanSync({ cwd: stage, absolute: true })) {
   await rm(path, { force: true });
 }

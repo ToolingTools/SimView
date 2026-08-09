@@ -119,12 +119,21 @@ export const elementFallbackReasonSchema = z.enum([
   "metro-inspection-failed",
 ]);
 
+export const elementFallbackDetailSchema = z.enum([
+  "metro-unreachable",
+  "metro-running-no-debug-targets",
+  "metro-target-mismatch",
+  "metro-fiber-root-missing",
+  "metro-connect-or-evaluate-failed",
+]);
+
 export const elementTreeOutputSchema = z.object({
   snapshot: elementSnapshotSchema,
   screenContext: screenContextSchema,
   fallback: z
     .object({
       reason: elementFallbackReasonSchema,
+      detail: elementFallbackDetailSchema.optional(),
     })
     .optional(),
 });
@@ -161,5 +170,6 @@ export type NativeIOSScreenContext = z.infer<typeof nativeIOSScreenContextSchema
 export type AndroidScreenContext = z.infer<typeof androidScreenContextSchema>;
 export type ScreenContext = z.infer<typeof screenContextSchema>;
 export type ElementFallbackReason = z.infer<typeof elementFallbackReasonSchema>;
+export type ElementFallbackDetail = z.infer<typeof elementFallbackDetailSchema>;
 export type ElementTreeOutput = z.infer<typeof elementTreeOutputSchema>;
 export type ElementTreePage = z.infer<typeof elementTreePageSchema>;

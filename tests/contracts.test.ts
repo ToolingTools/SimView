@@ -419,6 +419,27 @@ describe("shared protocol contracts", () => {
       }).success,
     ).toBe(true);
   });
+
+  test("accepts bounded Metro fallback detail without changing the coarse reason", () => {
+    const output = elementTreeOutputSchema.parse({
+      snapshot: observationSnapshot("native-1", "native:continue", "Continue"),
+      screenContext: {
+        schemaVersion: 1,
+        kind: "native-ios",
+        capturedAt: "2026-08-08T10:00:00.000Z",
+        frameId: "frame-1",
+      },
+      fallback: {
+        reason: "metro-target-unavailable",
+        detail: "metro-running-no-debug-targets",
+      },
+    });
+
+    expect(output.fallback).toEqual({
+      reason: "metro-target-unavailable",
+      detail: "metro-running-no-debug-targets",
+    });
+  });
 });
 
 function observationSnapshot(

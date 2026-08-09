@@ -184,8 +184,8 @@ Accessibility selectors must include at least one of `ref`, `identifier`,
 inspection exposes `probe.target` so callers can see the currently selected
 bundle before requesting context or changing it.
 
-Destination-verification selectors additionally accept `checked` and
-`selected`. Their `name` field matches label/title first and falls back to a
+Destination-verification selectors additionally accept `checked`, `selected`,
+and `enabled`. Their `name` field matches label/title first and falls back to a
 non-redacted text value, which keeps Android `TextView` destinations compatible
 with the same selector shape used for iOS names. Full MCP observations expose a
 compact text tree plus `semantic.resourceUri`; structured semantic nodes are
@@ -195,6 +195,11 @@ values emit only `secure-value`. `elementSource` is authoritative provenance, an
 `metroStatus` distinguishes active Fiber inspection from each native fallback
 reason. Fiber revision/timestamp fields are emitted only for
 `react-native-fiber` snapshots.
+Native fallback objects may include one bounded detail:
+`metro-unreachable`, `metro-running-no-debug-targets`,
+`metro-target-mismatch`, `metro-fiber-root-missing`, or
+`metro-connect-or-evaluate-failed`. The complete native tree remains present for
+every fallback.
 
 At the MCP layer, `get_element_tree` and its app-only alias return a versioned
 element snapshot plus frame-scoped screen context. The snapshot source is
@@ -231,6 +236,12 @@ after ranking normalization. A missing native target may include bounded
 `selectorDiagnostics` for each requested field; `splitAcrossNodes` and
 `relationship` explain when fields matched separate or ancestor/descendant
 nodes without relaxing the requirement that every field match one node.
+Non-dispatched semantic failures set `retryInput: false`, retain
+`safeToContinue: false` as a batch-stop signal, and expose `recoveryAllowed`
+plus an optional `recoveryAction` of `search_again`, `scroll_then_search`, or
+`observe_then_search`. Bounded `actionabilityDiagnostics` identify whether the
+matched target is actionable and include at most two actionable ancestors or
+descendants without redirecting input automatically.
 Destination selectors use exact matching by default. Callers that know only a
 stable fragment of a composite native AX label must set `exact: false`; they
 must not assume an identifier fragment is a complete accessible name. When a
@@ -258,6 +269,9 @@ Post-dispatch verification failures are prefixed
 `HARD STOP — INPUT WAS DISPATCHED`, set `isError: true`,
 `safeToContinue: false`, and `retryInput: false`, and forbid further input until
 new user direction or an independent UI change.
+Successful standalone and batch semantic taps return an interaction-summary
+text item followed by the stable compact post-action tree exactly once; visual
+mode preserves its image alongside that compact semantic text.
 When React Native supplies screen context while native AX supplies the
 rendered semantic nodes, compact text reports both as
 `context=react-native-fiber ... elements=core-simulator-xctest` (or

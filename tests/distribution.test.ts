@@ -97,6 +97,23 @@ describe("release distribution", () => {
     expect(skill).toContain("report discovery as inconclusive");
   });
 
+  test("requires an unambiguous saved-card choice and post-tap proof", async () => {
+    const skill = await Bun.file("skills/simview/SKILL.md").text();
+    expect(skill).toContain("exactly one eligible card exists");
+    expect(skill).toContain("multiple eligible cards remain");
+    expect(skill).toContain("Never request or expose a full card number or CVV");
+    expect(skill).toContain("accept proxy proof only when all of these hold");
+    expect(skill).toContain("changed to `enabled: true`");
+  });
+
+  test("guards compiled plugin binaries with dependency manifests and isolated startup", async () => {
+    const packaging = await Bun.file("scripts/package-plugin.ts").text();
+    expect(packaging).toContain('join(root, "bun.lock")');
+    expect(packaging).toContain('join(root, "packages", packageName, "package.json")');
+    expect(packaging).toContain("--startup-only");
+    expect(packaging).toContain("--isolated");
+  });
+
   test("rejects npm archives larger than the Codex plugin limit", () => {
     expect(() =>
       assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes, "simview.tgz"),

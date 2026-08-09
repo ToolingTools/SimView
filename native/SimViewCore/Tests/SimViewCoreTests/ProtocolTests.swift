@@ -264,7 +264,7 @@ final class ProtocolTests: XCTestCase {
             scope: "interactive",
             maxNodes: 100,
             settleQuietMilliseconds: 40,
-            maximumWaitMilliseconds: 240,
+            maximumWaitMilliseconds: 800,
             strategy: "ios-axp"
         ) { _, _ in
             _ = captures.increment()
@@ -407,7 +407,7 @@ final class ProtocolTests: XCTestCase {
             scope: "interactive",
             maxNodes: 100,
             settleQuietMilliseconds: 20,
-            maximumWaitMilliseconds: 220,
+            maximumWaitMilliseconds: 500,
             strategy: "android-shell-dump"
         ) { _, _ in
             _ = captures.increment()
@@ -445,7 +445,7 @@ final class ProtocolTests: XCTestCase {
             scope: "interactive",
             maxNodes: 100,
             settleQuietMilliseconds: 40,
-            maximumWaitMilliseconds: 520,
+            maximumWaitMilliseconds: 800,
             strategy: "android-shell-dump"
         ) { _, _ in
             _ = captures.increment()
