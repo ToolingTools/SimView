@@ -78,6 +78,14 @@ describe("shared protocol contracts", () => {
       limit: 10,
     });
     expect(elementSearchQuerySchema.safeParse({ query: "", limit: 50 }).success).toBe(false);
+    const punctuationOnly = elementSearchQuerySchema.safeParse({ query: "***" });
+    expect(punctuationOnly.success).toBe(false);
+    if (!punctuationOnly.success) {
+      expect(punctuationOnly.error.issues[0]?.message).toContain(
+        "Query must contain at least one letter or number",
+      );
+    }
+    expect(elementSearchQuerySchema.safeParse({ query: "#30363063" }).success).toBe(true);
   });
 
   test("uses visible and hidden as the only wait states", () => {

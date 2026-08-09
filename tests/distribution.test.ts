@@ -80,6 +80,23 @@ describe("release distribution", () => {
     });
   });
 
+  test("keeps generic navigation out of destination verification guidance", async () => {
+    const skill = await Bun.file(join(root, "skills/simview/SKILL.md")).text();
+
+    expect(skill).toContain("`verifyDestination` is optional");
+    expect(skill).toContain("For generic section/menu navigation");
+    expect(skill).toContain("Never copy the tapped control's label");
+    expect(skill).toContain("`Invoices`, `Orders`, `Card`, or `Pay`");
+  });
+
+  test("keeps rendered-list exploration guidance in the packaged skill", async () => {
+    const skill = await Bun.file("skills/simview/SKILL.md").text();
+    expect(skill).toContain("Semantic search covers the currently rendered tree only");
+    expect(skill).toContain("never batch speculative swipes");
+    expect(skill).toContain("eight exploratory swipes");
+    expect(skill).toContain("report discovery as inconclusive");
+  });
+
   test("rejects npm archives larger than the Codex plugin limit", () => {
     expect(() =>
       assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes, "simview.tgz"),

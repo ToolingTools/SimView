@@ -287,6 +287,8 @@ export const semanticNodeSummarySchema = z.object({
   hidden: z.boolean().optional(),
   focused: z.boolean().optional(),
   expanded: z.boolean().optional(),
+  checked: z.boolean().optional(),
+  selected: z.boolean().optional(),
   visibleFraction: z.number().finite().min(0).max(1).optional(),
   actions: z.array(z.string()).optional(),
   interactive: z.boolean().optional(),
@@ -323,6 +325,8 @@ export function summarizeAccessibilityNode(node: AccessibilityNode): SemanticNod
     ...(node.hidden !== undefined ? { hidden: node.hidden } : {}),
     ...(node.focused !== undefined ? { focused: node.focused } : {}),
     ...(node.expanded !== undefined ? { expanded: node.expanded } : {}),
+    ...(node.checked === true ? { checked: true } : {}),
+    ...(node.selected === true ? { selected: true } : {}),
     ...(node.visibleFraction !== undefined ? { visibleFraction: node.visibleFraction } : {}),
     ...(node.actions?.length ? { actions: node.actions } : {}),
     ...(node.interactive !== undefined ? { interactive: node.interactive } : {}),
@@ -332,8 +336,26 @@ export function summarizeAccessibilityNode(node: AccessibilityNode): SemanticNod
   };
 }
 
+export function normalizeSemanticSearchText(value: string): string {
+  return value
+    .normalize("NFKD")
+    .replace(/\p{Mark}/gu, "")
+    .toLocaleLowerCase()
+    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
+    .trim();
+}
+
+export const semanticSearchTextSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(200)
+  .refine((value) => normalizeSemanticSearchText(value).length > 0, {
+    message: "PARAMETER_INVALID: Query must contain at least one letter or number",
+  });
+
 export const elementSearchQuerySchema = z.object({
-  query: z.string().trim().min(1).max(200),
+  query: semanticSearchTextSchema,
   roles: z.array(z.string().trim().min(1)).max(10).optional(),
   actionableOnly: z.boolean().default(true),
   visibleOnly: z.boolean().default(true),

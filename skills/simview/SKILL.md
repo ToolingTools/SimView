@@ -8,13 +8,16 @@ description: Open, control, annotate, and send visual feedback from a local iOS 
 Use SimView when a task needs visual inspection or input in an iOS Simulator,
 Android Emulator, or authorized Android device connected through ADB.
 
-1. Call `list_devices` and select an available device. Its default bounded
+1. Call `list_devices` once without `platform` and select an available device.
+   Only filter by platform when the user explicitly requested iOS or Android;
+   filtering prematurely can hide the only available device. Its default bounded
    response omits shutdown and unavailable inventory; request additional pages
    with `availableOnly: false` only when diagnosing device discovery. Prefer an
    explicitly supplied device ID. If multiple available devices are returned
    and no device ID was supplied, present them as a numbered list (including
    each device's name, platform, and ID) and prompt the user to select one;
-   do not silently choose the first device. Once the user selects a device,
+   do not silently choose the first device. When exactly one available device
+   remains, connect to it automatically. Once the user selects a device,
    use its ID for the connection. Always call `connect_device`
    first and continue only after it succeeds. If the user asked to view the
    interactive preview, then call `open_simview` with the same device ID; its
@@ -29,45 +32,93 @@ Android Emulator, or authorized Android device connected through ADB.
 2. Call `observe_screen` with `mode: "semantic"` to read compact prepared
    semantics without waiting for or returning an image.
    Pass the prior `observationId` as `sinceObservationId` to receive only a
-   semantic delta. Use `mode: "visual"` only when the user explicitly requests
-   visual inspection; semantic failure alone is not permission to request an
-   image. When a
+   semantic delta. If compact semantics do not establish whether a target or
+   state exists, follow this recovery ladder in order: call
+   `get_accessibility_tree`, then use targeted `search_elements` queries built
+   from likely visible copy, then make at most one `observe_screen` call with
+   `mode: "visual"` if the state remains indeterminate. That single visual
+   fallback is read-only and does not require a separate user request. Vision
+   may establish existence, visible text, or selection state, but it must not
+   justify coordinate input while a semantic target is available or authorize
+   a consequential action such as submitting a payment. Do not repeat visual
+   observations as a substitute for unresolved semantics. When a
    matching development-mode React Native target is available through Metro,
    SimView uses its visual Fiber tree and screen/route context; otherwise it
    uses the platform accessibility tree. Prefer identifier, role, and
    accessible name selectors over coordinates.
 3. Use `search_elements` with a short natural-language query to discover a
-   target in the current semantic tree. It returns bounded ranked matches; pass
-   the selected match's `ref` to `tap_element`. Use `find_elements` when exact
+   target in the current semantic tree. Queries must contain at least one
+   Unicode letter or number; do not send punctuation-only placeholders. It
+   returns bounded ranked matches; pass the selected match's `ref` to
+   `tap_element`. Use `find_elements` when exact
    identifier, role, name, value, or ref fields are already known. Never guess
    coordinates while semantic targets are available. If the target appears in
    `excludedCandidates`, swipe in its `suggestedScrollDirection`, then search
    again and use the new ref; never reuse the excluded generation's ref.
+   Semantic search covers the currently rendered tree only. In a scroll view,
+   table, list, or virtualized collection, a zero match or the presence of
+   other rows does not prove that the requested item is absent. When the task
+   expects a data row and no match is rendered, explore the surface with one
+   viewport-sized swipe at a time, normally swiping up to reveal later rows.
+   After every swipe, make a semantic observation and repeat the targeted
+   search; never batch speculative swipes because each step may reveal the
+   target and regenerates refs. Track the first and last visible row labels (or
+   other stable edge markers) plus the observation revision. Stop when the
+   target appears, a swipe leaves both semantics and edge markers unchanged
+   (the boundary), the surface loops, or eight exploratory swipes have been
+   made. If the starting position or continuation direction is unclear, explore
+   to one boundary and then reverse within the same eight-swipe total. Prefer
+   an exposed filter or search control over traversing a long collection. If
+   the bound is exhausted, report discovery as inconclusive rather than saying
+   that no matching item exists.
 4. Prefer `perform_actions` with `observe: "semantic"` for ordered navigation.
    It sends up to 20 actions, waits for post-action stability, and returns one
    coherent post-action observation. Use `tap_element` for a single semantic
    target; it re-resolves the target before input. Input acknowledgement alone
-   is not proof that navigation completed. For payments, invoices, orders,
-   accounts, or any other entity-sensitive flow, set a unique
-   `verifyDestination.identity` on the navigating `tap_element`, with optional
-   `verifyDestination.assertions` for amount, status, or other supporting facts.
-   Build selectors from labels actually
-   exposed by destination AX instead of assuming that amounts are AX values.
+   is not proof that navigation completed. `verifyDestination` is optional; do
+   not attach it to every tap merely because the overall flow involves a
+   payment, invoice, order, or account. For generic section/menu navigation,
+   such as opening Invoices, omit it and rely on the stable semantic post-action
+   observation. Use it only when a distinctive identity is known to be exposed
+   on the destination, normally when opening a specific entity or before a
+   consequential follow-up action. Never copy the tapped control's label into
+   `verifyDestination.identity`, and never use a generic section/action label
+   such as `Invoices`, `Orders`, `Card`, or `Pay`. Optional
+   `verifyDestination.assertions` may establish amount, status, or other
+   supporting facts.
+   Build selectors from fields actually exposed by destination AX. `name`
+   matches a native label/title and falls back to a non-redacted text value, so
+   it also works for Android `TextView` content; use `value` when observation
+   explicitly exposes that field.
    Destination selectors are exact by default. When only a stable fragment is
    known, such as an invoice number within `Invoice #30363063`, use a name
    selector with `exact: false` (for example `{name: "#30363063", exact:
    false}`); use exact matching only when the complete AX label is known.
    `verifyDestination.timeoutMs` accepts 100–5000 milliseconds and must never
-   exceed 5000. Use an entity number or similarly stable identifier as identity;
-   do not use a generic label such as `Card`, `Pay`, or `Invoices`. Identity must
+   exceed 5000. Use an entity number or similarly stable identifier as identity.
+   Identity must
    match exactly one native node or it fails closed as `destination_ambiguous`.
    Assertions only need to be present and may match multiple nodes, such as the
    same amount shown in total and outstanding fields. Strengthen an ambiguous
    identity and do not repeat the accepted tap.
+   For a checkbox, radio control, switch, or selectable tab, add `checked` or
+   `selected` to the identity/assertion when native accessibility exposes that
+   state. If the state is not exposed, treat selection as unconfirmed and rely
+   on a later independently verifiable destination instead of repeating the tap.
    Verify entity identity on the last screen where that identifier is exposed,
    before any consequential follow-up action. Treat MCP `isError` or
    `safeToContinue: false` as an unconditional stop even when the nested
    `interaction` receipt says the tap was accepted.
+   `HARD STOP — INPUT WAS DISPATCHED` and `retryInput: false` mean no further
+   device input may be sent until the user supplies new direction or an
+   independent UI change occurs.
+   When `inputDispatched` is false, use the returned `hitNode`,
+   `actionableHitNode`, `hitRelationship`, and `selectorDiagnostics`
+   diagnostics. Every selector field must match one native node; do not combine
+   a container identifier with a child's accessible name. If diagnostics show
+   split nodes, use `search_elements` and pass its generation-scoped ref. Do not
+   immediately observe, search, and retry the unchanged target; retry only
+   after an independent UI change or when the error is genuinely transient.
 5. If an accepted semantic tap reports unstable or unavailable post-action
    observation, make one fresh semantic observation. Never repeat the accepted
    tap, and never fall back to coordinates merely because its embedded
@@ -85,12 +136,19 @@ Android Emulator, or authorized Android device connected through ADB.
    UIKit probe only for an iOS Simulator when class, controller, window, or
    scene context is needed and relaunching an explicitly selected third-party
    app is acceptable. Android uses UIAutomator context and does not support the
-   UIKit probe.
+   UIKit probe. Its raw `hitNode` is the deepest accessible node at the point,
+   while `actionableHitNode` is the enabled actionable node selected from the
+   same snapshot. Physical input is always dispatched through the native
+   platform backend, never through the semantic tree.
 8. Treat React Native route, component, testID, and source context as optional;
    never block on Metro or require Metro MCP itself to be installed.
    Native iOS output reports `context=native-ios` and the active element source
    (`core-simulator-xctest` or `core-simulator-ax`); do not interpret the absence
    of a Metro target as an error.
+   `observe_screen.elementSource` is the authoritative provenance field;
+   `metroStatus: "active"` confirms Fiber enrichment, while a
+   `metro-target-unavailable`, `metro-fiber-unavailable`, or
+   `metro-inspection-failed` status explains native fallback.
 9. Add point annotations at exact mismatch coordinates, or rectangular
    annotations when a bounded screen region is the relevant evidence. Keep
    comments brief and specific.

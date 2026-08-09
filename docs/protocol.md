@@ -140,11 +140,13 @@ after the requested quiet period. The result includes `revision`,
 `eventChanged`, `stable`, `timedOut`, `strategy`, and settlement timestamps.
 Additive diagnostics report `fallbackUsed`, `captureCount`, and `changeSource`
 (`event`, `snapshot-diff`, or `none`) without changing the protocol version.
-iOS keeps AXP event-first. When no event arrives, it probes after 150 ms with at
-most two snapshot captures: a changed first probe is confirmed once after the
-quiet window, while an unchanged first probe reserves its second capture for
-the deadline. A stable fallback diff is reported as a changed, settled result;
-a still-changing confirmation is unstable.
+iOS keeps AXP event-first. When no event arrives, it probes after 150 ms. A
+changed probe is confirmed after the quiet window; if the confirmation changes,
+bounded polling continues from the latest snapshot until two captures agree or
+the original deadline expires. An unchanged first probe reserves another
+capture for the deadline. Android shell and other snapshot-diff strategies use
+the same changed-snapshot confirmation rule. A stable fallback diff is reported
+as a changed, settled result; a continuously changing tree is unstable.
 Transient root-only iOS trees are retried three times with a 25 ms delay;
 persistent root-only application placeholders are returned as degraded rather
 than complete. Event-backed observation debounces before one post-event capture.
@@ -169,12 +171,30 @@ The current Android agent runs a bounded shell `uiautomator dump` and reports
 500 ms, and root-only/zero-sized results receive at most two retries. A future
 direct agent `UiAutomation` capture is reserved as
 `android-agent-uiautomation`, but is not currently advertised.
+Android semantic taps resolve the raw deepest `hitNode` and the enabled
+`actionableHitNode` from the same fresh UIAutomator snapshot used to re-resolve
+the target. A non-actionable text child may therefore identify the raw hit while
+its actionable container is selected. Distinct nested or overlapping actionable
+controls fail closed. The semantic tree only validates the target; physical
+input remains native-only.
 
 Accessibility selectors must include at least one of `ref`, `identifier`,
 `role`, `name`, `value`, or `placeholder`. `accessibility.wait` uses `state: "visible"` or
 `state: "hidden"`; the same names are used by the CLI and MCP tools. Probe
 inspection exposes `probe.target` so callers can see the currently selected
 bundle before requesting context or changing it.
+
+Destination-verification selectors additionally accept `checked` and
+`selected`. Their `name` field matches label/title first and falls back to a
+non-redacted text value, which keeps Android `TextView` destinations compatible
+with the same selector shape used for iOS names. Full MCP observations expose a
+compact text tree plus `semantic.resourceUri`; structured semantic nodes are
+included only for deltas. Compact nodes include normalized, 120-character
+non-redacted values when those values differ from their label/title; redacted
+values emit only `secure-value`. `elementSource` is authoritative provenance, and
+`metroStatus` distinguishes active Fiber inspection from each native fallback
+reason. Fiber revision/timestamp fields are emitted only for
+`react-native-fiber` snapshots.
 
 At the MCP layer, `get_element_tree` and its app-only alias return a versioned
 element snapshot plus frame-scoped screen context. The snapshot source is
@@ -201,12 +221,28 @@ non-retryable hard-stop code `destination_ambiguous`. Failed checks may include 
 three native-derived selector `suggestions`, never refs or indexes. Search
 keeps ordinary `matches` visible and actionable while reporting bounded
 `excludedCandidates` with exclusion reasons and swipe guidance.
+Every search response declares `searchScope: "current-rendered-tree"` and
+`absenceConclusive: false`. Native accessibility providers may omit rows that a
+scrollable list, table, or virtualized collection has not rendered, so zero
+matches cannot establish dataset absence. Agents explore such surfaces with
+bounded single swipes and repeat semantic search after each changed snapshot.
+Semantic search queries must contain at least one Unicode letter or number
+after ranking normalization. A missing native target may include bounded
+`selectorDiagnostics` for each requested field; `splitAcrossNodes` and
+`relationship` explain when fields matched separate or ancestor/descendant
+nodes without relaxing the requirement that every field match one node.
 Destination selectors use exact matching by default. Callers that know only a
 stable fragment of a composite native AX label must set `exact: false`; they
 must not assume an identifier fragment is a complete accessible name. When a
 later destination-verification snapshot proves the native tree settled, its
 revision and fallback diagnostics supersede an earlier embedded post-action
 timeout in the returned observation receipt.
+Destination verification is optional and is not required on every tap in an
+entity-sensitive workflow. Generic section/menu navigation relies on the stable
+semantic post-action observation. A verifier is appropriate only when the
+caller knows a distinctive identity exposed by the destination; the tapped
+control's label and generic labels such as `Invoices`, `Orders`, `Card`, or
+`Pay` are not destination evidence.
 `verifyDestination.timeoutMs` is bounded to 100–5000 milliseconds.
 `verifyDestination.identity` must match exactly one native node, while each
 optional `verifyDestination.assertions` selector must be present at least once.
@@ -218,6 +254,10 @@ Action batches report both `completedActionCount` and `dispatchedActionCount`.
 The latter includes a rejected action whose input was already sent; callers
 must never infer that a failed action is safe to repeat. Text receipts separate
 `retryObservation` from `retryInput`, which remains false after dispatch.
+Post-dispatch verification failures are prefixed
+`HARD STOP — INPUT WAS DISPATCHED`, set `isError: true`,
+`safeToContinue: false`, and `retryInput: false`, and forbid further input until
+new user direction or an independent UI change.
 When React Native supplies screen context while native AX supplies the
 rendered semantic nodes, compact text reports both as
 `context=react-native-fiber ... elements=core-simulator-xctest` (or

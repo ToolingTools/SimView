@@ -25,7 +25,12 @@ export function compactAccessibilityTree(
   );
   const lines = nodes.map((node, index) => {
     const label = node.label ?? node.title;
-    const name = label ? ` "${label.replace(/\s+/g, " ").slice(0, 120)}"` : "";
+    const compactLabel = label?.replace(/\s+/g, " ").trim().slice(0, 120);
+    const name = compactLabel ? ` "${compactLabel}"` : "";
+    const compactValue = node.valueRedacted
+      ? undefined
+      : node.value?.replace(/\s+/g, " ").trim().slice(0, 120);
+    const value = compactValue && compactValue !== compactLabel ? ` value="${compactValue}"` : "";
     const identifierValue = node.testID ?? node.identifier;
     const identifier = identifierValue ? ` id=${identifierValue}` : "";
     const component = node.component ? ` component=${node.component}` : "";
@@ -40,11 +45,13 @@ export function compactAccessibilityTree(
     const state = [
       node.enabled === false ? "disabled" : "",
       node.focused ? "focused" : "",
+      node.checked ? "checked" : "",
+      node.selected ? "selected" : "",
       node.valueRedacted ? "secure-value" : "",
     ]
       .filter(Boolean)
       .join(" ");
-    return `@${index + 1} ${node.role ?? "element"}${name}${identifier}${component}${host}${source}${bounds}${state ? ` ${state}` : ""}`;
+    return `@${index + 1} ${node.role ?? "element"}${name}${value}${identifier}${component}${host}${source}${bounds}${state ? ` ${state}` : ""}`;
   });
   const screen = snapshot.screen;
   return [

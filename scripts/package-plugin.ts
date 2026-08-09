@@ -1,4 +1,4 @@
-import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 import { assertNoRepowiseArtifacts, createPackagedMcpConfig } from "./release-config";
@@ -69,6 +69,11 @@ await mkdir(join(stage, "assets"), { recursive: true });
 await mkdir(join(stage, "skills"), { recursive: true });
 await $`cp -R ${join(root, ".codex-plugin")} ${join(root, ".claude-plugin")} ${stage}`;
 await $`cp -R ${join(root, "skills", "simview")} ${join(stage, "skills", "simview")}`;
+const sourceSkill = await readFile(join(root, "skills", "simview", "SKILL.md"));
+const packagedSkill = await readFile(join(stage, "skills", "simview", "SKILL.md"));
+if (!sourceSkill.equals(packagedSkill)) {
+  throw new Error("Packaged SimView skill differs from skills/simview/SKILL.md");
+}
 await $`cp ${join(root, "assets/icon-512.png")} ${join(stage, "assets/icon-512.png")}`;
 await $`cp ${join(root, "README.md")} ${join(root, "LICENSE")} ${join(root, "THIRD_PARTY_NOTICES.md")} ${stage}`;
 await writeFile(

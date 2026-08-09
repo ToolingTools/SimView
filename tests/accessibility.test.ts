@@ -47,6 +47,65 @@ describe("accessibility helpers", () => {
     expect(compact).toContain("[0.047,0.858 0.907x0.064]");
   });
 
+  test("surfaces confirmed checked and selected state in compact output", () => {
+    const compact = compactAccessibilityTree({
+      ...snapshot,
+      root: {
+        ...snapshot.root,
+        children: snapshot.root.children?.map((node) => ({
+          ...node,
+          checked: true,
+          selected: true,
+        })),
+      },
+    });
+    expect(compact).toContain("checked selected");
+  });
+
+  test("includes bounded Android text values without leaking redacted or duplicate values", () => {
+    const compact = compactAccessibilityTree({
+      ...snapshot,
+      source: "android-agent-shell",
+      root: {
+        ...snapshot.root,
+        children: [
+          {
+            ref: "android:card:3670",
+            role: "android.widget.TextView",
+            value: "  Ending in   3670  ",
+            enabled: true,
+          },
+          {
+            ref: "android:card:5181",
+            role: "android.widget.TextView",
+            label: "Ending in 5181",
+            value: "Ending in 5181",
+            enabled: false,
+          },
+          {
+            ref: "android:card:secret",
+            role: "android.widget.TextView",
+            value: "4111111111111111",
+            valueRedacted: true,
+          },
+          {
+            ref: "android:card:long",
+            role: "android.widget.TextView",
+            value: `Ending in 0003 ${"x".repeat(160)}`,
+          },
+        ],
+      },
+    });
+
+    expect(compact).toContain('value="Ending in 3670"');
+    expect(compact).toContain('"Ending in 5181" disabled');
+    expect(compact).not.toContain('"Ending in 5181" value="Ending in 5181"');
+    expect(compact).not.toContain("4111111111111111");
+    expect(compact).toContain("secure-value");
+    const longValue = compact.split("\n").find((line) => line.includes("Ending in 0003"));
+    expect(longValue?.match(/value="([^"]*)"/)?.[1]?.length).toBe(120);
+  });
+
   test("includes React Native component and project source context", () => {
     const text = compactAccessibilityTree({
       ...snapshot,

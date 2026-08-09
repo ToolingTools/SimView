@@ -238,11 +238,16 @@ final class ProtocolTests: XCTestCase {
     func testAccessibilityObservationReportsContinuouslyChangingFallbackAsUnstable() throws {
         let coordinator = AccessibilityObservationCoordinator()
         let captures = LockedCounter()
-        let snapshots = AccessibilitySnapshotSequence([
-            ["snapshotId": "snapshot-1", "root": ["ref": "ax:1", "label": "Invoices"]],
-            ["snapshotId": "snapshot-2", "root": ["ref": "ax:2", "label": "Invoice A"]],
-            ["snapshotId": "snapshot-3", "root": ["ref": "ax:3", "label": "Invoice B"]],
-        ])
+        let changingSnapshots: [[String: Any]] = (1...20).map { index in
+            [
+                "snapshotId": "snapshot-\(index + 1)",
+                "root": ["ref": "ax:\(index + 1)", "label": "Invoice \(index)"],
+            ]
+        }
+        let baselineSnapshot: [String: Any] = [
+            "snapshotId": "snapshot-1", "root": ["ref": "ax:1", "label": "Invoices"],
+        ]
+        let snapshots = AccessibilitySnapshotSequence([baselineSnapshot] + changingSnapshots)
         let baseline = try coordinator.observe(
             afterRevision: nil,
             scope: "interactive",
@@ -259,7 +264,7 @@ final class ProtocolTests: XCTestCase {
             scope: "interactive",
             maxNodes: 100,
             settleQuietMilliseconds: 40,
-            maximumWaitMilliseconds: 500,
+            maximumWaitMilliseconds: 240,
             strategy: "ios-axp"
         ) { _, _ in
             _ = captures.increment()
@@ -269,12 +274,12 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(unsettled.eventChanged)
         XCTAssertFalse(unsettled.stable)
         XCTAssertTrue(unsettled.fallbackUsed)
-        XCTAssertEqual(unsettled.captureCount, 2)
+        XCTAssertGreaterThanOrEqual(unsettled.captureCount, 2)
         XCTAssertEqual(unsettled.changeSource, "snapshot-diff")
-        XCTAssertEqual(captures.value, 3)
+        XCTAssertGreaterThanOrEqual(captures.value, 3)
     }
 
-    func testShellAccessibilityObservationBacksOffAndSettlesWithoutRepeatedDumps() throws {
+    func testShellAccessibilityObservationConfirmsAChangedHierarchy() throws {
         let coordinator = AccessibilityObservationCoordinator()
         let captures = LockedCounter()
         let baselineSnapshot: [String: Any] = [
@@ -315,7 +320,104 @@ final class ProtocolTests: XCTestCase {
         XCTAssertTrue(settled.eventChanged)
         XCTAssertTrue(settled.stable)
         XCTAssertFalse(settled.timedOut)
-        XCTAssertEqual(captures.value, 2)
+        XCTAssertEqual(settled.captureCount, 2)
+        XCTAssertEqual(captures.value, 3)
+    }
+
+    func testShellAccessibilityObservationWaitsForExpandedContentToSettle() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
+        let snapshots = AccessibilitySnapshotSequence([
+            ["snapshotId": "baseline", "root": ["ref": "android:1", "label": "By Card"]],
+            ["snapshotId": "partial", "root": ["ref": "android:2", "label": "By Card"]],
+            [
+                "snapshotId": "loaded",
+                "root": [
+                    "ref": "android:3", "label": "By Card",
+                    "children": [["ref": "android:4", "value": "Ending in 3670"]],
+                ],
+            ],
+            [
+                "snapshotId": "loaded-confirmation",
+                "root": [
+                    "ref": "android:5", "label": "By Card",
+                    "children": [["ref": "android:6", "value": "Ending in 3670"]],
+                ],
+            ],
+        ])
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 20,
+            maximumWaitMilliseconds: 0,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 20,
+            maximumWaitMilliseconds: 800,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+
+        XCTAssertTrue(settled.eventChanged)
+        XCTAssertTrue(settled.stable)
+        XCTAssertFalse(settled.timedOut)
+        XCTAssertEqual(settled.captureCount, 3)
+        XCTAssertEqual(captures.value, 4)
+        let root = try XCTUnwrap(settled.snapshot["root"] as? [String: Any])
+        let children = try XCTUnwrap(root["children"] as? [[String: Any]])
+        XCTAssertEqual(children.first?["value"] as? String, "Ending in 3670")
+    }
+
+    func testShellAccessibilityObservationTimesOutWhenConfirmationsKeepChanging() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let captures = LockedCounter()
+        let changingSnapshots: [[String: Any]] = (1...20).map { index in
+            [
+                "snapshotId": "change-\(index)",
+                "root": ["ref": "android:\(index + 1)", "label": "Card \(index)"],
+            ]
+        }
+        let baselineSnapshot: [String: Any] = [
+            "snapshotId": "baseline", "root": ["ref": "android:1", "label": "By Card"],
+        ]
+        let snapshots = AccessibilitySnapshotSequence([baselineSnapshot] + changingSnapshots)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 20,
+            maximumWaitMilliseconds: 0,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+        let unsettled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 20,
+            maximumWaitMilliseconds: 220,
+            strategy: "android-shell-dump"
+        ) { _, _ in
+            _ = captures.increment()
+            return snapshots.next()
+        }
+
+        XCTAssertTrue(unsettled.eventChanged)
+        XCTAssertFalse(unsettled.stable)
+        XCTAssertTrue(unsettled.timedOut)
+        XCTAssertGreaterThanOrEqual(unsettled.captureCount, 2)
     }
 
     func testShellAccessibilityObservationBoundsUnchangedHierarchyDumps() throws {

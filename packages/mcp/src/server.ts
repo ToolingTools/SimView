@@ -14,6 +14,7 @@ import {
   accessibilityResourceSchema,
   accessibilitySelectorSchema,
   accessibilitySnapshotSchema,
+  accessibilitySnapshotSourceSchema,
   annotationContextSchema,
   annotationGeometrySchema,
   annotationSchema,
@@ -44,6 +45,7 @@ import {
   screenContextSchema,
   semanticErrorSchema,
   semanticNodeSummarySchema,
+  semanticSearchTextSchema,
   sessionStateSchema,
   stableAccessibilityEntries,
   summarizeAccessibilityNode,
@@ -56,6 +58,7 @@ import { dispatchSemanticTextAction } from "./semantic-interactions";
 import {
   type AccessibilityObservation,
   type DestinationVerification,
+  type NativeTapResolution,
   SimViewSession,
   type WarmObservation,
 } from "./session";
@@ -357,6 +360,8 @@ const findElementsOutputSchema = z.object({
 const searchElementsOutputSchema = z.object({
   snapshotId: z.string(),
   query: elementSearchQuerySchema,
+  searchScope: z.literal("current-rendered-tree"),
+  absenceConclusive: z.literal(false),
   matches: z.array(elementSearchMatchSchema),
   count: z.number().int().nonnegative(),
   total: z.number().int().nonnegative(),
@@ -421,6 +426,17 @@ const postActionObservationSchema = z.object({ accessibility: postActionAccessib
 const observeOutputSchema = z.object({
   observationId: z.string(),
   frameId: z.string(),
+  elementSource: z
+    .union([accessibilitySnapshotSourceSchema, z.literal("react-native-fiber")])
+    .optional(),
+  metroStatus: z
+    .enum([
+      "active",
+      "metro-target-unavailable",
+      "metro-fiber-unavailable",
+      "metro-inspection-failed",
+    ])
+    .optional(),
   sourceRevisions: z.object({
     frame: z.number().int().nonnegative(),
     visualChange: z.number().int().nonnegative(),
@@ -447,6 +463,7 @@ const observeOutputSchema = z.object({
     removed: z.array(z.string()).optional(),
     changed: z.array(z.string()).optional(),
     nodes: z.array(semanticNodeSummarySchema).optional(),
+    resourceUri: z.string().optional(),
   }),
   vision: z.object({
     included: z.boolean(),
@@ -523,20 +540,28 @@ const destinationSelectorSchema = z
       .string()
       .min(1)
       .describe(
-        "Native accessible label expected on the destination. Prefer a distinctive complete label; avoid generic labels such as Card.",
+        "Native accessible name expected on the destination. This uses label/title and falls back to non-redacted text values, which is common for Android TextView nodes. Prefer a distinctive complete name; avoid generic labels such as Card.",
       )
       .optional(),
     value: z
       .string()
       .min(1)
       .describe(
-        "Native AX value expected on the destination. Use only when observe/search exposed it as a value; visible text is often an accessible name instead.",
+        "Native AX value expected on the destination. Use this when observe/search explicitly exposed the content as a value.",
       )
       .optional(),
     placeholder: z
       .string()
       .min(1)
       .describe("Native placeholder expected on an empty editable destination field.")
+      .optional(),
+    checked: z
+      .boolean()
+      .describe("Required checked state for a checkbox, radio control, or switch.")
+      .optional(),
+    selected: z
+      .boolean()
+      .describe("Required selected state for a selectable control or tab.")
       .optional(),
     exact: z
       .boolean()
@@ -553,17 +578,20 @@ const destinationSelectorSchema = z
           selector.role ||
           selector.name ||
           selector.value ||
-          selector.placeholder,
+          selector.placeholder ||
+          selector.checked !== undefined ||
+          selector.selected !== undefined,
       ),
     {
-      message: "A destination selector requires identifier, role, name, value, or placeholder",
+      message:
+        "A destination selector requires identifier, role, name, value, placeholder, checked, or selected",
     },
   );
 
 const destinationVerificationInputSchema = z
   .object({
     identity: destinationSelectorSchema.describe(
-      "The stable native destination identity. It must match exactly one node; prefer a unique identifier or complete entity label.",
+      "Optional proof of a known post-navigation destination, not a requirement for every tap in a sensitive workflow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay. Omit verifyDestination for generic navigation and rely on the stable semantic post-action observation. When used, identity must match exactly one destination node; prefer a unique identifier or complete entity label.",
     ),
     assertions: z
       .array(destinationSelectorSchema)
@@ -683,7 +711,7 @@ const actionSchema = z.discriminatedUnion("type", [
     .object({
       type: z.literal("tap_element"),
       ...semanticSelectorFields,
-      query: z.string().trim().min(1).max(200).optional(),
+      query: semanticSearchTextSchema.optional(),
       verifyDestination: destinationVerificationInputSchema.optional(),
     })
     .strict(),
@@ -809,6 +837,49 @@ function rejectedDispatchedAction(error: unknown) {
     retryInput: false,
     ...(error instanceof Error ? { message: error.message } : {}),
   } as const;
+}
+
+const DISPATCHED_INPUT_HARD_STOP =
+  "HARD STOP — INPUT WAS DISPATCHED. No further device input may be sent until the user supplies new direction or an independent UI change occurs.";
+
+function rejectedSemanticTap(
+  resolution: NativeTapResolution,
+  selector?: z.output<typeof accessibilitySelectorSchema>,
+) {
+  return {
+    accepted: false,
+    safeToContinue: false,
+    inputDispatched: false,
+    code: resolution.code,
+    retryable: resolution.retryable,
+    interaction: {
+      ...compactNativeTapResolution(resolution),
+      ...(selector ? { selector } : {}),
+    },
+  } as const;
+}
+
+function compactNativeTapResolution(resolution: NativeTapResolution) {
+  const { target, hitNode, actionableHitNode, selectorDiagnostics, ...receipt } = resolution;
+  return {
+    ...receipt,
+    ...(target ? { target: summarizeAccessibilityNode(target) } : {}),
+    ...(hitNode ? { hitNode: summarizeAccessibilityNode(hitNode) } : {}),
+    ...(actionableHitNode
+      ? { actionableHitNode: summarizeAccessibilityNode(actionableHitNode) }
+      : {}),
+    ...(selectorDiagnostics
+      ? {
+          selectorDiagnostics: {
+            ...selectorDiagnostics,
+            fields: selectorDiagnostics.fields.map((field) => ({
+              ...field,
+              matches: field.matches.map(summarizeAccessibilityNode),
+            })),
+          },
+        }
+      : {}),
+  };
 }
 
 export function createServer(
@@ -1209,18 +1280,25 @@ export function createServer(
     const structuredContent = {
       observationId,
       frameId: warm.frameId,
+      elementSource: result?.snapshot.source,
+      metroStatus:
+        result?.snapshot.source === "react-native-fiber"
+          ? ("active" as const)
+          : result?.fallback?.reason,
       sourceRevisions: {
         frame: warm.frameRevision,
         visualChange: warm.changeRevision,
         image: warm.imageRevision,
         accessibility: accessibilityObservation?.revision,
-        fiber: result?.snapshot.snapshotId,
+        fiber:
+          result?.snapshot.source === "react-native-fiber" ? result.snapshot.snapshotId : undefined,
       },
       timestamps: {
         frameCapturedAt: warm.capturedAt,
         settledAt: warm.settledAt,
         accessibilityReadyAt: accessibilityObservation?.settledAt,
-        fiberReadyAt: result?.snapshot.capturedAt,
+        fiberReadyAt:
+          result?.snapshot.source === "react-native-fiber" ? result.snapshot.capturedAt : undefined,
         imageReadyAt: warm.imageReadyAt,
         mcpReturnedAt: new Date().toISOString(),
       },
@@ -1234,10 +1312,9 @@ export function createServer(
         status: semanticStatus,
         nodeCount: index.size,
         truncated: snapshot?.stats.truncated ?? false,
+        ...(hash ? { resourceUri: session.accessibilityResourceUri } : {}),
         ...(semanticStatus === "delta" ? delta : {}),
-        ...(semanticStatus === "full" || semanticStatus === "delta"
-          ? { nodes: semanticNodes }
-          : {}),
+        ...(semanticStatus === "delta" ? { nodes: semanticNodes } : {}),
       },
       vision: {
         included: Boolean(includeVision && warm.image),
@@ -1363,15 +1440,17 @@ export function createServer(
           });
           const winner = unambiguousInteractionSearchMatch(search);
           if (!winner) {
-            return {
+            return rejectedSemanticTap({
               accepted: false,
               code: "ambiguous_target",
               retryable: false,
+              searchScope: "current-rendered-tree",
+              absenceConclusive: false,
               candidates: search.matches,
               excludedExactMatchCount: search.excludedExactMatchCount,
               excludedCandidateCount: search.excludedCandidateCount,
               excludedCandidates: search.excludedCandidates,
-            };
+            } as NativeTapResolution);
           }
           selector = accessibilitySelectorSchema.parse({
             ref: winner.element.ref,
@@ -1381,13 +1460,7 @@ export function createServer(
         }
         const resolution = await session.resolveNativeTap(selector);
         if (!resolution.accepted || !resolution.point) {
-          return {
-            ...resolution,
-            accepted: false,
-            safeToContinue: false,
-            inputDispatched: false,
-            interaction: resolution,
-          };
+          return rejectedSemanticTap(resolution, selector);
         }
         const verificationBaseline = action.verifyDestination
           ? await captureObservationBaseline(session)
@@ -1419,9 +1492,10 @@ export function createServer(
                 retryable:
                   destinationVerification.status === "unstable" ||
                   destinationVerification.status === "unavailable",
+                retryInput: false,
               }
             : {}),
-          interaction: resolution,
+          interaction: compactNativeTapResolution(resolution),
           ...(destinationVerification ? { destinationVerification } : {}),
           ...(verificationWarnings.length ? { verificationWarnings } : {}),
         };
@@ -1557,10 +1631,15 @@ export function createServer(
     {
       title: "List devices",
       description:
-        "List available local devices by default. Continue a stable first-page snapshot with nextCursor; offset remains available for compatibility.",
+        "List available local devices by default. Omit platform unless the user explicitly requested iOS or Android: an unfiltered call discovers all available device types, while filtering prematurely can hide the only available device. Continue a stable first-page snapshot with nextCursor; offset remains available for compatibility.",
       inputSchema: {
         availableOnly: z.boolean().optional(),
-        platform: z.enum(["ios", "android"]).optional(),
+        platform: z
+          .enum(["ios", "android"])
+          .optional()
+          .describe(
+            "Omit unless the user explicitly requested iOS or Android. An unfiltered call discovers all available device types; filtering prematurely can hide the only available device.",
+          ),
         offset: z.number().int().nonnegative().optional(),
         limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).optional(),
         cursor: z.string().min(1).max(128).optional(),
@@ -1576,10 +1655,15 @@ export function createServer(
     {
       title: "List devices",
       description:
-        "List one bounded snapshot page of devices for the open SimView preview and continue with its cursor.",
+        "List one bounded snapshot page of devices for the open SimView preview and continue with its cursor. Omit platform unless the user explicitly requested iOS or Android: an unfiltered call discovers all available device types, while filtering prematurely can hide the only available device.",
       inputSchema: {
         availableOnly: z.boolean().optional(),
-        platform: z.enum(["ios", "android"]).optional(),
+        platform: z
+          .enum(["ios", "android"])
+          .optional()
+          .describe(
+            "Omit unless the user explicitly requested iOS or Android. An unfiltered call discovers all available device types; filtering prematurely can hide the only available device.",
+          ),
         offset: z.number().int().nonnegative().optional(),
         limit: z.number().int().min(1).max(DEVICE_PAGE_LIMIT).optional(),
         cursor: z.string().min(1).max(128).optional(),
@@ -1599,7 +1683,7 @@ export function createServer(
     {
       title: "Observe screen",
       description:
-        "Read prepared semantic state without waiting for an image. Use visual mode only when the user explicitly requests visual inspection.",
+        "Read prepared semantic state without waiting for an image. Full observations return compact text plus provenance and a semantic resource URI instead of duplicating the full tree in structured content; deltas include only changed node summaries. After compact semantics, get_accessibility_tree, and targeted searches leave state indeterminate, one read-only visual observation is permitted without a separate request; it cannot justify coordinate input while a semantic target exists or authorize consequential action.",
       inputSchema: {
         mode: z.enum(["auto", "semantic", "visual"]).default("semantic"),
         sinceObservationId: z.string().uuid().optional(),
@@ -1613,7 +1697,7 @@ export function createServer(
     {
       title: "Perform actions",
       description:
-        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation. For entity-sensitive tap_element actions, verifyDestination requires one unique native identity and accepts up to four supporting assertions plus a 100-5000 ms timeout (maximum 5000). Assertions must be present but may match more than one node; an ambiguous identity hard-stops later actions.",
+        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation. Semantic tap receipts contain compact node summaries for both iOS and Android. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a payment, invoice, order, or account flow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires one unique native identity and accepts up to four supporting assertions plus a 100-5000 ms timeout (maximum 5000); name falls back to non-redacted native text, and checked/selected can verify exposed control state. Assertions must be present but may match more than one node; an ambiguous identity hard-stops later actions. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. When inputDispatched is false, use the returned hit and selector diagnostics and do not observe, search, and retry the unchanged target; retry only after an independent UI change or a genuinely transient error.",
       inputSchema: {
         actions: z.array(actionSchema).min(1).max(20),
         observe: z.enum(["auto", "semantic", "visual", "none"]).default("semantic"),
@@ -1701,9 +1785,11 @@ export function createServer(
       ).length;
       if (observationMode === "none" || !inputDispatched) {
         return toolResult(
-          failedActionIndex === undefined
-            ? "Ordered actions completed."
-            : "Action batch stopped after a rejected action.",
+          hardStop && inputDispatched
+            ? `${DISPATCHED_INPUT_HARD_STOP} The action batch stopped after the failed action.`
+            : failedActionIndex === undefined
+              ? "Ordered actions completed."
+              : "Action batch stopped after a rejected action.",
           {
             actionCount: actions.length,
             completedActionCount: failedActionIndex ?? receipts.length,
@@ -1762,13 +1848,22 @@ export function createServer(
             inputDispatched: true,
             code: "post_action_unconfirmed",
             retryable: true,
+            retryInput: false,
             interaction: "interaction" in prior ? prior.interaction : prior,
           };
           failedActionIndex ??= finalIndex;
         }
       }
       return toolResultWithContent(
-        observed.content,
+        hardStop
+          ? [
+              ...observed.content.filter((item) => item.type !== "text"),
+              {
+                type: "text" as const,
+                text: `${DISPATCHED_INPUT_HARD_STOP} The action batch stopped after the failed action.`,
+              },
+            ]
+          : observed.content,
         {
           actionCount: actions.length,
           completedActionCount: failedActionIndex ?? receipts.length,
@@ -2020,7 +2115,7 @@ function registerAccessibilityTools(
   const selectorSchema = semanticSelectorFields;
   const tapElementInputSchema = {
     ...selectorSchema,
-    query: z.string().trim().min(1).max(200).optional(),
+    query: semanticSearchTextSchema.optional(),
     verifyDestination: destinationVerificationInputSchema.optional(),
     observe: z.enum(["semantic", "visual", "none"]).default("semantic"),
     settleQuietMs: z.number().int().min(20).max(500).default(75),
@@ -2117,14 +2212,23 @@ function registerAccessibilityTools(
       });
       const winner = unambiguousInteractionSearchMatch(search);
       if (!winner) {
-        return toolResult("The semantic query is ambiguous; no tap was sent.", {
+        const resolution = {
+          accepted: false,
+          code: "ambiguous_target",
+          retryable: false,
+          searchScope: "current-rendered-tree",
+          absenceConclusive: false,
           candidates: search.matches,
           count: search.total,
           excludedExactMatchCount: search.excludedExactMatchCount,
           excludedCandidateCount: search.excludedCandidateCount,
           excludedCandidates: search.excludedCandidates,
-          tapped: false,
-        });
+        } as NativeTapResolution;
+        const message =
+          search.total === 0
+            ? "No currently rendered semantic target matched; no tap was sent. This does not prove the item is absent from a scrollable list, table, or collection. Explore the surface with bounded one-swipe-at-a-time navigation and search each changed snapshot."
+            : "The semantic query is ambiguous; no tap was sent.";
+        return toolResult(message, rejectedSemanticTap(resolution), true);
       }
       parsedSelector = accessibilitySelectorSchema.parse({
         ref: winner.element.ref,
@@ -2137,8 +2241,11 @@ function registerAccessibilityTools(
       const message =
         resolution.code === "target_offscreen"
           ? `The target is offscreen. Scroll ${resolution.suggestedScrollDirection ?? "toward it"}, then search and resolve it again; no tap was sent.`
-          : "The semantic target was not confirmed natively; no tap was sent.";
-      return toolResult(message, { ...resolution, selector: parsedSelector });
+          : resolution.code === "target_not_found" &&
+              resolution.selectorDiagnostics?.splitAcrossNodes
+            ? "The selector fields matched different native nodes, but all fields must match one node. Use search_elements and pass the selected generation-scoped ref to tap_element; no tap was sent."
+            : "The semantic target was not confirmed natively; no tap was sent.";
+      return toolResult(message, rejectedSemanticTap(resolution, parsedSelector), true);
     }
     if (!session.device?.capabilities.input.touch) {
       throw new Error("Tap is not supported by the selected device");
@@ -2164,6 +2271,7 @@ function registerAccessibilityTools(
           afterRevision: baseline?.afterRevision,
           settleQuietMs: input.settleQuietMs,
           maxWaitMs: input.verifyDestination.timeoutMs,
+          observation: observed ? session.latestAccessibilityObservation : undefined,
         })
       : undefined;
     const verificationFailed = destinationVerification && !destinationVerification.verified;
@@ -2185,7 +2293,6 @@ function registerAccessibilityTools(
     );
     const hardStop = Boolean(verificationFailed || observationUnconfirmed);
     const structured = {
-      ...resolution,
       accepted: !hardStop,
       code: verificationFailed
         ? verificationCode
@@ -2196,22 +2303,24 @@ function registerAccessibilityTools(
         ? destinationVerification?.status === "unstable" ||
           destinationVerification?.status === "unavailable"
         : observationUnconfirmed,
+      ...(hardStop ? { retryInput: false } : {}),
       inputDispatched: true,
       safeToContinue: !hardStop,
-      interaction: resolution,
+      interaction: compactNativeTapResolution(resolution),
       selector: parsedSelector,
       receipt,
       ...(reconciledObservation ? { observation: reconciledObservation } : {}),
       ...(destinationVerification ? { destinationVerification } : {}),
       ...(verificationWarnings.length ? { verificationWarnings } : {}),
     };
-    const text = destinationVerification
+    const detail = destinationVerification
       ? destinationVerification.verified
         ? "Physical element tap accepted and destination identity verified."
         : destinationVerification.status === "ambiguous"
           ? `Physical element tap was sent, but destination verification was ambiguous. ${verificationWarnings[0] ?? "Use a more specific selector."} Do not continue with consequential actions.`
           : "Physical element tap was sent, but the requested destination identity was not verified. Do not continue with consequential actions."
       : "Physical element tap accepted.";
+    const text = hardStop ? `${DISPATCHED_INPUT_HARD_STOP} ${detail}` : detail;
     return observed
       ? toolResultWithContent(
           [
@@ -2335,9 +2444,9 @@ function registerAccessibilityTools(
     {
       title: "Search elements",
       description:
-        "Search the current semantic tree with a natural-language query and return bounded ranked matches. Use the winning ref with tap_element; this tool never captures or returns an image.",
+        "Search the currently rendered semantic tree with a natural-language query containing at least one Unicode letter or number and return bounded ranked matches. A zero match is not proof that an item is absent from a scrollable list, table, or collection because unrendered rows are outside this search. Follow excludedCandidates swipe guidance when present; otherwise explore expected data surfaces with bounded one-swipe-at-a-time navigation, searching each changed snapshot and stopping at a semantic boundary. Use the winning ref with tap_element; this tool never captures or returns an image.",
       inputSchema: {
-        query: z.string().trim().min(1).max(200),
+        query: semanticSearchTextSchema,
         roles: z.array(z.string().trim().min(1)).max(10).optional(),
         actionableOnly: z.boolean().default(true),
         visibleOnly: z.boolean().default(true),
@@ -2348,10 +2457,11 @@ function registerAccessibilityTools(
     },
     async (query) => {
       const result = await session.searchElements(elementSearchQuerySchema.parse(query));
-      return toolResult(
-        `Matched ${result.total} semantic element(s); returned ${result.count} ranked result(s).`,
-        result,
-      );
+      const summary =
+        result.total === 0
+          ? "No currently rendered semantic elements matched. Absence is non-conclusive for a scrollable list, table, or collection; explore it with bounded one-swipe-at-a-time navigation and search each changed snapshot."
+          : `Matched ${result.total} semantic element(s); returned ${result.count} ranked result(s).`;
+      return toolResult(summary, result);
     },
   );
 
@@ -2360,7 +2470,7 @@ function registerAccessibilityTools(
     {
       title: "Tap element",
       description:
-        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through native device input. For entity-sensitive navigation, verifyDestination requires a unique native identity, accepts up to four supporting assertions, and has a 100-5000 ms timeout (maximum 5000). Assertions such as amount/status must be present but may match multiple nodes. Prefer a stable identifier or complete entity label for identity, and use exact:false only for a known composite-label fragment.",
+        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through native device input; returned target/hit diagnostics are compact node summaries on both iOS and Android. All supplied selector fields must match one node; target_not_found may report bounded selectorDiagnostics for split nodes, after which use search_elements and its generation-scoped ref. When inputDispatched is false, do not observe, search, and retry the unchanged target; retry only after an independent UI change or a genuinely transient error. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a sensitive workflow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires a unique native identity, accepts up to four supporting assertions, and has a 100-5000 ms timeout (maximum 5000). Name matches label/title and falls back to non-redacted text values; checked/selected can verify exposed control state. Assertions such as amount/status must be present but may match multiple nodes. Prefer a stable identifier or complete entity label for identity, and use exact:false only for a known composite-label fragment.",
       inputSchema: tapElementInputSchema,
       outputSchema: genericObjectOutputSchema,
       _meta: metadata.modelOnly,

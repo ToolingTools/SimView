@@ -8,6 +8,8 @@
       "!!**/.repowise",
       "!!**/.repowise-workspace",
       "!!**/.simview",
+      "!!**/.vscode/extensions.json",
+      "!!**/.vscode/mcp.json",
       "!!**/artifacts",
       "!!**/coverage",
       "!!**/node_modules",

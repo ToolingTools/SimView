@@ -147,10 +147,11 @@ final class AccessibilityObservationCoordinator: @unchecked Sendable {
                 let quietAnchor = max(lastChangedAt ?? startedAt, startedAt)
                 let quietAt = quietAnchor.addingTimeInterval(quiet)
 
-                // A fallback diff found a changed tree. Confirm it once after
-                // the quiet window; a second changed tree remains unstable.
-                if let fallbackChangedAt {
-                    let fallbackQuietAt = fallbackChangedAt.addingTimeInterval(quiet)
+                // A fallback diff found a changed tree. Confirm it after the
+                // quiet window and keep polling if the confirmation also
+                // changes, bounded by the original deadline.
+                if let changeDetectedAt = fallbackChangedAt {
+                    let fallbackQuietAt = changeDetectedAt.addingTimeInterval(quiet)
                     if now >= min(deadline, fallbackQuietAt) {
                         condition.unlock()
                         captureCount += 1
@@ -158,7 +159,11 @@ final class AccessibilityObservationCoordinator: @unchecked Sendable {
                         fallbackSnapshot = try capture(scope, boundedMaxNodes)
                         let treeChanged = recordSnapshot(
                             fallbackSnapshot, scope: scope, maxNodes: boundedMaxNodes)
-                        let settled = !treeChanged && now >= fallbackQuietAt
+                        if treeChanged && now < deadline {
+                            fallbackChangedAt = Date()
+                            continue
+                        }
+                        let settled = !treeChanged
                         return result(
                             snapshot: fallbackSnapshot,
                             eventChanged: true,
@@ -261,8 +266,8 @@ final class AccessibilityObservationCoordinator: @unchecked Sendable {
         }
 
         // A shell hierarchy dump is heavyweight. Start at 150 ms and back off
-        // to 500 ms while unchanged. Once a changed tree is captured, settle
-        // that result without repeating the same dump during the quiet window.
+        // to 500 ms while unchanged. After a changed tree survives the quiet
+        // window, confirm it once so partially loaded content is not marked stable.
         var snapshot = cachedSnapshot(scope: scope, maxNodes: boundedMaxNodes)!
         var eventChanged = false
         var detectedChangeAt: Date?
@@ -275,13 +280,31 @@ final class AccessibilityObservationCoordinator: @unchecked Sendable {
             }
             condition.lock()
             let now = Date()
-            if let detectedChangeAt {
-                let quietAt = detectedChangeAt.addingTimeInterval(quiet)
+            if let changeDetectedAt = detectedChangeAt {
+                let quietAt = changeDetectedAt.addingTimeInterval(quiet)
                 if now >= quietAt {
                     condition.unlock()
+                    captureCount += 1
+                    snapshot = try capture(scope, boundedMaxNodes)
+                    let confirmationChanged = recordSnapshot(
+                        snapshot, scope: scope, maxNodes: boundedMaxNodes)
+                    let confirmedAt = Date()
+                    if confirmationChanged {
+                        if confirmedAt >= deadline {
+                            return result(
+                                snapshot: snapshot, eventChanged: true, stable: false,
+                                timedOut: true, strategy: strategy, settledAt: confirmedAt,
+                                captureCount: captureCount, changeSource: "snapshot-diff"
+                            )
+                        }
+                        detectedChangeAt = confirmedAt
+                        pollInterval = Self.initialPollInterval
+                        nextPollAt = confirmedAt.addingTimeInterval(pollInterval)
+                        continue
+                    }
                     return result(
                         snapshot: snapshot, eventChanged: true, stable: true, timedOut: false,
-                        strategy: strategy, settledAt: now, captureCount: captureCount,
+                        strategy: strategy, settledAt: confirmedAt, captureCount: captureCount,
                         changeSource: "snapshot-diff"
                     )
                 }

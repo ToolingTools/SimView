@@ -5,6 +5,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ResourceUpdatedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 import {
+  type AccessibilityNode,
   type AccessibilitySnapshot,
   deviceListSchema,
   type ElementTreeOutput,
@@ -413,15 +414,36 @@ describe("MCP app tools", () => {
       expect(listed.tools.every((tool) => tool.outputSchema?.type === "object")).toBe(true);
       const tapElementTool = byName.get("tap_element");
       const performActionsTool = byName.get("perform_actions");
+      const listDevicesTool = byName.get("list_devices");
+      const appListDevicesTool = byName.get("app_list_devices");
       expect(tapElementTool?.description).toContain("maximum 5000");
       expect(tapElementTool?.description).toContain("stable identifier");
       expect(tapElementTool?.description).toContain("Assertions such as amount/status");
+      expect(tapElementTool?.description).toContain("verifyDestination is optional");
+      expect(tapElementTool?.description).toContain("Never copy the tapped control's label");
+      expect(tapElementTool?.description).toContain("For generic navigation, omit");
       expect(performActionsTool?.description).toContain("maximum 5000");
+      expect(performActionsTool?.description).toContain("verifyDestination is optional");
+      const searchElementsTool = byName.get("search_elements");
+      expect(searchElementsTool?.description).toContain("currently rendered semantic tree");
+      expect(searchElementsTool?.description).toContain("zero match is not proof");
+      expect(searchElementsTool?.description).toContain("one-swipe-at-a-time");
+      expect(performActionsTool?.description).toContain("such as Invoices, Orders, Card, or Pay");
+      expect(tapElementTool?.description).toContain("inputDispatched is false");
+      expect(performActionsTool?.description).toContain("retry the unchanged target");
+      expect(listDevicesTool?.description).toContain("Omit platform");
+      expect(appListDevicesTool?.description).toContain("filtering prematurely");
+      expect(JSON.stringify(listDevicesTool?.inputSchema)).toContain(
+        "An unfiltered call discovers all available device types",
+      );
       expect(JSON.stringify(tapElementTool?.inputSchema)).toContain(
         "Verification timeout in milliseconds: 100-5000 inclusive; maximum 5000.",
       );
       expect(JSON.stringify(tapElementTool?.inputSchema)).toContain(
-        "It must match exactly one node",
+        "not a requirement for every tap in a sensitive workflow",
+      );
+      expect(JSON.stringify(tapElementTool?.inputSchema)).toContain(
+        "Omit verifyDestination for generic navigation",
       );
       expect(JSON.stringify(tapElementTool?.inputSchema)).toContain(
         "may legitimately match multiple nodes",
@@ -731,7 +753,7 @@ describe("MCP app tools", () => {
     expect(await Bun.file(saved.screenshotPath).exists()).toBe(false);
   });
 
-  test("returns bounded semantic nodes in structured observations", async () => {
+  test("returns compact structured observations with recoverable semantic state", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const session = new SimViewSession();
     const snapshot: AccessibilitySnapshot = {
@@ -819,16 +841,19 @@ describe("MCP app tools", () => {
     try {
       const result = await client.callTool({ name: "observe_screen", arguments: {} });
       expect(result.structuredContent).toMatchObject({
+        elementSource: "react-native-fiber",
+        metroStatus: "active",
         semantic: {
           status: "full",
           nodeCount: 2,
-          nodes: [{ ref: "ax:root" }, { ref: "ax:shop", role: "button", label: "Shop" }],
+          resourceUri: expect.stringContaining("/accessibility"),
         },
         vision: { included: false, reason: "semantic-mode", returnedBytes: 0 },
       });
-      const nodes = (result.structuredContent as { semantic: { nodes: Array<unknown> } }).semantic
-        .nodes;
-      expect(nodes[0]).not.toHaveProperty("children");
+      expect((result.structuredContent as { semantic: { nodes?: unknown } }).semantic.nodes).toBe(
+        undefined,
+      );
+      expect(JSON.stringify(result.structuredContent).length).toBeLessThan(3_000);
       const text = (result.content as Array<{ type: string; text?: string }>).find(
         (item) => item.type === "text",
       )?.text;
@@ -837,6 +862,31 @@ describe("MCP app tools", () => {
       );
       expect(text).toContain("Shop");
       expect(text).not.toContain("OrderConfirmationScreen");
+
+      session.preparedElementSnapshot = async () =>
+        ({
+          snapshot,
+          fallback: { reason: "metro-target-unavailable" },
+          screenContext: {
+            schemaVersion: 1,
+            kind: "native-ios",
+            capturedAt: snapshot.capturedAt,
+            frameId: "frame-1",
+            source: "core-simulator-ax",
+          },
+        }) as ElementTreeOutput;
+      const nativeResult = await client.callTool({ name: "observe_screen", arguments: {} });
+      expect(nativeResult.structuredContent).toMatchObject({
+        elementSource: "core-simulator-ax",
+        metroStatus: "metro-target-unavailable",
+        fallback: { reason: "metro-target-unavailable" },
+      });
+      const nativeStructured = nativeResult.structuredContent as {
+        sourceRevisions: Record<string, unknown>;
+        timestamps: Record<string, unknown>;
+      };
+      expect(nativeStructured.sourceRevisions.fiber).toBeUndefined();
+      expect(nativeStructured.timestamps.fiberReadyAt).toBeUndefined();
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }
@@ -952,9 +1002,18 @@ describe("MCP app tools", () => {
       });
       expect(result.structuredContent).toMatchObject({
         selector: { ref: "ax:continue" },
-        point: { x: 0.35, y: 0.275 },
+        interaction: {
+          point: { x: 0.35, y: 0.275 },
+          target: { ref: "ax:continue", label: "Continue" },
+        },
         receipt: { accepted: true },
       });
+      expect(result.structuredContent).not.toHaveProperty("point");
+      const compactInteraction = result.structuredContent as {
+        interaction: { target: Record<string, unknown> };
+      };
+      expect(compactInteraction.interaction.target).not.toHaveProperty("children");
+      expect(JSON.stringify(result.structuredContent).length).toBeLessThan(2_500);
       expect(dispatched).toEqual({
         method: "input.tap",
         params: { x: 0.35, y: 0.275 },
@@ -1042,22 +1101,39 @@ describe("MCP app tools", () => {
       },
     });
     session.dispatchInput = async () => ({ accepted: true });
-    session.verifyNativeDestination = async () => ({
-      status: "matched",
-      verified: true,
-      source: "core-simulator-ax",
-      snapshotId: snapshot.snapshotId,
+    const verificationObservation = {
+      snapshot,
       revision: "5",
-      settledAt: "2026-08-08T10:00:00.150Z",
-      strategy: "ios-axp",
       eventChanged: true,
-      timedOut: false,
-      fallbackUsed: true,
-      captureCount: 1,
-      changeSource: "snapshot-diff",
       stable: true,
-      checks: [{ kind: "identity", selector: { name: "Continue", exact: true }, count: 1 }],
+      timedOut: false,
+      strategy: "ios-axp" as const,
+      settledAt: "2026-08-08T10:00:00.150Z",
+    };
+    Object.defineProperty(session, "latestAccessibilityObservation", {
+      configurable: true,
+      get: () => verificationObservation,
     });
+    let suppliedVerificationObservation: AccessibilityObservation | undefined;
+    session.verifyNativeDestination = async (_request, options) => {
+      suppliedVerificationObservation = options?.observation;
+      return {
+        status: "matched",
+        verified: true,
+        source: "core-simulator-ax",
+        snapshotId: snapshot.snapshotId,
+        revision: "5",
+        settledAt: "2026-08-08T10:00:00.150Z",
+        strategy: "ios-axp",
+        eventChanged: true,
+        timedOut: false,
+        fallbackUsed: true,
+        captureCount: 1,
+        changeSource: "snapshot-diff",
+        stable: true,
+        checks: [{ kind: "identity", selector: { name: "Continue", exact: true }, count: 1 }],
+      };
+    };
     const server = createServer(session);
     const client = new Client({ name: "observed-tap-test", version: "1.0.0" });
     await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -1071,6 +1147,7 @@ describe("MCP app tools", () => {
         },
       });
       expect(result.isError).not.toBe(true);
+      expect(suppliedVerificationObservation).toBe(verificationObservation);
       expect(result.structuredContent).toMatchObject({
         receipt: { accepted: true },
         observation: {
@@ -1305,6 +1382,10 @@ describe("MCP app tools", () => {
         method: "input.tap",
         params: { x: 0.5, y: 0.915 },
       });
+      const structured = result.structuredContent as {
+        receipts: Array<{ interaction: { target: Record<string, unknown> } }>;
+      };
+      expect(structured.receipts[0]?.interaction.target).not.toHaveProperty("children");
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
     }
@@ -1365,6 +1446,246 @@ describe("MCP app tools", () => {
         receipts: [{ code: "invalid_action", inputDispatched: false }],
       });
       expect(observations).toBe(0);
+      expect(dispatches).toBe(0);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("rejects punctuation-only semantic queries at every MCP boundary", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const server = createServer(new SimViewSession());
+    const client = new Client({ name: "semantic-query-validation", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const results = await Promise.all([
+        client.callTool({ name: "search_elements", arguments: { query: "***" } }),
+        client.callTool({ name: "tap_element", arguments: { query: "---" } }),
+        client.callTool({
+          name: "perform_actions",
+          arguments: { actions: [{ type: "tap_element", query: "..." }] },
+        }),
+      ]);
+      for (const result of results) {
+        expect(result.isError).toBe(true);
+        expect((result.content as Array<{ text?: string }>)[0]?.text).toContain(
+          "Query must contain at least one letter or number",
+        );
+      }
+    } finally {
+      await Promise.all([client.close(), server.close()]);
+    }
+  });
+
+  test("marks empty rendered searches as non-conclusive across search and tap tools", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("rendered-search", "Rendered Search");
+    session.lastAccessibility = interactionSnapshot(
+      "ax-rendered-search",
+      interactionNode("ax:invoice-paid", "Invoice #1001 · Paid", 0.2, 0.3),
+    );
+    const server = createServer(session);
+    const client = new Client({ name: "rendered-search-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const search = await client.callTool({
+        name: "search_elements",
+        arguments: { query: "overdue invoice" },
+      });
+      expect(search.isError).not.toBe(true);
+      expect((search.content as Array<{ text?: string }>)[0]?.text).toContain(
+        "Absence is non-conclusive",
+      );
+      expect(search.structuredContent).toMatchObject({
+        count: 0,
+        searchScope: "current-rendered-tree",
+        absenceConclusive: false,
+      });
+
+      const tap = await client.callTool({
+        name: "tap_element",
+        arguments: { query: "overdue invoice", observe: "none" },
+      });
+      expect(tap.isError).toBe(true);
+      expect((tap.content as Array<{ text?: string }>)[0]?.text).toContain(
+        "does not prove the item is absent",
+      );
+      expect(tap.structuredContent).toMatchObject({
+        inputDispatched: false,
+        interaction: {
+          searchScope: "current-rendered-tree",
+          absenceConclusive: false,
+        },
+      });
+
+      const batch = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          actions: [{ type: "tap_element", query: "overdue invoice" }],
+          observe: "none",
+        },
+      });
+      expect(batch.isError).toBe(true);
+      expect(batch.structuredContent).toMatchObject({
+        completedActionCount: 0,
+        dispatchedActionCount: 0,
+        receipts: [
+          {
+            inputDispatched: false,
+            interaction: {
+              searchScope: "current-rendered-tree",
+              absenceConclusive: false,
+            },
+          },
+        ],
+      });
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("returns matching standalone and batch receipts for rejected semantic taps", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("rejected-tap", "Rejected Tap");
+    const interaction = {
+      accepted: false,
+      code: "hit_target_mismatch",
+      retryable: false,
+      fingerprint: { identifier: "invoices-tab" },
+      target: { ref: "ax:invoices", identifier: "invoices-tab" },
+      point: { x: 0.5, y: 0.9 },
+      hitNode: { ref: "ax:other", identifier: "other-tab" },
+      actionableHitNode: { ref: "ax:other", identifier: "other-tab" },
+      hitRelationship: "unrelated",
+      hitMethod: "provider-element-at-point",
+      hitTest: false,
+    } as const;
+    session.resolveNativeTap = async () => interaction as never;
+    let dispatches = 0;
+    session.dispatchInput = async () => {
+      dispatches += 1;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "rejected-tap-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const standalone = await client.callTool({
+        name: "tap_element",
+        arguments: { identifier: "invoices-tab", observe: "none" },
+      });
+      const batch = await client.callTool({
+        name: "perform_actions",
+        arguments: {
+          actions: [
+            { type: "tap_element", identifier: "invoices-tab" },
+            { type: "press_button", button: "home" },
+          ],
+          observe: "none",
+        },
+      });
+      const expected = {
+        accepted: false,
+        safeToContinue: false,
+        inputDispatched: false,
+        code: "hit_target_mismatch",
+        retryable: false,
+        interaction: {
+          target: { ref: "ax:invoices" },
+          hitNode: { ref: "ax:other" },
+          actionableHitNode: { ref: "ax:other" },
+          hitRelationship: "unrelated",
+        },
+      };
+      expect(standalone.isError).toBe(true);
+      expect(standalone.structuredContent).toMatchObject(expected);
+      expect(batch.isError).toBe(true);
+      expect(batch.structuredContent).toMatchObject({
+        completedActionCount: 0,
+        dispatchedActionCount: 0,
+        failedActionIndex: 0,
+        receipts: [expected],
+      });
+      expect(batch.structuredContent).not.toHaveProperty("receipts.0.target");
+      expect(batch.structuredContent).not.toHaveProperty("receipts.0.fingerprint");
+      expect(dispatches).toBe(0);
+    } finally {
+      await Promise.all([client.close(), server.close(), session.close()]);
+    }
+  });
+
+  test("diagnoses selector fields that match different ancestor and child nodes", async () => {
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const session = new SimViewSession();
+    session.device = iosDevice("split-selector", "Split Selector");
+    const snapshot = interactionSnapshot("ax-split", {
+      ref: "ax:card-container",
+      identifier: "paymentmethod-button-Card",
+      role: "button",
+      enabled: true,
+      actions: ["press"],
+      children: [
+        {
+          ref: "ax:card-label",
+          role: "text",
+          label: "By Card",
+          enabled: true,
+        },
+      ],
+    });
+    session.lastAccessibility = snapshot;
+    mockAccessibilityObservation(session, snapshot);
+    let dispatches = 0;
+    session.dispatchInput = async () => {
+      dispatches += 1;
+      return { accepted: true };
+    };
+    const server = createServer(session);
+    const client = new Client({ name: "split-selector-test", version: "1.0.0" });
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({
+        name: "tap_element",
+        arguments: {
+          identifier: "paymentmethod-button-Card",
+          name: "By Card",
+          observe: "none",
+        },
+      });
+
+      expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toContain(
+        "all fields must match one node",
+      );
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toContain("search_elements");
+      expect(result.structuredContent).toMatchObject({
+        accepted: false,
+        code: "target_not_found",
+        inputDispatched: false,
+        interaction: {
+          selectorDiagnostics: {
+            splitAcrossNodes: true,
+            relationship: "ancestor-descendant",
+            fields: [
+              {
+                field: "identifier",
+                matchCount: 1,
+                matches: [{ ref: "ax:card-container" }],
+              },
+              {
+                field: "name",
+                matchCount: 1,
+                matches: [{ ref: "ax:card-label" }],
+              },
+            ],
+          },
+        },
+      });
+      expect(result.structuredContent).not.toHaveProperty(
+        "interaction.selectorDiagnostics.fields.0.matches.0.children",
+      );
       expect(dispatches).toBe(0);
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
@@ -1730,6 +2051,9 @@ describe("MCP app tools", () => {
         },
       });
       expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toStartWith(
+        "HARD STOP — INPUT WAS DISPATCHED",
+      );
       expect(result.structuredContent).toMatchObject({
         actionCount: 1,
         completedActionCount: 0,
@@ -1790,12 +2114,16 @@ describe("MCP app tools", () => {
         arguments: { identifier: "invoice-card", observe: "semantic" },
       });
       expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toStartWith(
+        "HARD STOP — INPUT WAS DISPATCHED",
+      );
       expect(result.structuredContent).toMatchObject({
         accepted: false,
         safeToContinue: false,
         inputDispatched: true,
         code: "post_action_unconfirmed",
         retryable: true,
+        retryInput: false,
         interaction: { accepted: true },
         observation: {
           stability: { stable: false },
@@ -1977,9 +2305,150 @@ describe("MCP app tools", () => {
     expect(await session.resolveNativeTap({ ref: "ax:old", exact: true })).toMatchObject({
       accepted: false,
       code: "hit_target_mismatch",
+      retryable: false,
       hitTest: false,
+      hitNode: { ref: "ax:other" },
+      hitRelationship: "unrelated",
+      hitMethod: "provider-element-at-point",
       target: { ref: "ax:intended" },
     });
+  });
+
+  test("accepts an Android actionable container through its non-actionable text child", async () => {
+    const session = new SimViewSession();
+    session.device = { platform: "android" } as never;
+    const oldTarget = androidInvoiceHierarchy("android-old");
+    const freshTarget = androidInvoiceHierarchy("android-fresh");
+    session.lastAccessibility = oldTarget.snapshot;
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: freshTarget.snapshot,
+        revision: "2",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "android-shell-dump",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+    let inspected = 0;
+    session.inspectPoint = async () => {
+      inspected += 1;
+      throw new Error("Android semantic taps must not request a second hierarchy dump");
+    };
+
+    expect(
+      await session.resolveNativeTap({ ref: oldTarget.target.ref, exact: true }),
+    ).toMatchObject({
+      accepted: true,
+      code: "ready",
+      retryable: false,
+      target: { ref: freshTarget.target.ref },
+      hitNode: { ref: freshTarget.child.ref },
+      actionableHitNode: { ref: freshTarget.target.ref },
+      hitRelationship: "self",
+      hitMethod: "snapshot-actionable",
+      hitTest: true,
+    });
+    expect(inspected).toBe(0);
+  });
+
+  test("fails closed for a deeper Android actionable child", async () => {
+    const session = new SimViewSession();
+    session.device = { platform: "android" } as never;
+    const oldTarget = androidInvoiceHierarchy("android-old");
+    const freshTarget = androidInvoiceHierarchy("android-fresh", true);
+    session.lastAccessibility = oldTarget.snapshot;
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: freshTarget.snapshot,
+        revision: "2",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "android-shell-dump",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+
+    expect(
+      await session.resolveNativeTap({ ref: oldTarget.target.ref, exact: true }),
+    ).toMatchObject({
+      accepted: false,
+      code: "hit_target_mismatch",
+      retryable: false,
+      actionableHitNode: { ref: freshTarget.child.ref },
+      hitRelationship: "descendant",
+      hitMethod: "snapshot-actionable",
+      hitTest: false,
+    });
+  });
+
+  test("fails closed for overlapping Android actionable nodes at the same depth", async () => {
+    const session = new SimViewSession();
+    session.device = { platform: "android" } as never;
+    const oldTarget = androidInvoiceHierarchy("android-old");
+    const freshTarget = androidInvoiceHierarchy("android-fresh");
+    const overlapping = {
+      ...freshTarget.target,
+      ref: "android-fresh:overlapping",
+      identifier: "account-tab",
+      label: "ACCOUNT",
+      children: undefined,
+    };
+    freshTarget.snapshot.root.children?.push(overlapping);
+    freshTarget.snapshot.stats.nodeCount += 1;
+    session.lastAccessibility = oldTarget.snapshot;
+    session.accessibilityObserve = async () =>
+      ({
+        snapshot: freshTarget.snapshot,
+        revision: "2",
+        eventChanged: false,
+        stable: true,
+        timedOut: false,
+        strategy: "android-shell-dump",
+        settledAt: "2026-08-08T10:00:00.075Z",
+      }) as never;
+
+    expect(
+      await session.resolveNativeTap({ ref: oldTarget.target.ref, exact: true }),
+    ).toMatchObject({
+      accepted: false,
+      code: "hit_target_mismatch",
+      retryable: false,
+      hitRelationship: "ambiguous",
+      hitMethod: "snapshot-actionable",
+      hitTest: false,
+    });
+  });
+
+  test("rejects disabled and hidden Android targets before hit resolution", async () => {
+    for (const state of [{ enabled: false }, { hidden: true }]) {
+      const session = new SimViewSession();
+      session.device = { platform: "android" } as never;
+      const oldTarget = androidInvoiceHierarchy(`android-old-${JSON.stringify(state)}`);
+      const freshTarget = androidInvoiceHierarchy(`android-fresh-${JSON.stringify(state)}`);
+      Object.assign(freshTarget.target, state);
+      session.lastAccessibility = oldTarget.snapshot;
+      session.accessibilityObserve = async () =>
+        ({
+          snapshot: freshTarget.snapshot,
+          revision: "2",
+          eventChanged: false,
+          stable: true,
+          timedOut: false,
+          strategy: "android-shell-dump",
+          settledAt: "2026-08-08T10:00:00.075Z",
+        }) as never;
+      let inspected = 0;
+      session.inspectPoint = async () => {
+        inspected += 1;
+        return freshTarget.target;
+      };
+
+      expect(
+        await session.resolveNativeTap({ ref: oldTarget.target.ref, exact: true }),
+      ).toMatchObject({ accepted: false, code: "target_disabled", retryable: false });
+      expect(inspected).toBe(0);
+    }
   });
 
   test("prefers a native query candidate over a higher-scoring Fiber candidate", async () => {
@@ -2180,6 +2649,8 @@ describe("MCP app tools", () => {
     });
 
     expect(search).toMatchObject({
+      searchScope: "current-rendered-tree",
+      absenceConclusive: false,
       count: 0,
       total: 0,
       excludedExactMatchCount: 1,
@@ -2200,6 +2671,46 @@ describe("MCP app tools", () => {
           excludedExactMatches: { visibility: 1 },
         },
       ],
+    });
+  });
+
+  test("does not treat an empty rendered search as proof of dataset absence", async () => {
+    const session = new SimViewSession();
+    session.lastAccessibility = interactionSnapshot(
+      "ax-visible-invoices",
+      interactionNode("ax:invoice-paid", "Invoice #1001 · Paid", 0.2, 0.3),
+    );
+
+    const search = await session.searchElements({
+      query: "overdue invoice",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 5,
+    });
+
+    expect(search).toMatchObject({
+      count: 0,
+      total: 0,
+      searchScope: "current-rendered-tree",
+      absenceConclusive: false,
+    });
+  });
+
+  test("finds symbolic semantic queries that contain digits", async () => {
+    const session = new SimViewSession();
+    const invoice = interactionNode("ax:invoice", "Invoice #30363063", 0.2, 0.3);
+    session.lastAccessibility = interactionSnapshot("ax-symbolic-search", invoice);
+
+    const search = await session.searchElements({
+      query: "#30363063",
+      actionableOnly: true,
+      visibleOnly: true,
+      limit: 5,
+    });
+
+    expect(search).toMatchObject({
+      count: 1,
+      matches: [{ element: { ref: "ax:invoice" }, matchedFields: ["name"] }],
     });
   });
 
@@ -2351,6 +2862,51 @@ describe("MCP app tools", () => {
     });
   });
 
+  test("reuses a supplied stable observation and verifies Android text and selection state", async () => {
+    const session = new SimViewSession();
+    const selectedInvoice: AccessibilityNode = {
+      ...interactionNode("android:invoice", "discarded label", 0.1, 0.1),
+      value: "Invoice #30363063",
+      checked: true,
+      selected: true,
+    };
+    delete selectedInvoice.label;
+    const destination = interactionSnapshot("android-destination", selectedInvoice);
+    const observation = {
+      snapshot: destination,
+      revision: "7",
+      eventChanged: true,
+      stable: true,
+      timedOut: false,
+      strategy: "android-shell-dump" as const,
+      settledAt: "2026-08-08T10:00:00.075Z",
+    };
+    let additionalCaptures = 0;
+    session.accessibilityObserve = async () => {
+      additionalCaptures += 1;
+      throw new Error("A stable supplied observation must not be recaptured");
+    };
+
+    await expect(
+      session.verifyNativeDestination(
+        {
+          identity: {
+            name: "#30363063",
+            exact: false,
+            checked: true,
+            selected: true,
+          },
+        },
+        { observation },
+      ),
+    ).resolves.toMatchObject({
+      status: "matched",
+      verified: true,
+      checks: [{ kind: "identity", count: 1 }],
+    });
+    expect(additionalCaptures).toBe(0);
+  });
+
   test("returns a hard-stop error after a dispatched standalone tap fails verification", async () => {
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const session = new SimViewSession();
@@ -2397,12 +2953,16 @@ describe("MCP app tools", () => {
         },
       });
       expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toStartWith(
+        "HARD STOP — INPUT WAS DISPATCHED",
+      );
       expect(result.structuredContent).toMatchObject({
         accepted: false,
         safeToContinue: false,
         code: "destination_mismatch",
         inputDispatched: true,
         retryable: false,
+        retryInput: false,
         interaction: {
           accepted: true,
           fingerprint: { name: "Invoice #30363063" },
@@ -2463,14 +3023,15 @@ describe("MCP app tools", () => {
         },
       });
       expect(result.isError).toBe(true);
-      expect((result.content as Array<{ text?: string }>)[0]?.text).toContain(
-        "matched multiple native nodes",
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toStartWith(
+        "HARD STOP — INPUT WAS DISPATCHED",
       );
       expect(result.structuredContent).toMatchObject({
         accepted: false,
         safeToContinue: false,
         code: "destination_ambiguous",
         retryable: false,
+        retryInput: false,
         inputDispatched: true,
         interaction: { accepted: true, interactionSnapshotId: "ax-fresh" },
         destinationVerification: { status: "ambiguous", verified: false },
@@ -2516,12 +3077,16 @@ describe("MCP app tools", () => {
         },
       });
       expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toStartWith(
+        "HARD STOP — INPUT WAS DISPATCHED",
+      );
       expect(result.structuredContent).toMatchObject({
         accepted: false,
         safeToContinue: false,
         code: "destination_unconfirmed",
         inputDispatched: true,
         retryable: true,
+        retryInput: false,
         interaction: { accepted: true },
       });
     } finally {
@@ -2583,6 +3148,9 @@ describe("MCP app tools", () => {
         },
       });
       expect(result.isError).toBe(true);
+      expect((result.content as Array<{ text?: string }>)[0]?.text).toStartWith(
+        "HARD STOP — INPUT WAS DISPATCHED",
+      );
       expect(result.structuredContent).toMatchObject({
         actionCount: 2,
         completedActionCount: 0,
@@ -2594,6 +3162,7 @@ describe("MCP app tools", () => {
             code: "destination_mismatch",
             inputDispatched: true,
             safeToContinue: false,
+            retryInput: false,
             interaction: { accepted: true },
             destinationVerification: { verified: false },
           },
@@ -2866,7 +3435,7 @@ function interactionNode(ref: string, label: string, x: number, y: number) {
 
 function interactionSnapshot(
   snapshotId: string,
-  ...nodes: ReturnType<typeof interactionNode>[]
+  ...nodes: AccessibilityNode[]
 ): AccessibilitySnapshot {
   return {
     schemaVersion: 1,
@@ -2878,6 +3447,51 @@ function interactionSnapshot(
     root: { ref: "ax:root", children: nodes },
     stats: { nodeCount: nodes.length + 1, truncated: false, quality: "complete" },
   };
+}
+
+function androidInvoiceHierarchy(snapshotId: string, actionableChild = false) {
+  const child = {
+    ref: `${snapshotId}:text`,
+    role: actionableChild ? "button" : "text",
+    label: "INVOICES",
+    enabled: true,
+    ...(actionableChild ? { actions: ["click"] } : {}),
+    frame: {
+      points: { x: 120, y: 720, width: 120, height: 36 },
+      normalized: { x: 0.3, y: 0.82, width: 0.3, height: 0.04 },
+    },
+  };
+  const target = {
+    ref: `${snapshotId}:container`,
+    identifier: "invoices-tab",
+    role: "button",
+    label: "INVOICES",
+    enabled: true,
+    actions: ["click"],
+    frame: {
+      points: { x: 80, y: 680, width: 220, height: 120 },
+      normalized: { x: 0.2, y: 0.76, width: 0.55, height: 0.14 },
+    },
+    children: [child],
+  };
+  const snapshot: AccessibilitySnapshot = {
+    schemaVersion: 1,
+    snapshotId,
+    capturedAt: "2026-08-08T10:00:00.000Z",
+    source: "android-agent-shell",
+    scope: "interactive",
+    screen: { x: 0, y: 0, width: 402, height: 874 },
+    root: {
+      ref: `${snapshotId}:root`,
+      frame: {
+        points: { x: 0, y: 0, width: 402, height: 874 },
+        normalized: { x: 0, y: 0, width: 1, height: 1 },
+      },
+      children: [target],
+    },
+    stats: { nodeCount: 3, truncated: false, quality: "complete" },
+  };
+  return { snapshot, target, child };
 }
 
 function mockAccessibilityObservation(

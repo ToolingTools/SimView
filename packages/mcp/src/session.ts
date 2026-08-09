@@ -25,6 +25,7 @@ import {
   type ElementTreeOutput,
   type IOSAccessibilityStatus,
   normalizedPointSchema,
+  normalizeSemanticSearchText,
   relayAuthenticationSchema,
   relayInputSchema,
   type SaveReviewImagesInput,
@@ -120,6 +121,25 @@ export type NativeTapResolution = {
   corroboratedBy?: SemanticFingerprintField[];
   stable?: boolean;
   hitTest?: boolean;
+  hitNode?: AccessibilityNode;
+  actionableHitNode?: AccessibilityNode;
+  hitRelationship?: "self" | "descendant" | "ancestor" | "unrelated" | "ambiguous";
+  hitMethod?: "snapshot-actionable" | "provider-element-at-point";
+  selectorDiagnostics?: SelectorDiagnostics;
+  searchScope?: "current-rendered-tree";
+  absenceConclusive?: boolean;
+};
+
+type SelectorDiagnosticField = "ref" | "identifier" | "role" | "name" | "value" | "placeholder";
+
+type SelectorDiagnostics = {
+  fields: Array<{
+    field: SelectorDiagnosticField;
+    matchCount: number;
+    matches: AccessibilityNode[];
+  }>;
+  splitAcrossNodes: boolean;
+  relationship?: "ancestor-descendant" | "separate";
 };
 
 export type DestinationVerification = {
@@ -138,15 +158,20 @@ export type DestinationVerification = {
   stable: boolean;
   checks: Array<{
     kind: "identity" | "assertion";
-    selector: AccessibilitySelector;
+    selector: DestinationSelector;
     count: number;
     suggestions?: DestinationSelectorSuggestion[];
   }>;
 };
 
+export type DestinationSelector = AccessibilitySelector & {
+  checked?: boolean | undefined;
+  selected?: boolean | undefined;
+};
+
 export type DestinationVerificationRequest = {
-  identity: AccessibilitySelector;
-  assertions?: AccessibilitySelector[];
+  identity: DestinationSelector;
+  assertions?: DestinationSelector[];
 };
 
 type DestinationSelectorSuggestion = {
@@ -732,11 +757,7 @@ export class SimViewSession {
     }
 
     const fallbackReason = this.#metroInspector.fallbackReason;
-    return this.#accessibilityElementOutput(
-      accessibility,
-      frameId,
-      fallbackReason === "metro-target-unavailable" ? undefined : fallbackReason,
-    );
+    return this.#accessibilityElementOutput(accessibility, frameId, fallbackReason);
   }
 
   async preparedElementSnapshot(maxNodes = 240): Promise<ElementTreeOutput> {
@@ -937,12 +958,20 @@ export class SimViewSession {
             accepted: false,
             code: fiberSelected.length > 1 ? "ambiguous_target" : "target_not_found",
             retryable: fiberSelected.length === 0,
+            ...(fiberSelected.length === 0
+              ? { selectorDiagnostics: selectorDiagnostics(observation.snapshot, selector) }
+              : {}),
           };
         }
         discoverySource = cachedFiber;
         discovery = fiberSelected[0];
       } else {
-        return { accepted: false, code: "target_not_found", retryable: true };
+        return {
+          accepted: false,
+          code: "target_not_found",
+          retryable: true,
+          selectorDiagnostics: selectorDiagnostics(observation.snapshot, selector),
+        };
       }
     }
 
@@ -1042,17 +1071,21 @@ export class SimViewSession {
         viewport: observation.snapshot.screen,
       };
     }
-    const hit = (await this.inspectPoint(point.x, point.y)) as AccessibilityNode;
     const nativeFingerprint = semanticFingerprint(target);
-    if (!matchesFingerprint(hit, nativeFingerprint)) {
+    const hitResolution =
+      this.device?.platform === "android"
+        ? resolveAndroidSnapshotHit(observation.snapshot, target, point)
+        : await this.#resolveProviderHit(nativeFingerprint, point);
+    if (!hitResolution.matchesTarget) {
       return {
         accepted: false,
         code: "hit_target_mismatch",
-        retryable: true,
+        retryable: false,
         fingerprint,
         target,
         point,
         hitTest: false,
+        ...hitResolution.diagnostics,
       };
     }
     return {
@@ -1069,6 +1102,21 @@ export class SimViewSession {
       point,
       stable: true,
       hitTest: true,
+      ...hitResolution.diagnostics,
+    };
+  }
+
+  async #resolveProviderHit(fingerprint: SemanticFingerprint, point: { x: number; y: number }) {
+    const hitNode = (await this.inspectPoint(point.x, point.y)) as AccessibilityNode;
+    const matchesTarget = matchesFingerprint(hitNode, fingerprint);
+    return {
+      matchesTarget,
+      diagnostics: {
+        hitNode,
+        ...(isActionableSearchCandidate(hitNode) ? { actionableHitNode: hitNode } : {}),
+        hitRelationship: matchesTarget ? ("self" as const) : ("unrelated" as const),
+        hitMethod: "provider-element-at-point" as const,
+      },
     };
   }
 
@@ -1078,15 +1126,17 @@ export class SimViewSession {
       afterRevision,
       settleQuietMs = 75,
       maxWaitMs = 1_000,
+      observation: suppliedObservation,
     }: {
       afterRevision?: string | undefined;
       settleQuietMs?: number | undefined;
       maxWaitMs?: number | undefined;
+      observation?: AccessibilityObservation | undefined;
     } = {},
   ): Promise<DestinationVerification> {
-    let observation: AccessibilityObservation;
+    let observation = suppliedObservation;
     try {
-      observation = await this.accessibilityObserve({
+      observation ??= await this.accessibilityObserve({
         afterRevision,
         scope: "visible",
         settleQuietMs,
@@ -1316,6 +1366,8 @@ export class SimViewSession {
     return {
       snapshotId: snapshot?.snapshotId ?? "unavailable",
       query: search,
+      searchScope: "current-rendered-tree" as const,
+      absenceConclusive: false,
       matches: ordered.slice(0, search.limit).map(({ match }) => match),
       count: Math.min(ordered.length, search.limit),
       total: ordered.length,
@@ -2103,18 +2155,11 @@ function strategyForSnapshot(
   }
 }
 
-function normalizeSearchText(value: string): string {
-  return value
-    .normalize("NFKD")
-    .replace(/\p{Mark}/gu, "")
-    .toLocaleLowerCase()
-    .replace(/[^\p{Letter}\p{Number}]+/gu, " ")
-    .trim();
-}
+const normalizeSearchText = normalizeSemanticSearchText;
 
 function matchingElements(
   snapshot: ElementSnapshot,
-  selector: AccessibilitySelector,
+  selector: DestinationSelector,
 ): AccessibilityNode[] {
   const exact = selector.exact ?? true;
   const matches = (actual: string | undefined, expected: string | undefined) =>
@@ -2128,15 +2173,97 @@ function matchingElements(
       matches(node.ref, selector.ref) &&
       matches(node.testID ?? node.identifier, selector.identifier) &&
       matches(node.role, selector.role) &&
-      matchesAccessibleName(node.label ?? node.title, selector.name, exact) &&
+      matchesAccessibleName(accessibleName(node), selector.name, exact) &&
       matches(node.value, selector.value) &&
-      matches(node.placeholder, selector.placeholder),
+      matches(node.placeholder, selector.placeholder) &&
+      (selector.checked === undefined || node.checked === selector.checked) &&
+      (selector.selected === undefined || node.selected === selector.selected),
   );
+}
+
+function selectorDiagnostics(
+  snapshot: ElementSnapshot,
+  selector: AccessibilitySelector,
+): SelectorDiagnostics {
+  const requestedFieldsWithMatches = (
+    ["ref", "identifier", "role", "name", "value", "placeholder"] as const
+  ).flatMap((field) => {
+    const expected = selector[field];
+    if (expected === undefined) return [];
+    const fieldSelector = {
+      [field]: expected,
+      exact: selector.exact ?? true,
+    } as DestinationSelector;
+    const matches = matchingElements(snapshot, fieldSelector);
+    return [{ field, matches }];
+  });
+  const populatedFields = requestedFieldsWithMatches.filter((field) => field.matches.length > 0);
+  let commonRefs: Set<string> | undefined;
+  for (const field of populatedFields) {
+    const refs = new Set(field.matches.map((node) => node.ref));
+    if (commonRefs === undefined) {
+      commonRefs = refs;
+      continue;
+    }
+    for (const ref of commonRefs) {
+      if (!refs.has(ref)) commonRefs.delete(ref);
+    }
+  }
+  const splitAcrossNodes = populatedFields.length >= 2 && (commonRefs?.size ?? 0) === 0;
+  const relationship = splitAcrossNodes
+    ? selectorDiagnosticRelationship(
+        snapshot,
+        populatedFields.flatMap((field) => field.matches),
+      )
+    : undefined;
+  return {
+    fields: requestedFieldsWithMatches.map(({ field, matches }) => ({
+      field,
+      matchCount: matches.length,
+      matches: matches.slice(0, 2),
+    })),
+    splitAcrossNodes,
+    ...(relationship ? { relationship } : {}),
+  };
+}
+
+function selectorDiagnosticRelationship(
+  snapshot: ElementSnapshot,
+  nodes: AccessibilityNode[],
+): "ancestor-descendant" | "separate" {
+  const parents = new Map<string, string>();
+  const visit = (node: AccessibilityNode) => {
+    for (const child of node.children ?? []) {
+      parents.set(child.ref, node.ref);
+      visit(child);
+    }
+  };
+  visit(snapshot.root);
+  const isAncestor = (ancestor: string, descendant: string) => {
+    let current = parents.get(descendant);
+    while (current) {
+      if (current === ancestor) return true;
+      current = parents.get(current);
+    }
+    return false;
+  };
+  for (const [index, left] of nodes.entries()) {
+    for (const right of nodes.slice(index + 1)) {
+      if (isAncestor(left.ref, right.ref) || isAncestor(right.ref, left.ref)) {
+        return "ancestor-descendant";
+      }
+    }
+  }
+  return "separate";
+}
+
+function accessibleName(node: AccessibilityNode): string | undefined {
+  return node.label ?? node.title ?? (node.valueRedacted ? undefined : node.value);
 }
 
 function destinationSelectorSuggestions(
   snapshot: AccessibilitySnapshot,
-  selector: AccessibilitySelector,
+  selector: DestinationSelector,
 ): DestinationSelectorSuggestion[] {
   const requested = [
     selector.identifier,
@@ -2386,6 +2513,83 @@ function isActionableSearchCandidate(node: AccessibilityNode): boolean {
   return hasActionSemantics(node);
 }
 
+type SnapshotHit = { node: AccessibilityNode; path: AccessibilityNode[]; depth: number };
+
+function resolveAndroidSnapshotHit(
+  snapshot: AccessibilitySnapshot,
+  target: AccessibilityNode,
+  point: { x: number; y: number },
+) {
+  const hits: SnapshotHit[] = [];
+  const visit = (node: AccessibilityNode, path: AccessibilityNode[]) => {
+    const frame = node.frame?.normalized;
+    const nextPath = [...path, node];
+    if (
+      node.hidden !== true &&
+      (node.visibleFraction ?? 1) > 0 &&
+      frame &&
+      frame.width > 0 &&
+      frame.height > 0 &&
+      point.x >= frame.x &&
+      point.x <= frame.x + frame.width &&
+      point.y >= frame.y &&
+      point.y <= frame.y + frame.height
+    ) {
+      hits.push({ node, path: nextPath, depth: path.length });
+    }
+    node.children?.forEach((child) => {
+      visit(child, nextPath);
+    });
+  };
+  visit(snapshot.root, []);
+
+  const byDepthThenArea = (left: SnapshotHit, right: SnapshotHit) => {
+    if (left.depth !== right.depth) return right.depth - left.depth;
+    const leftFrame = left.node.frame?.normalized;
+    const rightFrame = right.node.frame?.normalized;
+    return (
+      (leftFrame ? leftFrame.width * leftFrame.height : Number.POSITIVE_INFINITY) -
+      (rightFrame ? rightFrame.width * rightFrame.height : Number.POSITIVE_INFINITY)
+    );
+  };
+  const hitNode = hits.toSorted(byDepthThenArea)[0]?.node;
+  const actionable = hits.filter(({ node }) => isActionableSearchCandidate(node));
+  const winningDepth = Math.max(...actionable.map(({ depth }) => depth), -1);
+  const winners = actionable
+    .filter(({ depth }) => depth === winningDepth)
+    .toSorted(byDepthThenArea);
+  const selected = winners[0];
+  const targetHit = hits.find(({ node }) => node === target || node.ref === target.ref);
+
+  const pathContains = (path: AccessibilityNode[], node: AccessibilityNode) =>
+    path.some((candidate) => candidate === node || candidate.ref === node.ref);
+  const relationship = (candidate: SnapshotHit) => {
+    if (candidate.node === target || candidate.node.ref === target.ref) return "self" as const;
+    if (targetHit && pathContains(candidate.path.slice(0, -1), target))
+      return "descendant" as const;
+    if (targetHit && pathContains(targetHit.path.slice(0, -1), candidate.node)) {
+      return "ancestor" as const;
+    }
+    return "unrelated" as const;
+  };
+  const selectedRelationship = selected ? relationship(selected) : ("unrelated" as const);
+  const ambiguous = winners.some(
+    (winner) => winner !== selected && winner.node.ref !== selected?.node.ref,
+  );
+  const hitRelationship = ambiguous ? ("ambiguous" as const) : selectedRelationship;
+  const actionableHitNode = ambiguous ? undefined : selected?.node;
+
+  return {
+    matchesTarget: !ambiguous && actionableHitNode?.ref === target.ref,
+    diagnostics: {
+      ...(hitNode ? { hitNode } : {}),
+      ...(actionableHitNode ? { actionableHitNode } : {}),
+      hitRelationship,
+      hitMethod: "snapshot-actionable" as const,
+    },
+  };
+}
+
 function hasActionSemantics(node: AccessibilityNode): boolean {
   if (node.interactive === true || (node.actions?.length ?? 0) > 0) return true;
   const role = normalizeSearchText(node.role ?? "").replaceAll(" ", "");
@@ -2408,6 +2612,7 @@ function rankElementSearchMatch(
   query: string,
 ): Omit<ElementSearchMatch, "source" | "snapshotId"> | undefined {
   const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) return undefined;
   const queryTokens = normalizedQuery.split(" ").filter(Boolean);
   const fields = [
     ["ref", element.ref, 1],

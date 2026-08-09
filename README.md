@@ -244,10 +244,23 @@ native accessibility target, then hit-test it before input; React Native Fiber
 is discovery-only fallback and never supplies tap coordinates. Fiber-only test
 IDs require a unique exact native accessible-name corroboration before input.
 Offscreen ranked results appear under `excludedCandidates` with swipe guidance.
-For invoices, orders, payments, accounts, or other entity-sensitive navigation, pass
-`verifyDestination.identity` for the exact destination identifier and optional
-`verifyDestination.assertions` for amount, status, or other supporting facts.
-Selectors are exact by default; use a native label fragment with
+Search covers only the currently rendered semantic tree, so a zero result does
+not establish that an item is absent from a scrollable list, table, or
+virtualized collection. Explore expected data surfaces one swipe at a time,
+searching each changed snapshot and stopping at an unchanged semantic boundary
+or a bounded attempt limit; never batch speculative swipes or reuse an old ref.
+`verifyDestination` is optional. Do not attach it to every tap merely because a
+flow involves invoices, orders, payments, or accounts. For generic section/menu
+navigation, omit it and rely on the stable semantic post-action observation.
+Use `verifyDestination.identity` only when a distinctive identity is known to
+be exposed on the destination, normally when opening a specific entity or
+before a consequential follow-up action. Never copy the tapped control's label
+or use a generic label such as `Invoices`, `Orders`, `Card`, or `Pay` as the
+destination identity. Optional `verifyDestination.assertions` can establish
+amount, status, or other supporting facts.
+Selectors are exact by default. `name` matches native label/title and falls back
+to non-redacted text values such as Android `TextView` content; use `value` when
+that field is explicitly exposed. Use a native name fragment with
 `exact: false` when the destination exposes a composite label such as
 `Invoice #30363063`. `isError` or `safeToContinue: false` is a hard stop even though
 the nested `interaction` receipt confirms that input was dispatched. Prefer
@@ -256,7 +269,8 @@ the verification timeout is bounded to 100–5000 ms. Identity must match exactl
 one native node. Assertions only need to be present and may match multiple nodes,
 such as an amount repeated in total and outstanding fields. An ambiguous identity
 hard-stops as `destination_ambiguous` with `safeToContinue: false`; strengthen it
-without repeating the already accepted tap. Prefer
+without repeating the already accepted tap. Use `checked` or `selected` to verify
+control state when native accessibility exposes it. Prefer
 `perform_actions` with `observe: "semantic"` for ordered input plus a coherent post-action
 observation. Images are never an automatic fallback; use explicit `visual`
 mode only when the user requests visual inspection. iOS input uses SimulatorKit
@@ -276,6 +290,9 @@ starts Metro, serializes component props or navigation params, or attaches an
 ambiguous target to a Simulator.
 Without a matching target it uses the frontmost native accessibility hierarchy:
 the automatically started XCTest provider on iOS or UIAutomator on Android.
+For Android semantic taps, the raw deepest hit and selected actionable hit are
+resolved from that same fresh hierarchy; the tree validates the target, while
+physical input remains native-only.
 XCTest activates but does not relaunch the target app, and the packaged runner
 is reused for warm snapshots during the session. Simulator AX remains available
 when XCTest cannot start. An optional
