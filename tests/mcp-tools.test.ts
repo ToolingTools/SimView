@@ -61,6 +61,20 @@ const modelOnlyTools = [
   "tap_element",
 ];
 
+async function connectMcpTestServer(
+  name: string,
+  session: SimViewSession,
+  server: ReturnType<typeof createServer>,
+) {
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name, version: "1.0.0" });
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+  return {
+    client,
+    closeHarness: () => Promise.all([client.close(), server.close(), session.close()]),
+  };
+}
+
 describe("MCP app tools", () => {
   test("directs disconnected control calls to connect_device", () => {
     const session = new SimViewSession();
@@ -152,9 +166,7 @@ describe("MCP app tools", () => {
       deviceInventorySnapshotTTLMS: 30_000,
       now: () => now,
     });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "device-pages", version: "1.0.0" });
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const { client, closeHarness } = await connectMcpTestServer("device-pages", session, server);
     try {
       const first = deviceListSchema.parse(
         (
@@ -232,7 +244,7 @@ describe("MCP app tools", () => {
       });
       expect(malformed.isError).toBe(true);
     } finally {
-      await Promise.all([client.close(), server.close(), session.close()]);
+      await closeHarness();
     }
   });
 
@@ -242,9 +254,11 @@ describe("MCP app tools", () => {
     );
     const session = new SimViewSession();
     const server = createServer(session, { deviceProvider: async () => inventory });
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "bounded-device-pages", version: "1.0.0" });
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const { client, closeHarness } = await connectMcpTestServer(
+      "bounded-device-pages",
+      session,
+      server,
+    );
     try {
       const cursors: string[] = [];
       for (let index = 0; index < 5; index += 1) {
@@ -271,7 +285,7 @@ describe("MCP app tools", () => {
       });
       expect(retained.isError).not.toBe(true);
     } finally {
-      await Promise.all([client.close(), server.close(), session.close()]);
+      await closeHarness();
     }
   });
 
@@ -305,11 +319,9 @@ describe("MCP app tools", () => {
   });
 
   test("does not open the browser when a v1 host reads the app resource", async () => {
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
     const session = previewSession();
     const server = createServer(session, { browserFallbackDelayMs: 25 });
-    const client = new Client({ name: "simview-v1-test", version: "1.0.0" });
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const { client, closeHarness } = await connectMcpTestServer("simview-v1-test", session, server);
 
     try {
       const uri = resourceUri(await client.listTools());
@@ -320,7 +332,7 @@ describe("MCP app tools", () => {
       expect(session.browserOpened).toBe(0);
       expect(session.relayStarted).toBe(0);
     } finally {
-      await Promise.all([client.close(), server.close(), session.close()]);
+      await closeHarness();
     }
   });
 
@@ -353,9 +365,11 @@ describe("MCP app tools", () => {
       },
     } as never;
     const server = createServer(session);
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "accessibility-resource-test", version: "1.0.0" });
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const { client, closeHarness } = await connectMcpTestServer(
+      "accessibility-resource-test",
+      session,
+      server,
+    );
     const notifications: string[] = [];
     client.setNotificationHandler(ResourceUpdatedNotificationSchema, ({ params }) => {
       notifications.push(params.uri);
@@ -391,7 +405,7 @@ describe("MCP app tools", () => {
         snapshot: { snapshotId: "ax-3" },
       });
     } finally {
-      await Promise.all([client.close(), server.close(), session.close()]);
+      await closeHarness();
     }
   });
 
@@ -653,9 +667,7 @@ describe("MCP app tools", () => {
       return output;
     };
     const server = createServer(session);
-    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-    const client = new Client({ name: "paged-elements", version: "1.0.0" });
-    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
+    const { client, closeHarness } = await connectMcpTestServer("paged-elements", session, server);
     try {
       const pages: ElementTreePage[] = [];
       let result = await client.callTool({
@@ -685,7 +697,7 @@ describe("MCP app tools", () => {
       expect(pages.length).toBeGreaterThan(1);
       expect(await assembleElementTreePages(pages)).toEqual(output);
     } finally {
-      await Promise.all([client.close(), server.close(), session.close()]);
+      await closeHarness();
     }
   });
 

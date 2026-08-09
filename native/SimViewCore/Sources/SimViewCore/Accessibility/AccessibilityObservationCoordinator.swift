@@ -20,6 +20,18 @@ struct AccessibilityObservationResult: @unchecked Sendable {
 final class AccessibilityObservationCoordinator: @unchecked Sendable {
     typealias SnapshotCapture = @Sendable (_ scope: String, _ maxNodes: Int) throws -> [String: Any]
 
+    private struct ObservationRequest {
+        let quiet: TimeInterval
+        let startedAt: Date
+        let deadline: Date
+        let requestedRevision: UInt64?
+        let startGeneration: UInt64
+        let scope: String
+        let maxNodes: Int
+        let requireChange: Bool
+        let strategy: String
+    }
+
     private static let initialPollInterval: TimeInterval = 0.150
     private static let maximumPollInterval: TimeInterval = 0.500
     private static let iosFallbackProbeDelay: TimeInterval = 0.150
@@ -129,141 +141,197 @@ final class AccessibilityObservationCoordinator: @unchecked Sendable {
                 snapshot, scope: scope, maxNodes: boundedMaxNodes)
         }
 
+        let request = ObservationRequest(
+            quiet: quiet,
+            startedAt: startedAt,
+            deadline: deadline,
+            requestedRevision: requestedRevision,
+            startGeneration: startGeneration,
+            scope: scope,
+            maxNodes: boundedMaxNodes,
+            requireChange: requireChange,
+            strategy: strategy
+        )
         if Self.isEventDriven(strategy) {
-            let usesIOSFallback = strategy == "ios-axp" && requireChange
-            let fallbackProbeAt = min(
-                deadline,
-                startedAt.addingTimeInterval(max(Self.iosFallbackProbeDelay, quiet)))
-            var fallbackCaptureCount = 0
-            var fallbackChangedAt: Date?
-            var fallbackSnapshot = cachedSnapshot(scope: scope, maxNodes: boundedMaxNodes)!
-            while true {
-                if startGeneration != currentGeneration() {
-                    throw SimViewError("ACCESSIBILITY_RESET", "Accessibility observation was reset")
-                }
-                condition.lock()
-                let now = Date()
-                let eventChanged = requestedRevision.map { revision > $0 } ?? false
-                let quietAnchor = max(lastChangedAt ?? startedAt, startedAt)
-                let quietAt = quietAnchor.addingTimeInterval(quiet)
+            return try observeEventDriven(
+                request,
+                scopeCaptureChanged: scopeCaptureChanged,
+                captureCount: &captureCount,
+                capture: capture
+            )
+        }
+        return try observeSnapshotDiff(
+            request,
+            captureCount: &captureCount,
+            capture: capture
+        )
+    }
 
-                // A fallback diff found a changed tree. Confirm it after the
-                // quiet window and keep polling if the confirmation also
-                // changes, bounded by the original deadline.
-                if let changeDetectedAt = fallbackChangedAt {
-                    let fallbackQuietAt = changeDetectedAt.addingTimeInterval(quiet)
-                    if now >= min(deadline, fallbackQuietAt) {
-                        condition.unlock()
-                        captureCount += 1
-                        fallbackCaptureCount += 1
-                        fallbackSnapshot = try capture(scope, boundedMaxNodes)
-                        let treeChanged = recordSnapshot(
-                            fallbackSnapshot, scope: scope, maxNodes: boundedMaxNodes)
-                        if treeChanged && now < deadline {
-                            fallbackChangedAt = Date()
-                            continue
-                        }
-                        let settled = !treeChanged
-                        return result(
-                            snapshot: fallbackSnapshot,
-                            eventChanged: true,
-                            stable: settled,
-                            timedOut: !settled && now >= deadline,
-                            strategy: strategy,
-                            settledAt: Date(),
-                            fallbackUsed: true,
-                            captureCount: captureCount,
-                            changeSource: "snapshot-diff"
-                        )
-                    }
-                    condition.wait(until: min(deadline, fallbackQuietAt))
-                    condition.unlock()
-                    continue
-                }
+    private func observeEventDriven(
+        _ request: ObservationRequest,
+        scopeCaptureChanged: Bool,
+        captureCount: inout Int,
+        capture: SnapshotCapture
+    ) throws -> AccessibilityObservationResult {
+        let quiet = request.quiet
+        let startedAt = request.startedAt
+        let deadline = request.deadline
+        let requestedRevision = request.requestedRevision
+        let startGeneration = request.startGeneration
+        let scope = request.scope
+        let boundedMaxNodes = request.maxNodes
+        let requireChange = request.requireChange
+        let strategy = request.strategy
 
-                if (!requireChange || eventChanged), now >= quietAt {
-                    condition.unlock()
-                    captureCount += 1
-                    let snapshot = try capture(scope, boundedMaxNodes)
-                    let treeChanged = recordSnapshot(
-                        snapshot, scope: scope, maxNodes: boundedMaxNodes)
-                    let snapshotDiffChanged = scopeCaptureChanged && eventChanged
-                    let changeSource =
-                        snapshotDiffChanged || (!eventChanged && treeChanged)
-                        ? "snapshot-diff" : eventChanged ? "event" : "none"
-                    return result(
-                        snapshot: snapshot,
-                        eventChanged: eventChanged || treeChanged,
-                        stable: true,
-                        timedOut: false,
-                        strategy: strategy,
-                        settledAt: Date(),
-                        fallbackUsed: fallbackCaptureCount > 0 || snapshotDiffChanged,
-                        captureCount: captureCount,
-                        changeSource: changeSource
-                    )
-                }
+        let usesIOSFallback = strategy == "ios-axp" && requireChange
+        let fallbackProbeAt = min(
+            deadline,
+            startedAt.addingTimeInterval(max(Self.iosFallbackProbeDelay, quiet)))
+        var fallbackCaptureCount = 0
+        var fallbackChangedAt: Date?
+        var fallbackSnapshot = cachedSnapshot(scope: scope, maxNodes: boundedMaxNodes)!
+        while true {
+            if startGeneration != currentGeneration() {
+                throw SimViewError("ACCESSIBILITY_RESET", "Accessibility observation was reset")
+            }
+            condition.lock()
+            let now = Date()
+            let eventChanged = requestedRevision.map { revision > $0 } ?? false
+            let quietAnchor = max(lastChangedAt ?? startedAt, startedAt)
+            let quietAt = quietAnchor.addingTimeInterval(quiet)
 
-                if now >= deadline {
-                    condition.unlock()
-                    if usesIOSFallback && fallbackCaptureCount < 2 {
-                        captureCount += 1
-                        fallbackCaptureCount += 1
-                        fallbackSnapshot = try capture(scope, boundedMaxNodes)
-                        let treeChanged = recordSnapshot(
-                            fallbackSnapshot, scope: scope, maxNodes: boundedMaxNodes)
-                        return result(
-                            snapshot: fallbackSnapshot,
-                            eventChanged: eventChanged || treeChanged,
-                            stable: false,
-                            timedOut: true,
-                            strategy: strategy,
-                            settledAt: Date(),
-                            fallbackUsed: true,
-                            captureCount: captureCount,
-                            changeSource: treeChanged ? "snapshot-diff" : "none"
-                        )
-                    }
-                    return result(
-                        snapshot: fallbackSnapshot,
-                        eventChanged: eventChanged,
-                        stable: false,
-                        timedOut: true,
-                        strategy: strategy,
-                        settledAt: now,
-                        fallbackUsed: fallbackCaptureCount > 0,
-                        captureCount: captureCount,
-                        changeSource: eventChanged ? "event" : "none"
-                    )
-                }
-
-                if usesIOSFallback && !eventChanged && fallbackCaptureCount == 0
-                    && now >= fallbackProbeAt
-                {
+            // A fallback diff found a changed tree. Confirm it after the
+            // quiet window and keep polling if the confirmation also
+            // changes, bounded by the original deadline.
+            if let changeDetectedAt = fallbackChangedAt {
+                let fallbackQuietAt = changeDetectedAt.addingTimeInterval(quiet)
+                if now >= min(deadline, fallbackQuietAt) {
                     condition.unlock()
                     captureCount += 1
                     fallbackCaptureCount += 1
                     fallbackSnapshot = try capture(scope, boundedMaxNodes)
                     let treeChanged = recordSnapshot(
                         fallbackSnapshot, scope: scope, maxNodes: boundedMaxNodes)
-                    if treeChanged {
+                    if treeChanged && now < deadline {
                         fallbackChangedAt = Date()
+                        continue
                     }
-                    continue
+                    let settled = !treeChanged
+                    return result(
+                        snapshot: fallbackSnapshot,
+                        eventChanged: true,
+                        stable: settled,
+                        timedOut: !settled && now >= deadline,
+                        strategy: strategy,
+                        settledAt: Date(),
+                        fallbackUsed: true,
+                        captureCount: captureCount,
+                        changeSource: "snapshot-diff"
+                    )
                 }
-
-                let wakeAt: Date
-                if !requireChange || eventChanged {
-                    wakeAt = min(deadline, quietAt)
-                } else if usesIOSFallback && fallbackCaptureCount == 0 {
-                    wakeAt = min(deadline, fallbackProbeAt)
-                } else {
-                    wakeAt = deadline
-                }
-                condition.wait(until: wakeAt)
+                condition.wait(until: min(deadline, fallbackQuietAt))
                 condition.unlock()
+                continue
             }
+
+            if (!requireChange || eventChanged), now >= quietAt {
+                condition.unlock()
+                captureCount += 1
+                let snapshot = try capture(scope, boundedMaxNodes)
+                let treeChanged = recordSnapshot(
+                    snapshot, scope: scope, maxNodes: boundedMaxNodes)
+                let snapshotDiffChanged = scopeCaptureChanged && eventChanged
+                let changeSource =
+                    snapshotDiffChanged || (!eventChanged && treeChanged)
+                    ? "snapshot-diff" : eventChanged ? "event" : "none"
+                return result(
+                    snapshot: snapshot,
+                    eventChanged: eventChanged || treeChanged,
+                    stable: true,
+                    timedOut: false,
+                    strategy: strategy,
+                    settledAt: Date(),
+                    fallbackUsed: fallbackCaptureCount > 0 || snapshotDiffChanged,
+                    captureCount: captureCount,
+                    changeSource: changeSource
+                )
+            }
+
+            if now >= deadline {
+                condition.unlock()
+                if usesIOSFallback && fallbackCaptureCount < 2 {
+                    captureCount += 1
+                    fallbackCaptureCount += 1
+                    fallbackSnapshot = try capture(scope, boundedMaxNodes)
+                    let treeChanged = recordSnapshot(
+                        fallbackSnapshot, scope: scope, maxNodes: boundedMaxNodes)
+                    return result(
+                        snapshot: fallbackSnapshot,
+                        eventChanged: eventChanged || treeChanged,
+                        stable: false,
+                        timedOut: true,
+                        strategy: strategy,
+                        settledAt: Date(),
+                        fallbackUsed: true,
+                        captureCount: captureCount,
+                        changeSource: treeChanged ? "snapshot-diff" : "none"
+                    )
+                }
+                return result(
+                    snapshot: fallbackSnapshot,
+                    eventChanged: eventChanged,
+                    stable: false,
+                    timedOut: true,
+                    strategy: strategy,
+                    settledAt: now,
+                    fallbackUsed: fallbackCaptureCount > 0,
+                    captureCount: captureCount,
+                    changeSource: eventChanged ? "event" : "none"
+                )
+            }
+
+            if usesIOSFallback && !eventChanged && fallbackCaptureCount == 0
+                && now >= fallbackProbeAt
+            {
+                condition.unlock()
+                captureCount += 1
+                fallbackCaptureCount += 1
+                fallbackSnapshot = try capture(scope, boundedMaxNodes)
+                let treeChanged = recordSnapshot(
+                    fallbackSnapshot, scope: scope, maxNodes: boundedMaxNodes)
+                if treeChanged {
+                    fallbackChangedAt = Date()
+                }
+                continue
+            }
+
+            let wakeAt: Date
+            if !requireChange || eventChanged {
+                wakeAt = min(deadline, quietAt)
+            } else if usesIOSFallback && fallbackCaptureCount == 0 {
+                wakeAt = min(deadline, fallbackProbeAt)
+            } else {
+                wakeAt = deadline
+            }
+            condition.wait(until: wakeAt)
+            condition.unlock()
         }
+    }
+
+    private func observeSnapshotDiff(
+        _ request: ObservationRequest,
+        captureCount: inout Int,
+        capture: SnapshotCapture
+    ) throws -> AccessibilityObservationResult {
+        let quiet = request.quiet
+        let startedAt = request.startedAt
+        let deadline = request.deadline
+        let requestedRevision = request.requestedRevision
+        let startGeneration = request.startGeneration
+        let scope = request.scope
+        let boundedMaxNodes = request.maxNodes
+        let requireChange = request.requireChange
+        let strategy = request.strategy
 
         // A shell hierarchy dump is heavyweight. Start at 150 ms and back off
         // to 500 ms while unchanged. After a changed tree survives the quiet

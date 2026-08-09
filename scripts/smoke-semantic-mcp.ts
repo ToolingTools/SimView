@@ -93,13 +93,11 @@ try {
       semantic?: {
         status?: string;
         nodeCount?: number;
-        nodes?: Array<{ ref: string; label?: string }>;
       };
       vision?: { included?: boolean; returnedBytes?: number };
     }>(observed);
-    const nodes = observation.semantic?.nodes;
-    if (!nodes?.length || observation.semantic?.nodeCount === 0) {
-      throw new Error("Semantic observation returned no structured nodes");
+    if (!observation.semantic?.nodeCount) {
+      throw new Error("Semantic observation reported no nodes");
     }
     if (observation.vision?.included || observation.vision?.returnedBytes !== 0) {
       throw new Error("Semantic observation unexpectedly returned visual content");
@@ -145,8 +143,6 @@ try {
             observationId: observation.observationId,
             status: observation.semantic?.status,
             nodeCount: observation.semantic?.nodeCount,
-            returnedNodes: nodes.length,
-            sample: nodes.slice(0, 12),
             vision: observation.vision,
           },
           search: searchSummary,

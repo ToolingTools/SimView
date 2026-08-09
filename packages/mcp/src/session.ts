@@ -1,4 +1,4 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -33,7 +33,6 @@ import {
   type SaveReviewImagesOutput,
   type SessionState,
   saveReviewImagesInputSchema,
-  stableAccessibilityEntries,
   summarizeAccessibilityNode,
   uiContextSchema,
 } from "@simview/contracts";
@@ -42,6 +41,7 @@ import { z } from "zod";
 import { previewScriptResponse, resolveAppRoot } from "./app-assets";
 import { MetroInspector } from "./metro";
 import { packetsFromLatestKeyframe } from "./preview";
+import { accessibilityResourceSemanticHash } from "./semantic-state";
 
 export type { SessionState } from "@simview/contracts";
 
@@ -768,7 +768,7 @@ export class SimViewSession {
     snapshot: AccessibilitySnapshot,
     observation: Pick<AccessibilityObservation, "revision" | "strategy" | "stable" | "settledAt">,
   ): void {
-    const semanticHash = semanticHashForSnapshot(snapshot);
+    const semanticHash = accessibilityResourceSemanticHash(snapshot);
     const resource = accessibilityResourceSchema.parse({
       schemaVersion: 1,
       revision: observation.revision,
@@ -2200,7 +2200,7 @@ export class SimViewSession {
     ) {
       return resource.semanticHash;
     }
-    return semanticHashForSnapshot(snapshot);
+    return accessibilityResourceSemanticHash(snapshot);
   }
 
   #clearSemanticState(): void {
@@ -2244,13 +2244,6 @@ const ACTIONABLE_ROLE_MARKERS = [
   "menuitem",
   "cell",
 ];
-
-function semanticHashForSnapshot(snapshot: AccessibilitySnapshot): string {
-  const entries = stableAccessibilityEntries(snapshot.root)
-    .map((entry) => [entry.key, entry.value] as const)
-    .sort(([left], [right]) => left.localeCompare(right));
-  return createHash("sha256").update(JSON.stringify(entries)).digest("hex");
-}
 
 function strategyForSnapshot(
   snapshot: AccessibilitySnapshot,

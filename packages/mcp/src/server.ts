@@ -47,7 +47,6 @@ import {
   semanticNodeSummarySchema,
   semanticSearchTextSchema,
   sessionStateSchema,
-  stableAccessibilityEntries,
   summarizeAccessibilityNode,
   uiContextSchema,
 } from "@simview/contracts";
@@ -55,6 +54,12 @@ import { z } from "zod";
 import { resolveAppRoot } from "./app-assets";
 import { inlineAppModule } from "./app-html";
 import { dispatchSemanticTextAction } from "./semantic-interactions";
+import {
+  indexSemanticSnapshot,
+  type SemanticSnapshotIndex,
+  semanticObservationHash,
+  semanticSnapshotDelta,
+} from "./semantic-state";
 import {
   type AccessibilityObservation,
   type DestinationVerification,
@@ -236,7 +241,7 @@ async function captureObservationBaseline(session: SimViewSession): Promise<Obse
   return {
     afterRevision: session.accessibilityRevision,
     beforeSemanticHash: session.lastAccessibility
-      ? semanticHashForSnapshot(session.lastAccessibility)
+      ? semanticObservationHash(indexSemanticSnapshot(session.lastAccessibility))
       : undefined,
     afterVisualRevision: session.latestObservation?.changeRevision,
   };
@@ -300,46 +305,6 @@ function compactElementTree(
       : fallbackMessages[result.fallback.reason]
     : undefined;
   return [summary, fallback, compactAccessibilityTree(snapshot)].filter(Boolean).join("\n");
-}
-
-type SemanticIndex = Map<string, { hash: string; ref: string }>;
-
-function indexSemantics(snapshot: z.output<typeof accessibilitySnapshotSchema>): SemanticIndex {
-  return new Map(
-    stableAccessibilityEntries(snapshot.root).map(({ key, ref, value }) => [
-      key,
-      { ref, hash: createHash("sha256").update(JSON.stringify(value)).digest("hex") },
-    ]),
-  );
-}
-
-function semanticHash(index: SemanticIndex): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify(
-        [...index]
-          .map(([key, entry]) => [key, entry.hash] as const)
-          .sort(([left], [right]) => left.localeCompare(right)),
-      ),
-    )
-    .digest("hex");
-}
-
-function semanticHashForSnapshot(snapshot: z.output<typeof accessibilitySnapshotSchema>): string {
-  return semanticHash(indexSemantics(snapshot));
-}
-
-function semanticDelta(previous: SemanticIndex, current: SemanticIndex) {
-  const added = [...current.keys()].filter((ref) => !previous.has(ref));
-  const removed = [...previous].filter(([key]) => !current.has(key)).map(([, entry]) => entry.ref);
-  const changed = [...current]
-    .filter(([key, entry]) => previous.get(key)?.hash !== entry.hash && previous.has(key))
-    .map(([, entry]) => entry.ref);
-  return {
-    added: added.map((key) => current.get(key)?.ref ?? key),
-    removed,
-    changed,
-  };
 }
 
 function elementTreePage(cache: ElementTreePageCache, pageIndex: number): ElementTreePage {
@@ -1121,7 +1086,7 @@ export function createServer(
   };
   const observationHistory = new Map<
     string,
-    { hash: string; index: SemanticIndex; sessionKey: string }
+    { hash: string; index: SemanticSnapshotIndex; sessionKey: string }
   >();
   const observe = async ({
     mode = "semantic",
@@ -1188,7 +1153,7 @@ export function createServer(
       accessibilityObservation &&
       (!accessibilityObservation.stable ||
         (postAction.beforeSemanticHash !== undefined &&
-          semanticHashForSnapshot(accessibilityObservation.snapshot) ===
+          semanticObservationHash(indexSemanticSnapshot(accessibilityObservation.snapshot)) ===
             postAction.beforeSemanticHash &&
           (accessibilityObservation.eventChanged || visualChanged)))
     ) {
@@ -1240,7 +1205,7 @@ export function createServer(
     let result: ElementTreeOutput | undefined;
     let snapshot: z.output<typeof accessibilitySnapshotSchema> | undefined;
     let semanticError: z.output<typeof semanticErrorSchema> | undefined;
-    let index: SemanticIndex = new Map();
+    let index: SemanticSnapshotIndex = new Map();
     let hash: string | undefined;
     try {
       result = await session.preparedElementSnapshot(240);
@@ -1249,8 +1214,8 @@ export function createServer(
       }
       snapshot = accessibilityObservation.snapshot;
       if (!snapshot) throw new Error("Semantic observation did not produce accessibility state");
-      index = indexSemantics(snapshot);
-      hash = semanticHash(index);
+      index = indexSemanticSnapshot(snapshot);
+      hash = semanticObservationHash(index);
     } catch (error) {
       semanticError = {
         code: "semantic_inspection_failed",
@@ -1264,7 +1229,7 @@ export function createServer(
       ? observationHistory.get(sinceObservationId)
       : undefined;
     const previous = candidatePrevious?.sessionKey === sessionKey ? candidatePrevious : undefined;
-    const delta = previous && hash ? semanticDelta(previous.index, index) : undefined;
+    const delta = previous && hash ? semanticSnapshotDelta(previous.index, index) : undefined;
     let semanticStatus: "unavailable" | "full" | "unchanged" | "delta";
     if (!hash) semanticStatus = "unavailable";
     else if (!previous) semanticStatus = "full";
@@ -1800,12 +1765,7 @@ export function createServer(
         try {
           const receipt = await dispatchAction(action);
           receipts.push(receipt);
-          if (
-            receipt !== null &&
-            typeof receipt === "object" &&
-            "accepted" in receipt &&
-            receipt.accepted === false
-          ) {
+          if (asRecord(receipt)?.accepted === false) {
             failedActionIndex = index;
             break;
           }
@@ -1815,26 +1775,11 @@ export function createServer(
           break;
         }
       }
-      let hardStop = receipts.some(
-        (receipt) =>
-          receipt !== null &&
-          typeof receipt === "object" &&
-          "safeToContinue" in receipt &&
-          receipt.safeToContinue === false,
-      );
-      const inputDispatched = receipts.some(
-        (receipt) =>
-          receipt !== null &&
-          typeof receipt === "object" &&
-          "inputDispatched" in receipt &&
-          receipt.inputDispatched === true,
-      );
-      const dispatchedActionCount = receipts.filter(
-        (receipt) =>
-          receipt !== null &&
-          typeof receipt === "object" &&
-          "inputDispatched" in receipt &&
-          receipt.inputDispatched === true,
+      const receiptRecords = receipts.map(asRecord);
+      let hardStop = receiptRecords.some((receipt) => receipt?.safeToContinue === false);
+      const inputDispatched = receiptRecords.some((receipt) => receipt?.inputDispatched === true);
+      const dispatchedActionCount = receiptRecords.filter(
+        (receipt) => receipt?.inputDispatched === true,
       ).length;
       if (observationMode === "none" || !inputDispatched) {
         return toolResult(
@@ -1855,18 +1800,12 @@ export function createServer(
         );
       }
       const finalAction = actions[receipts.length - 1];
-      const finalReceiptBeforeObservation = receipts.at(-1);
+      const finalReceiptBeforeObservation = asRecord(receipts.at(-1));
+      const finalReceiptVerification = asRecord(finalReceiptBeforeObservation?.verification);
       const verifiedAccessibility =
         (finalAction?.type === "clear_text" || finalAction?.type === "replace_text") &&
-        finalReceiptBeforeObservation !== null &&
-        typeof finalReceiptBeforeObservation === "object" &&
-        "accepted" in finalReceiptBeforeObservation &&
-        finalReceiptBeforeObservation.accepted === true &&
-        "verification" in finalReceiptBeforeObservation &&
-        finalReceiptBeforeObservation.verification !== null &&
-        typeof finalReceiptBeforeObservation.verification === "object" &&
-        "stable" in finalReceiptBeforeObservation.verification &&
-        finalReceiptBeforeObservation.verification.stable === true
+        finalReceiptBeforeObservation?.accepted === true &&
+        finalReceiptVerification?.stable === true
           ? session.latestAccessibilityObservation
           : undefined;
       const observed = await observe({
@@ -1878,13 +1817,10 @@ export function createServer(
         settleQuietMs,
         maxWaitMs,
       });
-      const finalReceipt = receipts.at(-1);
-      const finalVerification =
-        finalReceipt !== null &&
-        typeof finalReceipt === "object" &&
-        "destinationVerification" in finalReceipt
-          ? (finalReceipt.destinationVerification as DestinationVerification)
-          : undefined;
+      const finalReceipt = asRecord(receipts.at(-1));
+      const finalVerification = finalReceipt?.destinationVerification
+        ? (finalReceipt.destinationVerification as DestinationVerification)
+        : undefined;
       const reconciledObservation = reconcileObservationWithDestination(
         observeOutputSchema.parse(observed.structuredContent),
         finalVerification,
@@ -1892,8 +1828,8 @@ export function createServer(
       if (!reconciledObservation.stability.stable) {
         hardStop = true;
         const finalIndex = receipts.length - 1;
-        const prior = receipts[finalIndex];
-        if (prior && typeof prior === "object") {
+        const prior = asRecord(receipts[finalIndex]);
+        if (prior) {
           receipts[finalIndex] = {
             ...prior,
             accepted: false,
@@ -1953,11 +1889,7 @@ export function createServer(
     }
     try {
       const receipt = await dispatchAction(action);
-      const failed =
-        receipt !== null &&
-        typeof receipt === "object" &&
-        "accepted" in receipt &&
-        receipt.accepted === false;
+      const failed = asRecord(receipt)?.accepted === false;
       return toolResult(
         failed ? "Semantic action was not confirmed." : "Semantic action accepted and verified.",
         receipt,

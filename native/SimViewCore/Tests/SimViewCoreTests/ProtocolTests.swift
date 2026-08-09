@@ -44,6 +44,17 @@ private final class AccessibilitySnapshotSequence: @unchecked Sendable {
     }
 }
 
+private final class LockedErrorCode: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: String?
+
+    var value: String? { lock.withLock { storage } }
+
+    func set(_ value: String?) {
+        lock.withLock { storage = value }
+    }
+}
+
 final class ProtocolTests: XCTestCase {
     private func pixelBuffer(red: UInt8, green: UInt8, blue: UInt8) throws -> CVPixelBuffer {
         var buffer: CVPixelBuffer?
@@ -537,6 +548,112 @@ final class ProtocolTests: XCTestCase {
         ) { error in
             XCTAssertEqual((error as? SimViewError)?.code, "PARAMETER_INVALID")
         }
+    }
+
+    func testAccessibilityObservationHonorsItsMaximumWaitDeadline() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "root": ["ref": "ax:1", "label": "Continue"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "ios-axp"
+        ) { _, _ in box.value }
+
+        let startedAt = Date()
+        let timedOut = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 100,
+            strategy: "ios-axp"
+        ) { _, _ in box.value }
+        let elapsed = Date().timeIntervalSince(startedAt)
+
+        XCTAssertTrue(timedOut.timedOut)
+        XCTAssertGreaterThanOrEqual(elapsed, 0.09)
+        XCTAssertLessThan(elapsed, 0.3)
+    }
+
+    func testAccessibilityObservationResetWakesAndInvalidatesAWaiter() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "root": ["ref": "android:1", "label": "Home"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 40,
+            maximumWaitMilliseconds: 0,
+            strategy: "android-shell-dump"
+        ) { _, _ in box.value }
+        let finished = expectation(description: "observation reset")
+        let errorCode = LockedErrorCode()
+
+        DispatchQueue.global().async {
+            defer { finished.fulfill() }
+            do {
+                _ = try coordinator.observe(
+                    afterRevision: baseline.revision,
+                    scope: "interactive",
+                    maxNodes: 100,
+                    settleQuietMilliseconds: 40,
+                    maximumWaitMilliseconds: 2_000,
+                    strategy: "android-shell-dump"
+                ) { _, _ in box.value }
+            } catch {
+                errorCode.set((error as? SimViewError)?.code)
+            }
+        }
+
+        Thread.sleep(forTimeInterval: 0.05)
+        coordinator.reset()
+        wait(for: [finished], timeout: 1)
+        XCTAssertEqual(errorCode.value, "ACCESSIBILITY_RESET")
+    }
+
+    func testAccessibilityObservationCapturesWithoutHoldingItsConditionLock() throws {
+        let coordinator = AccessibilityObservationCoordinator()
+        let snapshot: [String: Any] = [
+            "snapshotId": "snapshot-1",
+            "root": ["ref": "ax:1", "label": "Continue"],
+        ]
+        let box = AccessibilitySnapshotBox(snapshot)
+        let baseline = try coordinator.observe(
+            afterRevision: nil,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 20,
+            maximumWaitMilliseconds: 0,
+            strategy: "ios-axp"
+        ) { _, _ in box.value }
+        coordinator.markEvent()
+
+        let settled = try coordinator.observe(
+            afterRevision: baseline.revision,
+            scope: "interactive",
+            maxNodes: 100,
+            settleQuietMilliseconds: 20,
+            maximumWaitMilliseconds: 200,
+            strategy: "ios-axp"
+        ) { _, _ in
+            XCTAssertNotNil(coordinator.latest())
+            XCTAssertFalse(coordinator.currentRevision().isEmpty)
+            return box.value
+        }
+
+        XCTAssertTrue(settled.stable)
+        XCTAssertEqual(settled.changeSource, "event")
     }
 
     func testJSONValueRoundTrip() throws {

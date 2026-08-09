@@ -108,18 +108,10 @@ final class InputDispatcher {
     coordinates.pressure =
         action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL ? 0 : 1;
     coordinates.size = 1;
-    MotionEvent event;
-    if (Build.VERSION.SDK_INT >= 29) {
-      event = MotionEvent.obtain(downTime, now, action, 1,
-                                 new MotionEvent.PointerProperties[] {properties},
-                                 new MotionEvent.PointerCoords[] {coordinates}, 0, 0, 1, 1,
-                                 touchscreenDeviceId(), 0, InputDevice.SOURCE_TOUCHSCREEN, 0, 0, 0);
-    } else {
-      event = MotionEvent.obtain(downTime, now, action, 1,
-                                 new MotionEvent.PointerProperties[] {properties},
-                                 new MotionEvent.PointerCoords[] {coordinates}, 0, 0, 1, 1,
-                                 touchscreenDeviceId(), 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-    }
+    MotionEvent event =
+        obtainMotionEvent(downTime, now, action,
+                          new MotionEvent.PointerProperties[] {properties},
+                          new MotionEvent.PointerCoords[] {coordinates});
     try {
       inject(event);
       lastTouchX = x;
@@ -279,21 +271,27 @@ final class InputDispatcher {
       coordinates[index] = coordinate;
     }
     long now = SystemClock.uptimeMillis();
-    MotionEvent event;
-    if (Build.VERSION.SDK_INT >= 29) {
-      event = MotionEvent.obtain(gestureDownTime, now, action, pointers.size(), properties,
-                                 coordinates, 0, 0, 1, 1, touchscreenDeviceId(), 0,
-                                 InputDevice.SOURCE_TOUCHSCREEN, 0, 0, 0);
-    } else {
-      event = MotionEvent.obtain(gestureDownTime, now, action, pointers.size(), properties,
-                                 coordinates, 0, 0, 1, 1, touchscreenDeviceId(), 0,
-                                 InputDevice.SOURCE_TOUCHSCREEN, 0);
-    }
+    MotionEvent event = obtainMotionEvent(gestureDownTime, now, action, properties, coordinates);
     try {
       inject(event);
     } finally {
       event.recycle();
     }
+  }
+
+  private MotionEvent obtainMotionEvent(
+      long gestureDownTime, long eventTime, int action,
+      MotionEvent.PointerProperties[] properties, MotionEvent.PointerCoords[] coordinates) {
+    int pointerCount = properties.length;
+    int deviceId = touchscreenDeviceId();
+    if (Build.VERSION.SDK_INT >= 29) {
+      return MotionEvent.obtain(gestureDownTime, eventTime, action, pointerCount, properties,
+                                coordinates, 0, 0, 1, 1, deviceId, 0,
+                                InputDevice.SOURCE_TOUCHSCREEN, 0, 0, 0);
+    }
+    return MotionEvent.obtain(gestureDownTime, eventTime, action, pointerCount, properties,
+                              coordinates, 0, 0, 1, 1, deviceId, 0,
+                              InputDevice.SOURCE_TOUCHSCREEN, 0);
   }
 
   private int touchscreenDeviceId() {
