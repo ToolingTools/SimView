@@ -146,12 +146,14 @@ export class MetroInspector {
         const servers = await this.#scan(METRO_HOST);
         selected = selectMetroTarget(servers, device);
         if (!selected) {
-          const detail: ElementFallbackDetail =
-            servers.length > 0
-              ? "metro-target-mismatch"
-              : (await statusPromise).some((status) => status !== null)
-                ? "metro-running-no-debug-targets"
-                : "metro-unreachable";
+          let detail: ElementFallbackDetail;
+          if (servers.length > 0) {
+            detail = "metro-target-mismatch";
+          } else if ((await statusPromise).some((status) => status !== null)) {
+            detail = "metro-running-no-debug-targets";
+          } else {
+            detail = "metro-unreachable";
+          }
           this.#negativeDiscovery = {
             deviceId: device.id,
             expiresAt: this.#now() + NEGATIVE_DISCOVERY_TTL_MS,

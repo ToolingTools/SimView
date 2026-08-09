@@ -935,7 +935,7 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func stopCapture() {
-        accessibility.stopObservation(udid: captureDeviceID)
+        accessibility.stopObservation(udid: selectedDevice?.nativeIdentifier)
         captureGeneration &+= 1
         capture.stop()
         androidCapture?.stop()

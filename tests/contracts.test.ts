@@ -165,6 +165,22 @@ describe("shared protocol contracts", () => {
     );
   });
 
+  test("includes checked and selected state in semantic entries", () => {
+    const initial = observationSnapshot("ax-1", "first-ref", "Continue");
+    const changed = observationSnapshot("ax-2", "second-ref", "Continue");
+    const initialButton = initial.root.children?.[0];
+    const changedButton = changed.root.children?.[0];
+    if (!initialButton || !changedButton) throw new Error("Test snapshot is missing its button");
+    initialButton.checked = false;
+    initialButton.selected = false;
+    changedButton.checked = true;
+    changedButton.selected = true;
+
+    expect(stableAccessibilityEntries(changed.root).map(({ value }) => value)).not.toEqual(
+      stableAccessibilityEntries(initial.root).map(({ value }) => value),
+    );
+  });
+
   test("rejects out-of-range input at the protocol boundary", () => {
     expect(methodSchemas["input.tap"].params.safeParse({ x: 1.1, y: 0.5 }).success).toBe(false);
   });

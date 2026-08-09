@@ -232,6 +232,8 @@ export function stableAccessibilityEntries(root: AccessibilityNode): StableAcces
       enabled: node.enabled,
       hidden: node.hidden,
       focused: node.focused,
+      checked: node.checked,
+      selected: node.selected,
       expanded: node.expanded,
       visibleFraction: node.visibleFraction,
       actions: node.actions?.slice().sort(),

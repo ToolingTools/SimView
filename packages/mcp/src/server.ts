@@ -1010,12 +1010,13 @@ export function createServer(
     observationMode: "hybrid" | "semantic" = "semantic",
   ) => {
     const state = await session.open(deviceId, { startRelay: false, observationMode });
-    const accessibilityMessage =
-      state.iosAccessibility?.status === "enhanced-ready"
-        ? " XCTest is the active iOS accessibility provider."
-        : state.device?.platform === "ios"
-          ? " XCTest could not start, so SimView is using the built-in Simulator AX fallback."
-          : "";
+    let accessibilityMessage = "";
+    if (state.iosAccessibility?.status === "enhanced-ready") {
+      accessibilityMessage = " XCTest is the active iOS accessibility provider.";
+    } else if (state.device?.platform === "ios") {
+      accessibilityMessage =
+        " XCTest could not start, so SimView is using the built-in Simulator AX fallback.";
+    }
     return toolResult(
       `SimView is connected to ${state.device?.name}.${accessibilityMessage}`,
       state,
@@ -1264,13 +1265,11 @@ export function createServer(
       : undefined;
     const previous = candidatePrevious?.sessionKey === sessionKey ? candidatePrevious : undefined;
     const delta = previous && hash ? semanticDelta(previous.index, index) : undefined;
-    const semanticStatus = !hash
-      ? ("unavailable" as const)
-      : !previous
-        ? ("full" as const)
-        : previous.hash === hash
-          ? ("unchanged" as const)
-          : ("delta" as const);
+    let semanticStatus: "unavailable" | "full" | "unchanged" | "delta";
+    if (!hash) semanticStatus = "unavailable";
+    else if (!previous) semanticStatus = "full";
+    else if (previous.hash === hash) semanticStatus = "unchanged";
+    else semanticStatus = "delta";
     let postActionSemantic: "changed" | "unchanged" | "unconfirmed" | "unavailable" | undefined;
     if (postAction) {
       if (!hash) postActionSemantic = "unavailable";
@@ -1299,20 +1298,26 @@ export function createServer(
         observationHistory.delete(oldest);
       }
     }
-    const visionReason = includeVision
-      ? "explicit-visual-mode"
-      : semanticError
-        ? "semantic-unavailable-vision-not-requested"
-        : "semantic-mode";
-    const text = semanticError
-      ? `Semantic inspection unavailable: ${semanticError.message}`
-      : semanticStatus === "unchanged"
-        ? `Semantic state unchanged (${hash?.slice(0, 12)}).`
-        : semanticStatus === "delta"
-          ? `Semantic delta: +${delta?.added.length ?? 0} -${delta?.removed.length ?? 0} ~${delta?.changed.length ?? 0}.`
-          : result
-            ? compactElementTree(result, snapshot)
-            : "No semantic state is available.";
+    let visionReason:
+      | "explicit-visual-mode"
+      | "semantic-unavailable-vision-not-requested"
+      | "semantic-mode";
+    if (includeVision) visionReason = "explicit-visual-mode";
+    else if (semanticError) visionReason = "semantic-unavailable-vision-not-requested";
+    else visionReason = "semantic-mode";
+
+    let text: string;
+    if (semanticError) {
+      text = `Semantic inspection unavailable: ${semanticError.message}`;
+    } else if (semanticStatus === "unchanged") {
+      text = `Semantic state unchanged (${hash?.slice(0, 12)}).`;
+    } else if (semanticStatus === "delta") {
+      text = `Semantic delta: +${delta?.added.length ?? 0} -${delta?.removed.length ?? 0} ~${delta?.changed.length ?? 0}.`;
+    } else if (result) {
+      text = compactElementTree(result, snapshot);
+    } else {
+      text = "No semantic state is available.";
+    }
     const changedRefs = new Set([...(delta?.added ?? []), ...(delta?.changed ?? [])]);
     const semanticNodes = snapshot
       ? flattenAccessibilityTree(snapshot.root)

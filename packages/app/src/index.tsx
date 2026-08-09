@@ -1680,6 +1680,11 @@ function SimView() {
   const inlineHeight = embedded ? preferredInlineHeight(hostContext) : undefined;
   const groupedDevices = deviceGroups(availableDevices.filter((device) => device.available));
   const selectedPlatform = state.device?.platform;
+  let sceneProviderLabel: string;
+  if (displayedScreenContext?.kind === "react-native") sceneProviderLabel = "React Native";
+  else if (selectedPlatform === "android") sceneProviderLabel = "UIAutomator";
+  else if (state.iosAccessibility?.status === "enhanced-ready") sceneProviderLabel = "XCTest";
+  else sceneProviderLabel = uiContext?.status.connected ? "UIKit + AX" : "Simulator AX";
 
   return (
     <main
@@ -2297,17 +2302,7 @@ function SimView() {
                 <Icon name={sceneOpen ? "chevron-down" : "chevron-right"} />
                 <strong>Scene</strong>
               </button>
-              {displayedScreenContext?.kind === "react-native" ? (
-                <span class="probe-live">React Native</span>
-              ) : selectedPlatform === "android" ? (
-                <span class="probe-live">UIAutomator</span>
-              ) : state.iosAccessibility?.status === "enhanced-ready" ? (
-                <span class="probe-live">XCTest</span>
-              ) : (
-                <span class="probe-live">
-                  {uiContext?.status.connected ? "UIKit + AX" : "Simulator AX"}
-                </span>
-              )}
+              <span class="probe-live">{sceneProviderLabel}</span>
             </div>
             {sceneOpen &&
               (displayedScreenContext?.kind === "react-native" ? (

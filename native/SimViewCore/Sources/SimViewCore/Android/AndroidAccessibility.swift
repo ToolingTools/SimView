@@ -177,7 +177,13 @@ final class AndroidAccessibilityService: @unchecked Sendable {
                 guard let self else {
                     throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "Accessibility service is unavailable")
                 }
-                return try self.snapshot(scope: scope, maxNodes: maxNodes, timeout: 15)
+                let snapshotTimeout = deadline.timeIntervalSinceNow
+                guard snapshotTimeout > 0 else {
+                    throw SimViewError(
+                        "ACCESSIBILITY_REQUEST_TIMEOUT",
+                        "Android accessibility snapshot exceeded its deadline")
+                }
+                return try self.snapshot(scope: scope, maxNodes: maxNodes, timeout: snapshotTimeout)
             }
             revision = observed.revision
             var matches: [[String: Any]] = []

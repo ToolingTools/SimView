@@ -796,7 +796,7 @@ export class SimViewSession {
       throw new Error("Semantic state changed while the element tree was being prepared");
     }
     const accessibilityRevision = this.accessibilityRevision ?? accessibility.snapshotId;
-    const semanticHash = semanticHashForSnapshot(accessibility);
+    const semanticHash = this.#semanticHashFor(accessibility);
     const accessibilityKey = `${scope}:${maxNodes}:${accessibilityRevision}:${semanticHash}`;
     const cached = this.#fiberCache.get(accessibilityKey);
     if (cached && cached.expiresAt > Date.now()) {
@@ -836,7 +836,7 @@ export class SimViewSession {
   async preparedElementSnapshot(maxNodes = 240): Promise<ElementTreeOutput> {
     const accessibilityRevision = this.accessibilityRevision ?? "0";
     const semanticHash = this.lastAccessibility
-      ? semanticHashForSnapshot(this.lastAccessibility)
+      ? this.#semanticHashFor(this.lastAccessibility)
       : "";
     const semanticGeneration = this.#semanticGeneration;
     const cacheKey = `interactive:${maxNodes}:${accessibilityRevision}:${semanticHash}`;
@@ -851,10 +851,7 @@ export class SimViewSession {
     const refresh = this.elementSnapshot("interactive", maxNodes, this.lastAccessibility).then(
       (output) => {
         if (semanticGeneration === this.#semanticGeneration) {
-          this.#semanticCache.set(cacheKey, {
-            expiresAt: Date.now() + 5_000,
-            output,
-          });
+          this.#cacheSemantic(cacheKey, output);
         }
         return output;
       },
@@ -2181,6 +2178,31 @@ export class SimViewSession {
     }
   }
 
+  #cacheSemantic(key: string, output: ElementTreeOutput): void {
+    const now = Date.now();
+    for (const [cachedKey, entry] of this.#semanticCache) {
+      if (entry.expiresAt <= now) this.#semanticCache.delete(cachedKey);
+    }
+    this.#semanticCache.delete(key);
+    this.#semanticCache.set(key, { expiresAt: now + 5_000, output });
+    while (this.#semanticCache.size > 2) {
+      const oldest = this.#semanticCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.#semanticCache.delete(oldest);
+    }
+  }
+
+  #semanticHashFor(snapshot: AccessibilitySnapshot): string {
+    const resource = this.#latestAccessibilityResource;
+    if (
+      resource?.snapshot.snapshotId === snapshot.snapshotId &&
+      resource.snapshot.capturedAt === snapshot.capturedAt
+    ) {
+      return resource.semanticHash;
+    }
+    return semanticHashForSnapshot(snapshot);
+  }
+
   #clearSemanticState(): void {
     this.#semanticGeneration += 1;
     this.#semanticRefresh.clear();
@@ -2574,12 +2596,18 @@ function suggestedScrollDirection(
 ): "up" | "down" | "left" | "right" {
   const centerX = frame.x + frame.width / 2;
   const centerY = frame.y + frame.height / 2;
-  const horizontalOverflow = centerX < 0 ? centerX : centerX > 1 ? centerX - 1 : 0;
-  const verticalOverflow = centerY < 0 ? centerY : centerY > 1 ? centerY - 1 : 0;
+  const horizontalOverflow = overflowFromUnitInterval(centerX);
+  const verticalOverflow = overflowFromUnitInterval(centerY);
   if (Math.abs(verticalOverflow) >= Math.abs(horizontalOverflow)) {
     return centerY > 1 ? "up" : "down";
   }
   return centerX > 1 ? "left" : "right";
+}
+
+function overflowFromUnitInterval(value: number): number {
+  if (value < 0) return value;
+  if (value > 1) return value - 1;
+  return 0;
 }
 
 function isVisibleSearchCandidate(node: AccessibilityNode): boolean {

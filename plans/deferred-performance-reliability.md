@@ -1,7 +1,7 @@
 # Deferred Performance and Reliability Plan
 
-Status: Implemented; real-device performance acceptance pending  
-Created: 2026-08-08  
+Status: Implemented; real-device performance acceptance pending
+Created: 2026-08-08
 Scope: Follow-up work intentionally deferred from the semantic observation and input review.
 
 ## Context
