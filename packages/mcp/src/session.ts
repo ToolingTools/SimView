@@ -41,6 +41,7 @@ import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { previewScriptResponse, resolveAppRoot } from "./app-assets";
 import { MetroInspector } from "./metro";
+import { packetsFromLatestKeyframe } from "./preview";
 
 export type { SessionState } from "@simview/contracts";
 
@@ -1524,6 +1525,16 @@ export class SimViewSession {
       (oldestSequence !== undefined && afterSequence < oldestSequence - 1);
 
     if (reset) {
+      const cachedPackets = packetsFromLatestKeyframe(this.#previewPackets, packetLimit);
+      if (this.#h264Configuration && cachedPackets.length > 0) {
+        return {
+          reset: true,
+          configuration: this.#h264Configuration.slice(),
+          packets: cachedPackets,
+          nextSequence: cachedPackets.at(-1)?.sequence ?? 0,
+        };
+      }
+
       const requestedAfter = this.#previewSequence;
       await this.requireClient().request("capture.keyframe", {});
       await this.#waitForPreview(
@@ -1537,13 +1548,7 @@ export class SimViewSession {
         waitLimit,
       );
 
-      const keyframeIndex = this.#previewPackets.findIndex(
-        (packet) => packet.keyframe && packet.sequence > requestedAfter,
-      );
-      const packets =
-        keyframeIndex < 0
-          ? []
-          : this.#previewPackets.slice(keyframeIndex, keyframeIndex + packetLimit);
+      const packets = packetsFromLatestKeyframe(this.#previewPackets, packetLimit, requestedAfter);
       return {
         reset: true,
         configuration: this.#h264Configuration?.slice(),
@@ -1818,6 +1823,7 @@ export class SimViewSession {
             socket.close(1011, "Unable to enable preview capture");
           });
           if (socket.data.codec === "h264") {
+            socket.data.waitingForKeyframe = true;
             if (session.#h264Configuration) {
               session.#sendFrame(socket, FrameKind.H264Configuration, session.#h264Configuration);
             }
@@ -2071,9 +2077,8 @@ export class SimViewSession {
               if (viewer.data.paused) continue;
               if (kind === FrameKind.H264Frame && viewer.data.waitingForKeyframe) {
                 if (payload[8] !== 1) continue;
-                if (this.#h264Configuration) {
-                  this.#sendFrame(viewer, FrameKind.H264Configuration, this.#h264Configuration);
-                }
+                if (!this.#h264Configuration) continue;
+                this.#sendFrame(viewer, FrameKind.H264Configuration, this.#h264Configuration);
                 viewer.data.waitingForKeyframe = false;
               }
               message ??= previewMessage(kind, payload);

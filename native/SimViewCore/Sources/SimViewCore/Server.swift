@@ -311,14 +311,7 @@ final class SimViewServer: @unchecked Sendable {
                         ],
                     ], requestID: request.id, to: connection)
                 if captureActive, connection.previewEnabled, connection.codec == "h264" {
-                    if let latestH264Configuration {
-                        connection.send(WireFrame(kind: .h264Configuration, payload: latestH264Configuration))
-                    }
-                    if let androidAgent {
-                        try? androidAgent.requestKeyframe()
-                    } else {
-                        Task { await h264.forceKeyframe() }
-                    }
+                    bootstrapH264Preview(for: connection)
                 } else if captureActive, connection.previewEnabled, connection.codec == "mjpeg",
                     androidAgent != nil,
                     connections.filter({ $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg" })
@@ -424,7 +417,7 @@ final class SimViewServer: @unchecked Sendable {
             if enabled {
                 if !captureActive, let device = selectedDevice { try startCapture(device) }
                 if connection.codec == "h264" {
-                    Task { await h264.forceKeyframe() }
+                    bootstrapH264Preview(for: connection)
                 }
             }
             sendResult(["enabled": enabled], requestID: request.id, to: connection)
@@ -821,6 +814,17 @@ final class SimViewServer: @unchecked Sendable {
             queue.asyncAfter(deadline: .now() + .milliseconds(20)) { self.shutdown(exitCode: 0) }
         default:
             throw SimViewError("METHOD_NOT_FOUND", "Unknown method: \(request.method)")
+        }
+    }
+
+    private func bootstrapH264Preview(for connection: ClientConnection) {
+        if let latestH264Configuration {
+            connection.send(WireFrame(kind: .h264Configuration, payload: latestH264Configuration))
+        }
+        if let androidAgent {
+            try? androidAgent.requestKeyframe()
+        } else {
+            Task { await h264.forceKeyframe() }
         }
     }
 

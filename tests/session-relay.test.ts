@@ -43,6 +43,32 @@ describe("browser relay authentication", () => {
     expect(event.code).toBe(1008);
   });
 
+  test("gates a newly authenticated H.264 viewer until a bootstrapped keyframe", async () => {
+    const session = relaySession();
+    session.client = {
+      connected: true,
+      request: async () => undefined,
+      close: async () => undefined,
+    } as unknown as SimViewSession["client"];
+    const origin = relayOrigin(session).replace(/^http/, "ws");
+    const socket = new WebSocket(`${origin}/stream?codec=h264`);
+    await new Promise<void>((resolve, reject) => {
+      socket.addEventListener("open", () => {
+        socket.send(JSON.stringify({ type: "authenticate", token: session.relayToken }));
+        resolve();
+      });
+      socket.addEventListener("error", () => reject(new Error("WebSocket upgrade failed")));
+    });
+
+    for (let attempt = 0; attempt < 20 && session.viewers.size === 0; attempt += 1) {
+      await Bun.sleep(5);
+    }
+
+    expect(session.viewers.size).toBe(1);
+    expect([...session.viewers][0]?.data.waitingForKeyframe).toBe(true);
+    socket.close();
+  });
+
   test("returns a client error for malformed authenticated relay input", async () => {
     const session = relaySession();
     const response = await fetch(`${relayOrigin(session)}/input`, {
