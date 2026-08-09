@@ -47,6 +47,7 @@ import {
   parseSessionState,
   preferredInlineHeight,
   requireAnnotation,
+  retryElementEnrichment,
   streamMessage,
   supportsDeviceButton,
   visibleTree,
@@ -330,6 +331,19 @@ function SimView() {
     },
     [],
   );
+
+  useEffect(() => {
+    if (!elementsOpen || !elementFallback || accessibility?.source === "react-native-fiber") return;
+    let stopped = false;
+    void retryElementEnrichment(
+      async () => (await loadAccessibility(true))?.source,
+      pause,
+      () => stopped,
+    );
+    return () => {
+      stopped = true;
+    };
+  }, [elementsOpen, elementFallback, accessibility?.source, state.device?.id]);
 
   useEffect(() => {
     if (embedded || !state.relayOrigin || !token) return;

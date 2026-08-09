@@ -565,6 +565,24 @@ export function formatFrame(frame?: Rect): string {
   return `${percent(frame.x)}, ${percent(frame.y)} · ${percent(frame.width)} × ${percent(frame.height)}`;
 }
 
+export const ELEMENT_ENRICHMENT_RETRY_DELAYS_MS = [
+  1_000, 2_000, 4_000, 4_000, 4_000, 4_000, 4_000, 4_000,
+] as const;
+
+export async function retryElementEnrichment(
+  load: () => Promise<string | undefined>,
+  wait: (milliseconds: number) => Promise<void>,
+  stopped: () => boolean,
+  delays: readonly number[] = ELEMENT_ENRICHMENT_RETRY_DELAYS_MS,
+): Promise<boolean> {
+  for (const delay of delays) {
+    await wait(delay);
+    if (stopped()) return false;
+    if ((await load()) === "react-native-fiber") return true;
+  }
+  return false;
+}
+
 export function contextForNode(
   snapshot: AccessibilitySnapshot | ElementSnapshot,
   node: AccessibilityNode,
