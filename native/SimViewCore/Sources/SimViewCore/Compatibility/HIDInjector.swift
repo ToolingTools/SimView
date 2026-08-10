@@ -51,7 +51,7 @@ final class HIDInjector: @unchecked Sendable {
     func setup(udid: String) throws {
         if self.udid == udid, client != nil { return }
         Xcode.loadFrameworks()
-        guard let device = SimulatorRuntime.object(udid: udid) else {
+        guard let device = Xcode.object(udid: udid) else {
             throw SimViewError("DEVICE_NOT_FOUND", "Simulator \(udid) was not found")
         }
         mouse = load("IndigoHIDMessageForMouseNSEvent", as: MouseFunction.self)

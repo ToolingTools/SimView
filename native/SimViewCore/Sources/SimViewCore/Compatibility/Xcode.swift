@@ -32,6 +32,22 @@ enum Xcode {
     static func symbolAvailable(_ name: String) -> Bool {
         dlsym(UnsafeMutableRawPointer(bitPattern: -2), name) != nil
     }
+
+    static func object(udid: String) -> NSObject? {
+        loadFrameworks()
+        guard let contextClass = NSClassFromString("SimServiceContext") as? NSObject.Type else { return nil }
+        let shared = NSSelectorFromString("sharedServiceContextForDeveloperDir:error:")
+        guard
+            let context = contextClass.perform(shared, with: developerDirectory(), with: nil)?
+                .takeUnretainedValue() as? NSObject,
+            let deviceSet = context.perform(NSSelectorFromString("defaultDeviceSetWithError:"), with: nil)?
+                .takeUnretainedValue() as? NSObject,
+            let devices = deviceSet.value(forKey: "devices") as? [NSObject]
+        else { return nil }
+        return devices.first {
+            ($0.value(forKey: "UDID") as? NSUUID)?.uuidString == udid
+        }
+    }
 }
 
 extension String {

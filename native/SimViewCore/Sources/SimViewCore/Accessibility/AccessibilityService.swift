@@ -350,10 +350,10 @@ final class AccessibilityService: @unchecked Sendable {
             return false
         }
         if observedUDID == udid { return observationStrategy == "ios-axp" }
-        if let observedUDID, let device = SimulatorRuntime.object(udid: observedUDID) {
+        if let observedUDID, let device = Xcode.object(udid: observedUDID) {
             SVAccessibilityBridge.stopObservingDevice(device)
         }
-        guard let device = SimulatorRuntime.object(udid: udid) else {
+        guard let device = Xcode.object(udid: udid) else {
             observationStrategy = "snapshot-diff"
             return false
         }
@@ -371,7 +371,7 @@ final class AccessibilityService: @unchecked Sendable {
 
     func stopObservation(udid: String? = nil) {
         guard let observedUDID, udid == nil || udid == observedUDID else { return }
-        if let device = SimulatorRuntime.object(udid: observedUDID) {
+        if let device = Xcode.object(udid: observedUDID) {
             SVAccessibilityBridge.stopObservingDevice(device)
         }
         self.observedUDID = nil
@@ -422,7 +422,7 @@ final class AccessibilityService: @unchecked Sendable {
                 stopXCTestProvider(udid: udid)
             }
         }
-        guard let device = SimulatorRuntime.object(udid: udid) else {
+        guard let device = Xcode.object(udid: udid) else {
             throw SimViewError("DEVICE_NOT_BOOTED", "Simulator \(udid) is unavailable")
         }
         let bounds: (width: Double, height: Double)
@@ -455,7 +455,7 @@ final class AccessibilityService: @unchecked Sendable {
     }
 
     private func captureLegacySnapshot(udid: String, maxNodes: Int) throws -> [String: Any] {
-        guard let device = SimulatorRuntime.object(udid: udid) else {
+        guard let device = Xcode.object(udid: udid) else {
             throw SimViewError("DEVICE_NOT_BOOTED", "Simulator \(udid) is unavailable")
         }
         let boundedMaxNodes = UInt(max(1, min(maxNodes, 5_000)))
