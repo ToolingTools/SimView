@@ -1,6 +1,6 @@
 {
   "name": "simview",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Control and review local iOS Simulators and Android devices in a live MCP App preview.",
   "author": {
     "name": "SimView contributors",
