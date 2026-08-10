@@ -1206,7 +1206,14 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(status, kCVReturnSuccess)
         let buffer = try XCTUnwrap(pixelBuffer)
         let encoder = H264Encoder()
-        let encoded = try await encoder.encode(buffer)
+        let encoded: H264Encoder.Encoded
+        do {
+            encoded = try await encoder.encode(buffer)
+        } catch let error as SimViewError
+            where error.code == "H264_ENCODE_FAILED" && error.message.contains("-12908")
+        {
+            throw XCTSkip("VideoToolbox H.264 encoding is unavailable on this runner")
+        }
         XCTAssertFalse(encoded.bytes.isEmpty)
         XCTAssertTrue(encoded.keyframe)
         await encoder.stop()
@@ -1225,7 +1232,14 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(status, kCVReturnSuccess)
         let buffer = try XCTUnwrap(pixelBuffer)
         let encoder = H264Encoder()
-        let encoded = try await encoder.encode(buffer)
+        let encoded: H264Encoder.Encoded
+        do {
+            encoded = try await encoder.encode(buffer)
+        } catch let error as SimViewError
+            where error.code == "H264_ENCODE_FAILED" && error.message.contains("-12908")
+        {
+            throw XCTSkip("VideoToolbox H.264 encoding is unavailable on this runner")
+        }
         let configuration = try XCTUnwrap(encoded.configuration)
         let decoded = expectation(description: "decoded Android H.264 frame")
         let decoder = H264Decoder()
