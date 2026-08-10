@@ -1,13 +1,26 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertCodexPluginArchiveSize,
+  assertNoRepowiseArtifacts,
   createNpmPackageManifest,
+  createPackagedMcpConfig,
   maxCodexPluginArchiveBytes,
   repositoryUrl,
 } from "../scripts/release-config";
 
 const root = join(import.meta.dir, "..");
+const temporaryDirectories: string[] = [];
+
+afterEach(async () => {
+  await Promise.all(
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
 
 describe("release distribution", () => {
   test("publishes one standalone macOS command", () => {
@@ -67,6 +80,50 @@ describe("release distribution", () => {
     });
   });
 
+  test("keeps generic navigation out of destination verification guidance", async () => {
+    const skill = await Bun.file(join(root, "skills/simview/SKILL.md")).text();
+
+    expect(skill).toContain("`verifyDestination` is optional");
+    expect(skill).toContain("For generic section/menu navigation");
+    expect(skill).toContain("Never copy the tapped control's label");
+    expect(skill).toContain("`Invoices`, `Orders`, `Card`, or `Pay`");
+  });
+
+  test("keeps rendered-list exploration guidance in the packaged skill", async () => {
+    const skill = await Bun.file("skills/simview/SKILL.md").text();
+    expect(skill).toContain("Semantic search covers the currently rendered tree only");
+    expect(skill).toContain("never batch speculative swipes");
+    expect(skill).toContain("eight exploratory swipes");
+    expect(skill).toContain("report discovery as inconclusive");
+  });
+
+  test("requires an unambiguous saved-card choice and post-tap proof", async () => {
+    const skill = await Bun.file("skills/simview/SKILL.md").text();
+    expect(skill).toContain("exactly one eligible card exists");
+    expect(skill).toContain("multiple eligible cards remain");
+    expect(skill).toContain("Never request or expose a full card number or CVV");
+    expect(skill).toContain("accept proxy proof only when all of these hold");
+    expect(skill).toContain("changed to `enabled: true`");
+  });
+
+  test("permits one authorized native-semantic coordinate fallback", async () => {
+    const skill = await Bun.file("skills/simview/SKILL.md").text();
+    expect(skill).toContain("`tap_known_coordinate` permits exactly one raw `tap`");
+    expect(skill).toContain("`fresh-semantic-target-center`");
+    expect(skill).toMatch(/original user\s+request already authorizes that action/u);
+    expect(skill).toContain("perform the fallback automatically");
+    expect(skill).toMatch(/Never use the hit node's\s+coordinates/u);
+    expect(skill).toMatch(/Observe semantically\s+immediately after the fallback tap/u);
+  });
+
+  test("guards compiled plugin binaries with dependency manifests and isolated startup", async () => {
+    const packaging = await Bun.file("scripts/package-plugin.ts").text();
+    expect(packaging).toContain('join(root, "bun.lock")');
+    expect(packaging).toContain('join(root, "packages", packageName, "package.json")');
+    expect(packaging).toContain("--startup-only");
+    expect(packaging).toContain("--isolated");
+  });
+
   test("rejects npm archives larger than the Codex plugin limit", () => {
     expect(() =>
       assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes, "simview.tgz"),
@@ -74,5 +131,27 @@ describe("release distribution", () => {
     expect(() =>
       assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes + 1, "simview.tgz"),
     ).toThrow("exceeding the Codex plugin archive limit");
+  });
+
+  test("packages only the SimView MCP server and rejects Repowise state", async () => {
+    const packaged = createPackagedMcpConfig({
+      mcpServers: {
+        simview: { command: "./bin/simview", args: ["mcp"] },
+        repowise: { command: "repowise", args: ["mcp", "/local/repository"] },
+      },
+    });
+    expect(packaged).toEqual({
+      mcpServers: { simview: { command: "./bin/simview", args: ["mcp"] } },
+    });
+
+    const stage = await mkdtemp(join(tmpdir(), "simview-release-stage-"));
+    temporaryDirectories.push(stage);
+    await writeFile(join(stage, ".mcp.json"), `${JSON.stringify(packaged)}\n`);
+    await expect(assertNoRepowiseArtifacts(stage)).resolves.toBeUndefined();
+
+    await mkdir(join(stage, ".repowise"));
+    await expect(assertNoRepowiseArtifacts(stage)).rejects.toThrow(
+      "Release artifact contains Repowise state",
+    );
   });
 });

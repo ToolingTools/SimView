@@ -22,7 +22,7 @@ consume its versioned binary protocol.
 - Full Xcode with an installed iOS Simulator runtime for iOS support
 - Android SDK Platform Tools (`adb`) for Android support
 - Bun 1.3.14 for source development only
-- JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
+- XcodeGen, JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
 
 Android support targets API 26 or later. SimView uses the user's existing ADB
 server and authorization keys; it does not pair devices, enable legacy
@@ -160,9 +160,11 @@ bun packages/cli/src/index.ts daemon prune
 
 `tree` and `observe` use the same unified inspection path as the preview: they
 return a matching development-mode React Native Fiber tree and screen/route
-context when Metro is available, with a diagnostic native accessibility
-fallback otherwise. `ax-tree` explicitly bypasses Metro and reads the iOS AX or
-Android UIAutomator hierarchy.
+context when Metro is available, with the native accessibility tree otherwise.
+`ax-tree` explicitly bypasses Metro. iOS sessions automatically start a
+temporary XCTest runner against the existing foreground app process and use it
+as the primary tree and point provider; Simulator AX is the startup fallback.
+Android reads UIAutomator.
 
 `preview` binds an authenticated relay to a random port on `127.0.0.1`. The
 session token is random, endpoints reject unauthenticated requests, and the
@@ -203,15 +205,18 @@ Tools:
 - `open_simview`
 - `connect_device`
 - `list_devices`
-- `connect_simulator`
-- `list_simulators`
-- `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`
+- `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`, `perform_gesture`
+- `perform_actions`
 - `take_screenshot`
-- `observe_screen`, `get_element_tree`, `get_accessibility_tree`, `find_elements`, `tap_element`
+- `observe_screen`, `get_element_tree`, `get_accessibility_tree`, `search_elements`, `find_elements`, `tap_element`
 - `inspect_point`, `wait_for_element`
 - `get_ui_context`, `enable_ui_probe`
 - `get_simview_state`
 - `add_annotation`, `update_annotation`, `delete_annotation`
+
+`list_devices` returns only available devices by default and caps each response
+at 25 entries. Pass `availableOnly: false` with `offset` and `limit` to inspect
+shutdown or unavailable inventory without overflowing MCP host result limits.
 
 The standalone browser preview uses the authenticated localhost stream. The
 embedded MCP App does not make localhost HTTP or WebSocket requests: Codex
@@ -228,15 +233,61 @@ then boots from the connected session and immediately requests fullscreen.
 `open_simview` is the only model-callable tool linked to the MCP App resource;
 discovery and connection results remain text-only so preflight calls cannot
 mount or replace the preview. Once open, resource-scoped app-only tools handle
-device switching and preview interactions. `list_simulators` and
-`connect_simulator` remain compatibility aliases; the former includes iOS
-Simulators and Android Emulators but not physical Android devices.
+device switching and preview interactions. Headless connection does not create
+a relay, preview window, encoder subscription, or preview packet ring.
 
-Agents navigate with a semantic visual loop: call `observe_screen`, choose an
-accessible identifier/role/name, call `tap_element`, wait for an observable
-state, and observe again. iOS input uses SimulatorKit HID; Android uses the
-SimView agent with ADB shell input as a reduced-capability fallback. Pixel
-coordinates remain the fallback for inaccessible or purely visual targets.
+Agents navigate with the warm semantic loop: call `observe_screen` in
+`semantic` mode, pass `sinceObservationId` on subsequent calls, use
+`search_elements` for bounded ranked discovery, and pass the chosen ref to
+`tap_element`. Physical semantic taps always settle and re-resolve a fresh
+native accessibility target, then hit-test it before input; React Native Fiber
+is discovery-only fallback and never supplies tap coordinates. Fiber-only test
+IDs require a unique exact native accessible-name corroboration before input.
+Offscreen ranked results appear under `excludedCandidates` with swipe guidance.
+Search covers only the currently rendered semantic tree, so a zero result does
+not establish that an item is absent from a scrollable list, table, or
+virtualized collection. Explore expected data surfaces one swipe at a time,
+searching each changed snapshot and stopping at an unchanged semantic boundary
+or a bounded attempt limit; never batch speculative swipes or reuse an old ref.
+`verifyDestination` is optional. Do not attach it to every tap merely because a
+flow involves invoices, orders, payments, or accounts. For generic section/menu
+navigation, omit it and rely on the stable semantic post-action observation.
+Use `verifyDestination.identity` only when a distinctive identity is known to
+be exposed on the destination, normally when opening a specific entity or
+before a consequential follow-up action. Never copy the tapped control's label
+or use a generic label such as `Invoices`, `Orders`, `Card`, or `Pay` as the
+destination identity. Optional `verifyDestination.assertions` can establish
+amount, status, or other supporting facts.
+Selectors are exact by default. `name` matches native label/title and falls back
+to non-redacted text values such as Android `TextView` content; use `value` when
+that field is explicitly exposed. Use a native name fragment with
+`exact: false` when the destination exposes a composite label such as
+`Invoice #30363063`. `isError` or `safeToContinue: false` is a hard stop even though
+the nested `interaction` receipt confirms that input was dispatched. Prefer
+an identity that uniquely establishes the entity, such as an invoice number;
+the verification timeout is bounded to 100–5000 ms. Identity must match exactly
+one native node. Assertions only need to be present and may match multiple nodes,
+such as an amount repeated in total and outstanding fields. An ambiguous identity
+hard-stops as `destination_ambiguous` with `safeToContinue: false`; strengthen it
+without repeating the already accepted tap. Use `checked` or `selected` to verify
+control state when native accessibility exposes it, or `enabled` to verify an
+independently identifiable downstream control. Successful standalone and batch
+semantic taps return the interaction summary followed by one stable compact
+post-action tree; callers should consume it instead of immediately observing
+again. Non-dispatched failures expose `retryInput: false`, `recoveryAllowed`, an
+optional `recoveryAction`, and bounded actionability diagnostics. Only failures
+that report `inputDispatched: true` use the dispatched-input hard stop. Prefer
+`tap_known_coordinate` only when SimView returns a `coordinateFallback` derived
+from the fresh semantic target center. It permits one raw tap at that exact point
+when the requested action is already authorized, followed immediately by a
+semantic observation; callers must not repeat it or substitute hit-test/image
+coordinates. Prefer
+`perform_actions` with `observe: "semantic"` for ordered input plus a coherent
+post-action observation. Images are never an automatic input fallback; use explicit `visual`
+mode only when the user requests visual inspection. iOS input uses SimulatorKit
+HID; Android uses the SimView agent with ADB shell input as a reduced-capability
+fallback. Pixel coordinates remain an explicit last resort for inaccessible
+targets except for the bounded native-semantic recovery above.
 Android currently declares ASCII text support; iOS supports the full Unicode
 typing path. Callers should inspect the selected device capability before typing.
 
@@ -248,8 +299,19 @@ SimView reuses its loopback CDP multiplexer instead of competing for Hermes'
 debugger connection; Metro MCP itself is not required. SimView never
 starts Metro, serializes component props or navigation params, or attaches an
 ambiguous target to a Simulator.
-Without a matching target it atomically falls back to the frontmost
-accessibility hierarchy read through CoreSimulator or UIAutomator. An optional
+Discovery uses `localhost` through the packaged `metro-bridge`, including its
+IPv4 fallback, and probes the bridge's pinned ports without extending successful
+discovery. Native fallback keeps the coarse Metro status and may add a bounded
+detail distinguishing unreachable Metro, no debug targets, device mismatch,
+missing Fiber roots, and CDP inspection failures.
+Without a matching target it uses the frontmost native accessibility hierarchy:
+the automatically started XCTest provider on iOS or UIAutomator on Android.
+For Android semantic taps, the raw deepest hit and selected actionable hit are
+resolved from that same fresh hierarchy; the tree validates the target, while
+physical input remains native-only.
+XCTest activates but does not relaunch the target app, and the packaged runner
+is reused for warm snapshots during the session. Simulator AX remains available
+when XCTest cannot start. An optional
 bundled UIKit probe can explicitly relaunch one third-party app to add concrete
 view class, hit-test, controller, window, and scene context on iOS only. Android
 screen context reports the foreground package and activity when available.

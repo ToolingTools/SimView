@@ -140,15 +140,18 @@ describe("CLI element tree output", () => {
       },
       screenContext: {
         schemaVersion: 1,
-        kind: "uikit",
+        kind: "native-ios",
         capturedAt: "2026-07-31T10:00:00.000Z",
         frameId: "frame-1",
       },
-      fallback: { reason: "metro-target-unavailable" },
+      fallback: {
+        reason: "metro-target-unavailable",
+        detail: "metro-running-no-debug-targets",
+      },
     };
 
     expect(formatElementTree(result).split("\n")[0]).toBe(
-      "source=core-simulator-ax fallback=metro-target-unavailable",
+      "context=native-ios elements=core-simulator-ax fallback=metro-target-unavailable detail=metro-running-no-debug-targets",
     );
   });
 
@@ -175,6 +178,8 @@ describe("CLI element tree output", () => {
       },
     };
 
-    expect(formatElementTree(result).split("\n")[0]).toBe("source=android-uiautomator");
+    expect(formatElementTree(result).split("\n")[0]).toBe(
+      "context=android elements=android-uiautomator",
+    );
   });
 });

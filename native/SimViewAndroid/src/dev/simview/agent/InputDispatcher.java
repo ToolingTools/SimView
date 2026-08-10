@@ -8,8 +8,33 @@ import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 final class InputDispatcher {
+  static final class Track {
+    final int pointerId;
+    final float[] xs;
+    final float[] ys;
+    final int[] timestamps;
+
+    Track(int pointerId, float[] xs, float[] ys, int[] timestamps) {
+      this.pointerId = pointerId;
+      this.xs = xs;
+      this.ys = ys;
+      this.timestamps = timestamps;
+    }
+  }
+
+  private static final class ActivePointer {
+    final Track track;
+    int pointIndex;
+
+    ActivePointer(Track track) {
+      this.track = track;
+    }
+  }
   private final Object inputManager;
   private final Method injectInputEvent;
   private final Method setDisplayId;
@@ -83,18 +108,10 @@ final class InputDispatcher {
     coordinates.pressure =
         action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL ? 0 : 1;
     coordinates.size = 1;
-    MotionEvent event;
-    if (Build.VERSION.SDK_INT >= 29) {
-      event = MotionEvent.obtain(downTime, now, action, 1,
-                                 new MotionEvent.PointerProperties[] {properties},
-                                 new MotionEvent.PointerCoords[] {coordinates}, 0, 0, 1, 1,
-                                 touchscreenDeviceId(), 0, InputDevice.SOURCE_TOUCHSCREEN, 0, 0, 0);
-    } else {
-      event = MotionEvent.obtain(downTime, now, action, 1,
-                                 new MotionEvent.PointerProperties[] {properties},
-                                 new MotionEvent.PointerCoords[] {coordinates}, 0, 0, 1, 1,
-                                 touchscreenDeviceId(), 0, InputDevice.SOURCE_TOUCHSCREEN, 0);
-    }
+    MotionEvent event =
+        obtainMotionEvent(downTime, now, action,
+                          new MotionEvent.PointerProperties[] {properties},
+                          new MotionEvent.PointerCoords[] {coordinates});
     try {
       inject(event);
       lastTouchX = x;
@@ -114,6 +131,70 @@ final class InputDispatcher {
     touch(0, x, y);
     SystemClock.sleep(Math.max(1, durationMs));
     touch(2, x, y);
+  }
+
+  void gesture(Track[] tracks) throws Exception {
+    cancelActiveTouch();
+    if (tracks.length < 1 || tracks.length > 2)
+      throw new IllegalArgumentException("gesture requires one or two tracks");
+    List<Integer> timeline = new ArrayList<>();
+    int previousPointerId = -1;
+    for (Track track : tracks) {
+      if (track.pointerId < 0 || track.pointerId > 1 || track.pointerId == previousPointerId)
+        throw new IllegalArgumentException("gesture pointer IDs must be unique");
+      previousPointerId = track.pointerId;
+      if (track.xs.length != track.ys.length || track.xs.length != track.timestamps.length ||
+          track.xs.length < 2)
+        throw new IllegalArgumentException("gesture track has inconsistent points");
+      int previous = -1;
+      for (int timestamp : track.timestamps) {
+        if (timestamp < previous || timestamp > 5000)
+          throw new IllegalArgumentException(
+              "gesture timestamps must be monotonic and at most five seconds");
+        previous = timestamp;
+        if (!timeline.contains(timestamp))
+          timeline.add(timestamp);
+      }
+    }
+    Collections.sort(timeline);
+    List<ActivePointer> active = new ArrayList<>();
+    long startedAt = SystemClock.uptimeMillis();
+    for (int timestamp : timeline) {
+      long delay = startedAt + timestamp - SystemClock.uptimeMillis();
+      if (delay > 0)
+        SystemClock.sleep(delay);
+      for (Track track : tracks) {
+        if (track.timestamps[0] == timestamp) {
+          ActivePointer pointer = new ActivePointer(track);
+          active.add(pointer);
+          int index = active.size() - 1;
+          injectPointers(index == 0 ? MotionEvent.ACTION_DOWN
+                                    : MotionEvent.ACTION_POINTER_DOWN |
+                                          (index << MotionEvent.ACTION_POINTER_INDEX_SHIFT),
+                         active, startedAt);
+        }
+      }
+      boolean moved = false;
+      for (ActivePointer pointer : active) {
+        while (pointer.pointIndex + 1 < pointer.track.timestamps.length &&
+               pointer.track.timestamps[pointer.pointIndex + 1] <= timestamp) {
+          pointer.pointIndex++;
+          moved = true;
+        }
+      }
+      if (moved && !active.isEmpty())
+        injectPointers(MotionEvent.ACTION_MOVE, active, startedAt);
+      for (int index = active.size() - 1; index >= 0; index--) {
+        ActivePointer pointer = active.get(index);
+        if (pointer.track.timestamps[pointer.track.timestamps.length - 1] == timestamp) {
+          int action = active.size() == 1 ? MotionEvent.ACTION_UP
+                                          : MotionEvent.ACTION_POINTER_UP |
+                                                (index << MotionEvent.ACTION_POINTER_INDEX_SHIFT);
+          injectPointers(action, active, startedAt);
+          active.remove(index);
+        }
+      }
+    }
   }
 
   void typeText(String text) throws Exception {
@@ -170,6 +251,47 @@ final class InputDispatcher {
       String details = event.toString();
       throw new SecurityException("Android rejected the input event (" + details + ")");
     }
+  }
+
+  private void injectPointers(int action, List<ActivePointer> pointers, long gestureDownTime)
+      throws Exception {
+    MotionEvent.PointerProperties[] properties = new MotionEvent.PointerProperties[pointers.size()];
+    MotionEvent.PointerCoords[] coordinates = new MotionEvent.PointerCoords[pointers.size()];
+    for (int index = 0; index < pointers.size(); index++) {
+      ActivePointer pointer = pointers.get(index);
+      MotionEvent.PointerProperties property = new MotionEvent.PointerProperties();
+      property.id = pointer.track.pointerId;
+      property.toolType = MotionEvent.TOOL_TYPE_FINGER;
+      properties[index] = property;
+      MotionEvent.PointerCoords coordinate = new MotionEvent.PointerCoords();
+      coordinate.x = pointer.track.xs[pointer.pointIndex];
+      coordinate.y = pointer.track.ys[pointer.pointIndex];
+      coordinate.pressure = 1;
+      coordinate.size = 1;
+      coordinates[index] = coordinate;
+    }
+    long now = SystemClock.uptimeMillis();
+    MotionEvent event = obtainMotionEvent(gestureDownTime, now, action, properties, coordinates);
+    try {
+      inject(event);
+    } finally {
+      event.recycle();
+    }
+  }
+
+  private MotionEvent obtainMotionEvent(
+      long gestureDownTime, long eventTime, int action,
+      MotionEvent.PointerProperties[] properties, MotionEvent.PointerCoords[] coordinates) {
+    int pointerCount = properties.length;
+    int deviceId = touchscreenDeviceId();
+    if (Build.VERSION.SDK_INT >= 29) {
+      return MotionEvent.obtain(gestureDownTime, eventTime, action, pointerCount, properties,
+                                coordinates, 0, 0, 1, 1, deviceId, 0,
+                                InputDevice.SOURCE_TOUCHSCREEN, 0, 0, 0);
+    }
+    return MotionEvent.obtain(gestureDownTime, eventTime, action, pointerCount, properties,
+                              coordinates, 0, 0, 1, 1, deviceId, 0,
+                              InputDevice.SOURCE_TOUCHSCREEN, 0);
   }
 
   private int touchscreenDeviceId() {

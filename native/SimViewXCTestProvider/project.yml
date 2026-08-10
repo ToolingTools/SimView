@@ -1,0 +1,48 @@
+name: SimViewXCTestProvider
+options:
+  bundleIdPrefix: dev.simview
+  deploymentTarget:
+    iOS: "17.0"
+  generateEmptyDirectories: false
+settings:
+  base:
+    CODE_SIGNING_ALLOWED: NO
+    SWIFT_VERSION: 6.0
+targets:
+  SimViewXCTestProbeHost:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/ProbeHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.simview.xctest-probe-host
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
+        INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+  SimViewXCTestProbeUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: Sources/ProbeUITests
+    dependencies:
+      - target: SimViewXCTestProbeHost
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.simview.xctest-probe-ui-tests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+schemes:
+  SimViewXCTestProbe:
+    build:
+      targets:
+        SimViewXCTestProbeHost: all
+        SimViewXCTestProbeUITests: [test]
+    test:
+      environmentVariables:
+        SIMVIEW_XCTEST_TARGET_BUNDLE_ID: __SIMVIEW_TARGET_BUNDLE_ID__
+        SIMVIEW_XCTEST_CAPTURE_COUNT: __SIMVIEW_CAPTURE_COUNT__
+      targets:
+        - SimViewXCTestProbeUITests

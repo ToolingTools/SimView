@@ -1,6 +1,7 @@
 import { access, copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PROTOCOL_VERSION } from "../packages/contracts/src/version";
 
 const root = resolve(import.meta.dir, "..");
 const rootManifest = (await Bun.file(join(root, "package.json")).json()) as {
@@ -64,7 +65,10 @@ try {
       protocolVersion?: number;
       android?: { agent?: { packaged?: boolean } };
     } | null;
-    if (diagnostics?.protocolVersion !== 2 || diagnostics.android?.agent?.packaged !== true) {
+    if (
+      diagnostics?.protocolVersion !== PROTOCOL_VERSION ||
+      diagnostics.android?.agent?.packaged !== true
+    ) {
       throw new Error(
         `${command[0]} package smoke resolved stale or incomplete contents: ${stdout.trim()}`,
       );

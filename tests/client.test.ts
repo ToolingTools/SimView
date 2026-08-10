@@ -108,7 +108,7 @@ async function withCore(
 
 function helloResult() {
   return {
-    protocolVersion: 2,
+    protocolVersion: 4,
     codec: "h264",
     maxFrameRate: 60,
     server: "simview-core/test",

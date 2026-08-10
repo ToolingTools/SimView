@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 final class AndroidAgentLifecycle: @unchecked Sendable {
-    static let protocolVersion = 2
+    static let protocolVersion = 4
 
     let client: ADBClient
     let serial: String

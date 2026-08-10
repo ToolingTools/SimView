@@ -6,6 +6,7 @@ import {
   type Annotation as ContractAnnotation,
   type ElementSnapshot as ContractElementSnapshot,
   type DeviceDescription,
+  deviceListSchema,
   type ElementFallbackReason,
   type ElementTreePage,
   elementTreeOutputSchema,
@@ -18,7 +19,6 @@ import {
   SIMVIEW_VERSION,
   saveReviewImagesOutputSchema,
   sessionStateSchema,
-  simulatorListSchema,
   type UiContext,
   uiContextSchema,
 } from "@simview/contracts";
@@ -47,6 +47,7 @@ import {
   parseSessionState,
   preferredInlineHeight,
   requireAnnotation,
+  retryElementEnrichment,
   streamMessage,
   supportsDeviceButton,
   visibleTree,
@@ -332,6 +333,19 @@ function SimView() {
   );
 
   useEffect(() => {
+    if (!elementsOpen || !elementFallback || accessibility?.source === "react-native-fiber") return;
+    let stopped = false;
+    void retryElementEnrichment(
+      async () => (await loadAccessibility(true))?.source,
+      pause,
+      () => stopped,
+    );
+    return () => {
+      stopped = true;
+    };
+  }, [elementsOpen, elementFallback, accessibility?.source, state.device?.id]);
+
+  useEffect(() => {
     if (embedded || !state.relayOrigin || !token) return;
     const url = `${state.relayOrigin.replace(/^http/, "ws")}/stream?codec=${streamCodec}`;
     const socket = new WebSocket(url);
@@ -476,18 +490,27 @@ function SimView() {
     setDevicesLoading(true);
     try {
       const devices = embedded
-        ? await bridge
-            .callServerTool({
-              name: "app_list_devices",
-              arguments: {},
-            })
-            .then((result) => {
-              return simulatorListSchema.parse(result.structuredContent).devices;
-            })
+        ? await (async () => {
+            const inventory: Device[] = [];
+            let cursor: string | undefined;
+            do {
+              const result = await bridge.callServerTool({
+                name: "app_list_devices",
+                arguments: cursor ? { cursor } : { availableOnly: false, limit: 25 },
+              });
+              const page = deviceListSchema.parse(result.structuredContent);
+              inventory.push(...page.devices);
+              cursor = page.nextCursor;
+              if (cursor && page.devices.length === 0) {
+                throw new Error("Device inventory pagination made no progress");
+              }
+            } while (cursor);
+            return inventory;
+          })()
         : await relayFetch("/devices")
             .then(async (response) => {
               if (!response.ok) throw new Error(`Device list failed (${response.status})`);
-              return simulatorListSchema.parse(await response.json());
+              return deviceListSchema.parse(await response.json());
             })
             .then((result) => result.devices);
       setAvailableDevices((current) => {
@@ -1655,8 +1678,13 @@ function SimView() {
   const visibleController = keyWindow?.visibleControllerPath?.at(-1);
   const displayedScreenContext = frozenScreenContext ?? screenContext;
   const inlineHeight = embedded ? preferredInlineHeight(hostContext) : undefined;
-  const groupedDevices = deviceGroups(availableDevices);
+  const groupedDevices = deviceGroups(availableDevices.filter((device) => device.available));
   const selectedPlatform = state.device?.platform;
+  let sceneProviderLabel: string;
+  if (displayedScreenContext?.kind === "react-native") sceneProviderLabel = "React Native";
+  else if (selectedPlatform === "android") sceneProviderLabel = "UIAutomator";
+  else if (state.iosAccessibility?.status === "enhanced-ready") sceneProviderLabel = "XCTest";
+  else sceneProviderLabel = uiContext?.status.connected ? "UIKit + AX" : "Simulator AX";
 
   return (
     <main
@@ -1815,7 +1843,7 @@ function SimView() {
                     </section>
                   ))
                 ) : (
-                  <p>No iOS Simulators or Android devices found.</p>
+                  <p>No booted devices found.</p>
                 )}
               </div>
             )}
@@ -2274,13 +2302,7 @@ function SimView() {
                 <Icon name={sceneOpen ? "chevron-down" : "chevron-right"} />
                 <strong>Scene</strong>
               </button>
-              {displayedScreenContext?.kind === "react-native" ? (
-                <span class="probe-live">React Native</span>
-              ) : selectedPlatform === "android" ? (
-                <span class="probe-live">UIAutomator</span>
-              ) : (
-                uiContext?.status.connected && <span class="probe-live">UIKit</span>
-              )}
+              <span class="probe-live">{sceneProviderLabel}</span>
             </div>
             {sceneOpen &&
               (displayedScreenContext?.kind === "react-native" ? (

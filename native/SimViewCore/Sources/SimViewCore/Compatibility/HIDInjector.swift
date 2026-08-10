@@ -3,6 +3,15 @@ import Darwin
 import Foundation
 import ObjectiveC
 
+func validateLiteralTextInput(_ text: String) throws {
+    guard !text.unicodeScalars.contains(where: CharacterSet.controlCharacters.contains) else {
+        throw SimViewError(
+            "SPECIAL_KEY_REQUIRES_PRESS_KEY",
+            "typeText accepts printable text only; use input.key for Return, Tab, Delete, or other control keys"
+        )
+    }
+}
+
 final class HIDInjector: @unchecked Sendable {
     private typealias MouseFunction =
         @convention(c) (
@@ -30,6 +39,14 @@ final class HIDInjector: @unchecked Sendable {
     private var keyboard: KeyboardFunction?
     private var device: NSObject?
     private(set) var udid: String?
+
+    private static let detectedMultiTouchAvailable: Bool = {
+        Xcode.loadFrameworks()
+        return Xcode.symbolAvailable("IndigoHIDMessageForMouseNSEvent")
+            && NSClassFromString("_TtC12SimulatorKit24SimDeviceLegacyHIDClient") != nil
+    }()
+
+    static var multiTouchAvailable: Bool { detectedMultiTouchAvailable }
 
     func setup(udid: String) throws {
         if self.udid == udid, client != nil { return }
@@ -90,6 +107,31 @@ final class HIDInjector: @unchecked Sendable {
         }
     }
 
+    func multiTouch(
+        phase: String,
+        first: (x: Double, y: Double),
+        second: (x: Double, y: Double),
+        edge: UInt32 = 0
+    ) throws {
+        try validate(first.x, "first.x")
+        try validate(first.y, "first.y")
+        try validate(second.x, "second.x")
+        try validate(second.y, "second.y")
+        let eventType: Int32
+        switch phase {
+        case "down", "move": eventType = 1
+        case "up": eventType = 2
+        default: throw SimViewError("INPUT_PHASE_INVALID", "Touch phase must be down, move, or up")
+        }
+        queue.sync {
+            var primary = CGPoint(x: first.x, y: first.y)
+            var secondary = CGPoint(x: second.x, y: second.y)
+            if let message = mouse?(&primary, &secondary, 0x32, eventType, 1, 1, edge) {
+                send(message)
+            }
+        }
+    }
+
     func tap(x: Double, y: Double, duration: TimeInterval = 0.05) throws {
         try touch(phase: "down", x: x, y: y)
         Thread.sleep(forTimeInterval: max(0.01, duration))
@@ -115,6 +157,7 @@ final class HIDInjector: @unchecked Sendable {
     }
 
     func typeText(_ text: String) throws -> String {
+        try validateLiteralTextInput(text)
         guard keyboard != nil else {
             throw SimViewError("HID_KEYBOARD_UNAVAILABLE", "SimulatorKit keyboard injection is unavailable")
         }
@@ -143,6 +186,51 @@ final class HIDInjector: @unchecked Sendable {
         queue.sync {
             guard let message = keyboard?(usage, down ? 1 : 2) else { return }
             send(message)
+        }
+    }
+
+    func pressKey(_ name: String, modifiers: [String] = [], repeatCount: Int = 1) throws {
+        guard keyboard != nil else {
+            throw SimViewError("HID_KEYBOARD_UNAVAILABLE", "SimulatorKit keyboard injection is unavailable")
+        }
+        let usage: UInt32
+        var effectiveModifiers = modifiers
+        switch name {
+        case "delete": usage = 0x2a
+        case "return", "enter": usage = 0x28
+        case "tab": usage = 0x2b
+        case "escape": usage = 0x29
+        case "arrow-right": usage = 0x4f
+        case "arrow-left": usage = 0x50
+        case "arrow-down": usage = 0x51
+        case "arrow-up": usage = 0x52
+        case "select-all":
+            usage = 0x04
+            if !effectiveModifiers.contains("command") { effectiveModifiers.append("command") }
+        default:
+            throw SimViewError("INPUT_KEY_INVALID", "Unsupported key: \(name)")
+        }
+        let modifierUsages = try effectiveModifiers.map { modifier -> UInt32 in
+            switch modifier {
+            case "control": return 0xe0
+            case "shift": return 0xe1
+            case "option": return 0xe2
+            case "command": return 0xe3
+            default:
+                throw SimViewError("INPUT_KEY_INVALID", "Unsupported key modifier: \(modifier)")
+            }
+        }
+        guard (1...100).contains(repeatCount) else {
+            throw SimViewError("INPUT_KEY_INVALID", "repeat must be between 1 and 100")
+        }
+        for modifier in modifierUsages { key(usage: modifier, down: true) }
+        defer {
+            for modifier in modifierUsages.reversed() { key(usage: modifier, down: false) }
+        }
+        for _ in 0..<repeatCount {
+            key(usage: usage, down: true)
+            key(usage: usage, down: false)
+            usleep(4_000)
         }
     }
 

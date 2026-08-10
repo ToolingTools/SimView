@@ -54,6 +54,7 @@ struct DeviceDescription: Sendable {
                 "input": [
                     "touch": true,
                     "rawTouch": true,
+                    "multiTouch": HIDInjector.multiTouchAvailable,
                     "text": "unicode",
                     "buttons": ["home", "lock", "volume-up", "volume-down", "action"],
                 ],
@@ -71,6 +72,7 @@ struct DeviceDescription: Sendable {
                     // is enabled in the capture response only after the agent
                     // has authenticated for this exact device.
                     "rawTouch": false,
+                    "multiTouch": false,
                     "text": "ascii",
                     "buttons": ["back", "home", "overview", "lock", "volume-up", "volume-down"],
                 ],

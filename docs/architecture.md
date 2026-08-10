@@ -79,18 +79,54 @@ The process model has two layers:
   Codex cannot open insecure localhost HTTP/WebSocket origins and a local TLS
   certificate would impose user setup. A second MCP resource would still use
   the same host bridge rather than creating a separate network lane.
-- Element inspection first captures the native accessibility snapshot as a
-  safe fallback,
+- `connect_device` is headless. The native observation coordinator retains the
+  newest framebuffer, a 64×64 luma signature, independent frame/image
+  revisions, and one 1024-long-edge JPEG in memory. H.264/MJPEG encoding and
+  MCP packet retention start only when a preview subscribes. Warm frames are
+  cleared on device changes, disconnect, shutdown, and idle expiry and are
+  never written to disk.
+- `observe_screen` returns bounded semantic nodes initially and deterministic
+  SHA-256 deltas thereafter. Neither `semantic` nor `auto` waits for or returns
+  an image; only explicit `visual` mode requests the prepared JPEG.
+  `search_elements` ranks bounded current-snapshot matches across accessible
+  names, identifiers, values, roles, placeholders, and React Native metadata;
+  its winning generation-scoped ref can be passed to `tap_element`. Interaction
+  then settles a fresh native accessibility snapshot, rematches the semantic
+  fingerprint, and verifies the native hit target before dispatch. Fiber is a
+  discovery-only fallback for interaction and never authorizes coordinates. A
+  Fiber-only identifier can map to native AX only through one exact accessible
+  name with non-conflicting role/value evidence; ambiguous or nameless mappings
+  fail closed. Ranked offscreen candidates remain available separately with a
+  suggested swipe direction. Optional destination selectors verify entity
+  identity and amount/value after navigation. Failure is a hard stop for
+  standalone and batched taps, preserves the dispatched interaction receipt,
+  and prevents later batch actions.
+  `perform_actions` combines up to 20 ordered inputs, post-action settling, and
+  one semantic observation in a single MCP round trip by default.
+- Element inspection first captures the native accessibility snapshot. On iOS,
+  session establishment automatically starts an authenticated persistent XCTest
+  runner against the existing foreground app process; it becomes the primary
+  snapshot provider and performs point hit-testing against a fresh tree without relaunching the app.
+  Simulator AX is retained as the startup/runtime fallback. Android uses its
+  bounded UIAutomator provider. Inspection
   then optionally discovers loopback Metro targets through `metro-bridge`. A
   target must match the selected device by logical device ID, device name,
   or be the sole unambiguous target. React Native inspection returns only a
   bounded visual Fiber projection and whitelisted semantic fields; component
   props, route params, raw Fiber objects, external paths, and dependencies are
-  not returned. If Metro MCP owns the older single-client Hermes connection,
+  not returned. Fiber projection scans renderer roots fairly and selects
+  semantic/actionable candidates before spending the output budget, so a deep
+  first scene cannot starve later roots or bottom navigation tabs.
+  If Metro MCP owns the older single-client Hermes connection,
   SimView validates and reuses its loopback CDP multiplexer record; newer
-  multi-debugger targets connect directly. Any discovery, CDP, measurement, or
-  validation failure returns the complete native snapshot with a bounded fallback
-  reason instead of a partially merged tree. Every CDP evaluation is
+  multi-debugger targets connect directly. Discovery goes through the packaged
+  `metro-bridge` using `localhost` (including the bridge's IPv4 fallback), while
+  concurrent status probes classify empty discovery without delaying a usable
+  target. Per-device negative results are cached for five seconds. Any discovery,
+  CDP, measurement, or
+  validation failure returns the complete native snapshot instead of a partially
+  merged tree. The absence of a Metro target is normal native context, not a
+  fallback error. Every CDP evaluation is
   deadline-bounded so a stale Hermes session cannot leave the preview request
   pending indefinitely. Source paths are reduced relative to an explicit
   `SIMVIEW_PROJECT_ROOT` or the nearest package root inferred from symbolicated
@@ -147,8 +183,9 @@ not cross-platform identity keys.
 
 The native server authenticates clients before accepting requests, times out
 unauthenticated sockets, and tracks authenticated connections for idle shutdown
-(ephemeral clients may also provide a parent PID). Capture and input work are
-serialized on their respective queues. H.264 encoding runs asynchronously;
+(ephemeral clients may also provide a parent PID). Capture, observation image
+work, semantics, and input use independent bounded queues. Newest-frame-wins
+settling prevents capture work from delaying input. H.264 encoding runs asynchronously;
 MJPEG work runs off the server queue. Each connection prioritizes control
 responses and coalesces preview frames so a slow viewer cannot accumulate an
 unbounded video backlog. `health.get` reports the sanitized PID, instance ID,

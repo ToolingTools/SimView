@@ -37,6 +37,9 @@ export const reactNativeElementSnapshotSchema = z.object({
   stats: z.object({
     nodeCount: z.number().int().nonnegative(),
     truncated: z.boolean(),
+    quality: z.enum(["complete", "partial", "degraded"]).optional(),
+    reason: z.string().optional(),
+    capturedBudget: z.number().int().positive().optional(),
   }),
   metro: z.object({
     host: z.string(),
@@ -80,8 +83,8 @@ export const reactNativeScreenContextSchema = screenContextCommonSchema.extend({
   activityName: z.string().optional(),
 });
 
-export const uiKitScreenContextSchema = screenContextCommonSchema.extend({
-  kind: z.literal("uikit"),
+export const nativeIOSScreenContextSchema = screenContextCommonSchema.extend({
+  kind: z.literal("native-ios"),
   route: z.string().optional(),
   component: z.string().optional(),
   testID: z.string().optional(),
@@ -106,7 +109,7 @@ export const androidScreenContextSchema = screenContextCommonSchema.extend({
 
 export const screenContextSchema = z.discriminatedUnion("kind", [
   reactNativeScreenContextSchema,
-  uiKitScreenContextSchema,
+  nativeIOSScreenContextSchema,
   androidScreenContextSchema,
 ]);
 
@@ -116,12 +119,21 @@ export const elementFallbackReasonSchema = z.enum([
   "metro-inspection-failed",
 ]);
 
+export const elementFallbackDetailSchema = z.enum([
+  "metro-unreachable",
+  "metro-running-no-debug-targets",
+  "metro-target-mismatch",
+  "metro-fiber-root-missing",
+  "metro-connect-or-evaluate-failed",
+]);
+
 export const elementTreeOutputSchema = z.object({
   snapshot: elementSnapshotSchema,
   screenContext: screenContextSchema,
   fallback: z
     .object({
       reason: elementFallbackReasonSchema,
+      detail: elementFallbackDetailSchema.optional(),
     })
     .optional(),
 });
@@ -154,9 +166,10 @@ export type ReactNativeElementMetadata = z.infer<typeof reactNativeElementMetada
 export type ReactNativeElementSnapshot = z.infer<typeof reactNativeElementSnapshotSchema>;
 export type ElementSnapshot = z.infer<typeof elementSnapshotSchema>;
 export type ReactNativeScreenContext = z.infer<typeof reactNativeScreenContextSchema>;
-export type UiKitScreenContext = z.infer<typeof uiKitScreenContextSchema>;
+export type NativeIOSScreenContext = z.infer<typeof nativeIOSScreenContextSchema>;
 export type AndroidScreenContext = z.infer<typeof androidScreenContextSchema>;
 export type ScreenContext = z.infer<typeof screenContextSchema>;
 export type ElementFallbackReason = z.infer<typeof elementFallbackReasonSchema>;
+export type ElementFallbackDetail = z.infer<typeof elementFallbackDetailSchema>;
 export type ElementTreeOutput = z.infer<typeof elementTreeOutputSchema>;
 export type ElementTreePage = z.infer<typeof elementTreePageSchema>;

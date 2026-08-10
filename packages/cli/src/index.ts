@@ -221,7 +221,7 @@ export async function run(argv = process.argv): Promise<void> {
     }
     case "preview": {
       const session = new SimViewSession();
-      const state = await session.open(deviceId ?? udid);
+      const state = await session.open(deviceId ?? udid, { startRelay: true });
       const browserUrl = session.browserUrl();
       const shouldOpen = options["no-open"] !== true;
       printJson(
@@ -526,20 +526,23 @@ async function writeOutput(value: string): Promise<void> {
 
 export function formatElementTree(result: ElementTreeOutput): string {
   const context = result.screenContext;
-  const summary =
-    context.kind === "react-native"
-      ? [
-          `source=react-native-fiber renderer=${context.renderer}`,
-          context.navigationPath?.length
-            ? `screen=${context.navigationPath.join(" > ")}`
-            : context.route
-              ? `screen=${context.route}`
-              : undefined,
-          context.screenComponent ? `component=${context.screenComponent}` : undefined,
-        ]
-          .filter(Boolean)
-          .join(" ")
-      : `source=${result.snapshot.source}${result.fallback ? ` fallback=${result.fallback.reason}` : ""}`;
+  let summary: string;
+  if (context.kind === "react-native") {
+    const screen = context.navigationPath?.length
+      ? context.navigationPath.join(" > ")
+      : context.route;
+    summary = [
+      `source=react-native-fiber renderer=${context.renderer}`,
+      screen ? `screen=${screen}` : undefined,
+      context.screenComponent ? `component=${context.screenComponent}` : undefined,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  } else {
+    const fallbackDetail = result.fallback?.detail ? ` detail=${result.fallback.detail}` : "";
+    const fallback = result.fallback ? ` fallback=${result.fallback.reason}${fallbackDetail}` : "";
+    summary = `context=${context.kind} elements=${result.snapshot.source}${fallback}`;
+  }
   return `${summary}\n${compactAccessibilityTree(result.snapshot)}`;
 }
 

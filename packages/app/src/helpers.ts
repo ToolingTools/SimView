@@ -28,7 +28,7 @@ export type AnnotationMessageItem = {
   screenshotPath: string;
 };
 
-export const PREFERRED_INLINE_HEIGHT = 600;
+const PREFERRED_INLINE_HEIGHT = 600;
 
 export type DeviceGroup = {
   key: "ios-simulators" | "android-emulators" | "android-devices";
@@ -189,7 +189,7 @@ export function annotationMessageContext(annotation: Annotation): string[] {
   ].filter((value): value is string => Boolean(value));
 }
 
-export function createUIKitScreenContext(
+export function createNativeIOSScreenContext(
   state: Pick<SessionState, "device" | "frameId" | "route" | "component">,
   uiContext: UiContext | undefined,
   annotations: readonly Annotation[],
@@ -212,7 +212,7 @@ export function createUIKitScreenContext(
 
   return {
     schemaVersion: 1,
-    kind: "uikit",
+    kind: "native-ios",
     platform: "ios",
     capturedAt: new Date().toISOString(),
     frameId: state.frameId ?? "current",
@@ -251,7 +251,7 @@ export function createNativeScreenContext(
       source: state.component?.source,
     };
   }
-  return createUIKitScreenContext(state, uiContext, annotations);
+  return createNativeIOSScreenContext(state, uiContext, annotations);
 }
 
 export function annotationMessageScreenContext(context: ScreenContext | undefined): string[] {
@@ -563,6 +563,24 @@ export function formatRuntime(runtime?: string, platform: "ios" | "android" = "i
 export function formatFrame(frame?: Rect): string {
   if (!frame) return "—";
   return `${percent(frame.x)}, ${percent(frame.y)} · ${percent(frame.width)} × ${percent(frame.height)}`;
+}
+
+export const ELEMENT_ENRICHMENT_RETRY_DELAYS_MS = [
+  1_000, 2_000, 4_000, 4_000, 4_000, 4_000, 4_000, 4_000,
+] as const;
+
+export async function retryElementEnrichment(
+  load: () => Promise<string | undefined>,
+  wait: (milliseconds: number) => Promise<void>,
+  stopped: () => boolean,
+  delays: readonly number[] = ELEMENT_ENRICHMENT_RETRY_DELAYS_MS,
+): Promise<boolean> {
+  for (const delay of delays) {
+    await wait(delay);
+    if (stopped()) return false;
+    if ((await load()) === "react-native-fiber") return true;
+  }
+  return false;
 }
 
 export function contextForNode(

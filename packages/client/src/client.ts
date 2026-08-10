@@ -61,6 +61,8 @@ export class SimViewClient {
   #writeQueue: Uint8Array[] = [];
   #writeOffset = 0;
   #sessionDirectory: string | undefined;
+  #connected = false;
+  #disconnectHandlers = new Set<(error: Error) => void>();
 
   private constructor(socketPath: string, token: string, process?: Bun.Subprocess) {
     this.socketPath = socketPath;
@@ -140,6 +142,15 @@ export class SimViewClient {
     }
   }
 
+  get connected(): boolean {
+    return this.#connected;
+  }
+
+  onDisconnect(handler: (error: Error) => void): () => void {
+    this.#disconnectHandlers.add(handler);
+    return () => this.#disconnectHandlers.delete(handler);
+  }
+
   async #waitForSocket(): Promise<void> {
     const deadline = Date.now() + 10_000;
     while (Date.now() < deadline) {
@@ -164,24 +175,32 @@ export class SimViewClient {
   }
 
   async connect(codec: Codec = "h264"): Promise<void> {
+    if (this.#connected) throw new Error("SimView client is already connected");
     const decoder = this.#decoder;
-    this.#socket = await Bun.connect({
+    const socket = await Bun.connect({
       unix: this.socketPath,
       socket: {
         data: (_socket, data) => {
           for (const frame of decoder.push(new Uint8Array(data)))
             this.#handle(frame.kind, frame.payload);
         },
-        error: (_socket, error) => this.#rejectAll(error),
-        close: () => this.#rejectAll(new Error("simview-core connection closed")),
+        error: (_socket, error) => this.#disconnect(error),
+        close: () => this.#disconnect(new Error("simview-core connection closed")),
         drain: () => this.#flushWrites(),
       },
     });
-    await this.request("hello", {
-      token: this.token,
-      codecs: [codec, codec === "h264" ? "mjpeg" : "h264"],
-      maxFrameRate: 60,
-    });
+    this.#socket = socket;
+    this.#connected = true;
+    try {
+      await this.request("hello", {
+        token: this.token,
+        codecs: [codec, codec === "h264" ? "mjpeg" : "h264"],
+        maxFrameRate: 60,
+      });
+    } catch (error) {
+      this.#disconnect(error);
+      throw error;
+    }
   }
 
   #handle(kind: FrameKind, payload: Uint8Array): void {
@@ -229,6 +248,23 @@ export class SimViewClient {
     this.#writeOffset = 0;
   }
 
+  #disconnect(reason: unknown): void {
+    if (!this.#connected && !this.#socket) return;
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    const socket = this.#socket;
+    this.#socket = undefined;
+    this.#connected = false;
+    this.#rejectAll(error);
+    socket?.end();
+    for (const handler of this.#disconnectHandlers) {
+      try {
+        handler(error);
+      } catch {
+        // One observer must not prevent the remaining owners from invalidating their state.
+      }
+    }
+  }
+
   on(kind: FrameKind, handler: DataHandler): () => void {
     const handlers = this.#handlers.get(kind) ?? new Set<DataHandler>();
     handlers.add(handler);
@@ -241,7 +277,7 @@ export class SimViewClient {
     params: ParamsFor<M>,
     options: RequestOptions = {},
   ): Promise<ResultFor<M>> {
-    if (!this.#socket) throw new Error("SimView client is not connected");
+    if (!this.#connected || !this.#socket) throw new Error("SimView client is not connected");
     if (options.signal?.aborted) throw options.signal.reason;
     const id = randomUUID();
     const validatedParams = parseMethodParams(method, params);
@@ -280,8 +316,7 @@ export class SimViewClient {
       });
     });
     if (this.#writeQueue.length >= 1_024) {
-      this.#rejectAll(new Error("simview-core request queue exceeded 1024 frames"));
-      this.#socket.end();
+      this.#disconnect(new Error("simview-core request queue exceeded 1024 frames"));
       return promise;
     }
     this.#writeQueue.push(encodeFrame(FrameKind.Request, payload));
@@ -297,7 +332,7 @@ export class SimViewClient {
       if (!frame) return;
       const written = socket.write(frame, this.#writeOffset, frame.byteLength - this.#writeOffset);
       if (written < 0) {
-        this.#rejectAll(new Error("simview-core connection closed while writing"));
+        this.#disconnect(new Error("simview-core connection closed while writing"));
         return;
       }
       if (written === 0) return;
@@ -336,10 +371,7 @@ export class SimViewClient {
       }
     }
 
-    this.#socket?.end();
-    this.#socket = undefined;
-    this.#writeQueue = [];
-    this.#writeOffset = 0;
+    this.#disconnect(new Error("SimView client closed"));
     if (this.#sessionDirectory) await rm(this.#sessionDirectory, { recursive: true, force: true });
   }
 }

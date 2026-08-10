@@ -12,20 +12,21 @@ import java.security.MessageDigest;
 /** Transient shell-user agent. No application package or persistent service is installed. */
 public final class Main {
   static final int MAGIC = 0x53564131; // SVA1
-  static final int PROTOCOL_VERSION = 2;
+  static final int PROTOCOL_VERSION = 4;
 
   private Main() {}
 
   public static void main(String[] args) throws Exception {
     String socketName = argument(args, "--socket");
-    String token = new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)).readLine();
+    String token =
+        new BufferedReader(new InputStreamReader(System.in, StandardCharsets.UTF_8)).readLine();
     if (socketName == null || token == null || token.getBytes(StandardCharsets.UTF_8).length < 32) {
       throw new IllegalArgumentException("socket and a 32-byte token are required");
     }
     try (LocalServerSocket server = new LocalServerSocket(socketName);
-        LocalSocket socket = server.accept();
-        DataInputStream input = new DataInputStream(socket.getInputStream());
-        DataOutputStream output = new DataOutputStream(socket.getOutputStream())) {
+         LocalSocket socket = server.accept();
+         DataInputStream input = new DataInputStream(socket.getInputStream());
+         DataOutputStream output = new DataOutputStream(socket.getOutputStream())) {
       authenticate(input, output, token);
       try {
         new AgentSession(input, output).run();
@@ -58,12 +59,14 @@ public final class Main {
     output.writeInt(PROTOCOL_VERSION);
     output.writeInt(authenticated ? 0 : 1);
     output.flush();
-    if (!authenticated) throw new SecurityException("invalid agent token");
+    if (!authenticated)
+      throw new SecurityException("invalid agent token");
   }
 
   private static String argument(String[] args, String name) {
     for (int index = 0; index + 1 < args.length; index++) {
-      if (name.equals(args[index])) return args[index + 1];
+      if (name.equals(args[index]))
+        return args[index + 1];
     }
     return null;
   }

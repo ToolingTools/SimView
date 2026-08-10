@@ -20,8 +20,8 @@ import {
   claimFullscreenRequest,
   commentableNodeAtPoint,
   contextForNode,
+  createNativeIOSScreenContext,
   createNativeScreenContext,
-  createUIKitScreenContext,
   deviceGroups,
   deviceStatusLabel,
   elementPath,
@@ -32,6 +32,7 @@ import {
   parseSessionState,
   preferredInlineHeight,
   requireAnnotation,
+  retryElementEnrichment,
   streamMessage,
   supportsDeviceButton,
   visibleTree,
@@ -57,6 +58,42 @@ const root: AccessibilityNode = {
 };
 
 describe("app helpers", () => {
+  test("retries a native element fallback until Metro enrichment becomes available", async () => {
+    const waits: number[] = [];
+    const sources = ["android-uiautomator", "android-uiautomator", "react-native-fiber"];
+    const enriched = await retryElementEnrichment(
+      async () => sources.shift(),
+      async (milliseconds) => {
+        waits.push(milliseconds);
+      },
+      () => false,
+      [1_000, 2_000, 4_000, 4_000],
+    );
+
+    expect(enriched).toBe(true);
+    expect(waits).toEqual([1_000, 2_000, 4_000]);
+    expect(sources).toEqual([]);
+  });
+
+  test("cancels Metro enrichment retries when the inspector closes", async () => {
+    let stopped = false;
+    let loads = 0;
+    const enriched = await retryElementEnrichment(
+      async () => {
+        loads += 1;
+        return "android-uiautomator";
+      },
+      async () => {
+        stopped = true;
+      },
+      () => stopped,
+      [1_000, 2_000],
+    );
+
+    expect(enriched).toBe(false);
+    expect(loads).toBe(0);
+  });
+
   test("pauses fallback preview polling while priority bridge work is pending", () => {
     const gate = new PreviewBridgeGate();
     const releaseFirst = gate.beginPriority();
@@ -437,7 +474,7 @@ describe("app helpers", () => {
       },
     };
     const context = annotationMessageContext(annotation);
-    const screenContextValue = createUIKitScreenContext(
+    const screenContextValue = createNativeIOSScreenContext(
       {
         device: {
           id: "ios:device-1",

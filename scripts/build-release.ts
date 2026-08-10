@@ -2,6 +2,7 @@ import { cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 import { ANDROID_AGENT_PROTOCOL_VERSION } from "./android-agent-config";
+import { assertNoRepowiseArtifacts } from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
 const artifacts = join(root, "artifacts", "release");
@@ -19,6 +20,7 @@ await mkdir(artifacts, { recursive: true });
 await $`bun run check`;
 await $`bun run build:packages`;
 await $`bun run build:probe`;
+await $`bun run build:xctest-provider`;
 await $`bun run build:android-agent`;
 await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64`;
 await $`bun run --cwd ${join(root, "packages/cli")} compile`;
@@ -34,6 +36,13 @@ const packagedProbe = join(root, "packages/core/bin/libSimViewProbe.dylib");
 const packagedAndroidAgent = join(root, "packages/core/bin/simview-android-agent.jar");
 const androidAgentSha256 = new Bun.CryptoHasher("sha256")
   .update(await Bun.file(packagedAndroidAgent).arrayBuffer())
+  .digest("hex");
+const xctestProviderManifest = join(root, "packages/core/bin/xctest-provider/manifest.json");
+const xctestProviderMetadata = (await Bun.file(xctestProviderManifest).json()) as {
+  protocolVersion: number;
+};
+const xctestProviderManifestSha256 = new Bun.CryptoHasher("sha256")
+  .update(await Bun.file(xctestProviderManifest).arrayBuffer())
   .digest("hex");
 const releaseBinaries = [
   { path: cliBinary, identifier: "com.simview.cli" },
@@ -77,10 +86,14 @@ await Promise.all([
   cp(packagedCore, join(archiveStage, "bin/simview-core")),
   cp(packagedProbe, join(archiveStage, "bin/libSimViewProbe.dylib")),
   cp(packagedAndroidAgent, join(archiveStage, "bin/simview-android-agent.jar")),
+  cp(join(root, "packages/core/bin/xctest-provider"), join(archiveStage, "bin/xctest-provider"), {
+    recursive: true,
+  }),
   cp(join(root, "README.md"), join(archiveStage, "README.md")),
   cp(join(root, "LICENSE"), join(archiveStage, "LICENSE")),
   cp(join(root, "THIRD_PARTY_NOTICES.md"), join(archiveStage, "THIRD_PARTY_NOTICES.md")),
 ]);
+await assertNoRepowiseArtifacts(archiveStage);
 await $`ditto -c -k --norsrc --keepParent ${archiveStage} ${join(artifacts, `simview-${version}-macos.zip`)}`;
 
 await $`bun ${join(root, "scripts/generate-sbom.ts")} ${join(artifacts, "sbom.cdx.json")}`;
@@ -113,6 +126,12 @@ await writeFile(
           version,
           protocolVersion: ANDROID_AGENT_PROTOCOL_VERSION,
           sha256: androidAgentSha256,
+        },
+        {
+          name: "xctest-provider/manifest.json",
+          version,
+          protocolVersion: xctestProviderMetadata.protocolVersion,
+          sha256: xctestProviderManifestSha256,
         },
       ],
       files: releaseFiles,

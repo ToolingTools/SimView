@@ -6,6 +6,7 @@ import type {
   AccessibilityNode,
   AccessibilitySnapshot,
   DeviceDescription,
+  ElementFallbackDetail,
   ElementFallbackReason,
   ReactNativeElementSnapshot,
   ReactNativeScreenContext,
@@ -13,6 +14,7 @@ import type {
 } from "@simview/contracts";
 import {
   CDPSession,
+  checkMetroStatus,
   fetchTargets,
   type MetroServerInfo,
   type MetroTarget,
@@ -62,13 +64,18 @@ type InspectorSession = {
   close(): void;
 };
 type MetroInspectorDependencies = {
-  scan?: (() => Promise<MetroServerInfo[]>) | undefined;
+  scan?: ((host: string) => Promise<MetroServerInfo[]>) | undefined;
+  status?: ((host: string, port: number) => Promise<string | null>) | undefined;
   connect?: ((target: MetroTarget) => Promise<InspectorSession>) | undefined;
   projectRoot?: string | undefined;
+  now?: (() => number) | undefined;
 };
 type MetroTargetWithAppId = MetroTarget & { appId?: unknown };
 
 const METRO_PROXY_RECORD = `${tmpdir()}/metro-mcp-proxy.json`;
+const METRO_HOST = "localhost";
+export const METRO_DISCOVERY_PORTS = [8081, 8082, 19000, 19001, 19002] as const;
+const NEGATIVE_DISCOVERY_TTL_MS = 5_000;
 const INTERNAL_NAMES = new Set([
   "AppContainer",
   "BaseNavigationContainer",
@@ -91,14 +98,22 @@ export class MetroInspector {
   #deviceId: string | undefined;
   #lastError: string | undefined;
   #fallbackReason: ElementFallbackReason | undefined;
-  readonly #scan: () => Promise<MetroServerInfo[]>;
+  #fallbackDetail: ElementFallbackDetail | undefined;
+  #negativeDiscovery:
+    | { deviceId: string; expiresAt: number; detail: ElementFallbackDetail }
+    | undefined;
+  readonly #scan: (host: string) => Promise<MetroServerInfo[]>;
+  readonly #status: (host: string, port: number) => Promise<string | null>;
   readonly #connectSession: (target: MetroTarget) => Promise<InspectorSession>;
   readonly #projectRoot: string | undefined;
+  readonly #now: () => number;
 
   constructor(dependencies: MetroInspectorDependencies = {}) {
-    this.#scan = dependencies.scan ?? (() => scanMetroPorts("127.0.0.1"));
+    this.#scan = dependencies.scan ?? ((host) => scanMetroPorts(host));
+    this.#status = dependencies.status ?? ((host, port) => checkMetroStatus(host, port));
     this.#connectSession = dependencies.connect ?? ((target) => CDPSession.connect(target));
     this.#projectRoot = dependencies.projectRoot ?? process.env.SIMVIEW_PROJECT_ROOT;
+    this.#now = dependencies.now ?? Date.now;
   }
 
   async inspect(
@@ -114,14 +129,39 @@ export class MetroInspector {
     | undefined
   > {
     try {
-      const selected =
-        this.#session?.isConnected && this.#deviceId === device.id
-          ? this.#selected
-          : selectMetroTarget(await this.#scan(), device);
+      if (this.#negativeDiscovery && this.#negativeDiscovery.deviceId !== device.id) {
+        this.#negativeDiscovery = undefined;
+      }
+      let selected =
+        this.#session?.isConnected && this.#deviceId === device.id ? this.#selected : undefined;
       if (!selected) {
-        this.#lastError = "No matching React Native Metro target was found";
-        this.#fallbackReason = "metro-target-unavailable";
-        return undefined;
+        const cached = this.#negativeDiscovery;
+        if (cached && cached.deviceId === device.id && cached.expiresAt > this.#now()) {
+          this.#setUnavailable(cached.detail);
+          return undefined;
+        }
+        const statusPromise = Promise.all(
+          METRO_DISCOVERY_PORTS.map((port) => this.#status(METRO_HOST, port).catch(() => null)),
+        );
+        const servers = await this.#scan(METRO_HOST);
+        selected = selectMetroTarget(servers, device);
+        if (!selected) {
+          let detail: ElementFallbackDetail;
+          if (servers.length > 0) {
+            detail = "metro-target-mismatch";
+          } else if ((await statusPromise).some((status) => status !== null)) {
+            detail = "metro-running-no-debug-targets";
+          } else {
+            detail = "metro-unreachable";
+          }
+          this.#negativeDiscovery = {
+            deviceId: device.id,
+            expiresAt: this.#now() + NEGATIVE_DISCOVERY_TTL_MS,
+            detail,
+          };
+          this.#setUnavailable(detail);
+          return undefined;
+        }
       }
       const session = await this.#connect(selected);
       this.#deviceId = device.id;
@@ -135,6 +175,7 @@ export class MetroInspector {
       if (!raw?.root) {
         this.#lastError = "The React Native inspector returned no Fiber root";
         this.#fallbackReason = "metro-fiber-unavailable";
+        this.#fallbackDetail = "metro-fiber-root-missing";
         return undefined;
       }
       scaleMetroPointFrames(raw.root, measurementViewport.scaleX, measurementViewport.scaleY);
@@ -150,7 +191,13 @@ export class MetroInspector {
         scope: accessibility.scope,
         screen: viewport,
         root: raw.root,
-        stats: { nodeCount: raw.nodeCount, truncated: raw.truncated },
+        stats: {
+          nodeCount: raw.nodeCount,
+          truncated: raw.truncated,
+          quality: raw.truncated ? "partial" : "complete",
+          capturedBudget: maxNodes,
+          ...(raw.truncated ? { reason: "node-budget-exhausted" } : {}),
+        },
         metro: {
           host: selected.server.host,
           port: selected.server.port,
@@ -186,12 +233,15 @@ export class MetroInspector {
       };
       this.#lastError = undefined;
       this.#fallbackReason = undefined;
+      this.#fallbackDetail = undefined;
+      this.#negativeDiscovery = undefined;
       return { snapshot, screenContext };
     } catch (error) {
       this.#lastError = error instanceof Error ? error.message : String(error);
       this.#fallbackReason = "metro-inspection-failed";
+      this.#fallbackDetail = "metro-connect-or-evaluate-failed";
       console.error(`[simview:metro] ${this.#lastError}`);
-      this.#disconnect();
+      this.#disconnectSession();
       return undefined;
     }
   }
@@ -204,14 +254,23 @@ export class MetroInspector {
     return this.#fallbackReason;
   }
 
+  get fallbackDetail(): ElementFallbackDetail | undefined {
+    return this.#fallbackDetail;
+  }
+
   close(): void {
-    this.#disconnect();
+    this.#disconnectSession();
+    this.#negativeDiscovery = undefined;
+    this.#lastError = undefined;
+    this.#fallbackReason = undefined;
+    this.#fallbackDetail = undefined;
   }
 
   async #connect(selected: SelectedTarget): Promise<InspectorSession> {
     const targetKey = `${selected.server.host}:${selected.server.port}:${selected.target.id}`;
     if (this.#session?.isConnected && this.#targetKey === targetKey) return this.#session;
-    this.#disconnect();
+    this.#disconnectSession();
+    this.#negativeDiscovery = undefined;
 
     const target = supportsMultipleDebuggers(selected.target)
       ? selected.target
@@ -222,7 +281,13 @@ export class MetroInspector {
     return this.#session;
   }
 
-  #disconnect(): void {
+  #setUnavailable(detail: ElementFallbackDetail): void {
+    this.#lastError = "No matching React Native Metro target was found";
+    this.#fallbackReason = "metro-target-unavailable";
+    this.#fallbackDetail = detail;
+  }
+
+  #disconnectSession(): void {
     this.#session?.close();
     this.#session = undefined;
     this.#targetKey = undefined;
@@ -456,23 +521,25 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
   return `(async function() {
     var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
     if (!hook || !hook.getFiberRoots) return null;
-    var roots = null;
-    var renderer = null;
-    for (var id = 1; id <= 20; id++) {
+    var rootEntries = [];
+    var rendererIds = hook.renderers && hook.renderers.keys ? Array.from(hook.renderers.keys()) : [];
+    // Older DevTools hooks do not publish renderers; keep a bounded fallback
+    // for their renderer IDs while still enumerating every registered renderer.
+    if (!rendererIds.length) rendererIds = Array.from({ length: 64 }, function(_, index) { return index + 1; });
+    for (var id of rendererIds) {
       try {
         var candidate = hook.getFiberRoots(id);
         if (candidate && candidate.size) {
-          roots = candidate;
-          renderer = hook.renderers && hook.renderers.get ? hook.renderers.get(id) : null;
-          break;
+          var candidateRenderer = hook.renderers && hook.renderers.get ? hook.renderers.get(id) : null;
+          candidate.forEach(function(root) { if (root && root.current) rootEntries.push({ fiber: root.current, renderer: candidateRenderer }); });
         }
       } catch (_) {}
     }
-    if (!roots || !roots.size) return null;
-    var rootFiber = Array.from(roots)[0].current;
+    if (!rootEntries.length) return null;
     var WIDTH = ${JSON.stringify(width)};
     var HEIGHT = ${JSON.stringify(height)};
     var MAX_NODES = ${Math.min(1_199, Math.max(0, maxNodes - 1))};
+    var VISIT_LIMIT = Math.min(10000, Math.max(1, MAX_NODES * 20));
     var INTERNAL = new Set(${JSON.stringify([...INTERNAL_NAMES])});
     var count = 0;
     var truncated = false;
@@ -510,7 +577,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       var text = value.filter(function(item) { return typeof item === 'string' || typeof item === 'number'; }).join(' ');
       return text ? text.slice(0, 300) : undefined;
     }
-    function measure(node, fiber) {
+    function measure(node, fiber, renderer) {
       var stateNode = fiber.stateNode;
       var candidates = [
         stateNode && stateNode.canonical && stateNode.canonical.publicInstance,
@@ -558,14 +625,74 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       }));
     }
     var focus = focused(navState());
-    function walk(fiber, depth) {
-      if (!fiber || depth > 600 || count >= MAX_NODES) {
-        if (fiber) truncated = true;
-        return [];
-      }
+    function priorityOf(props) {
+      var candidateRole = props.accessibilityRole || props.role;
+      var candidateLabel = props.accessibilityLabel || props['aria-label'];
+      var candidateAction = props.onPress || props.onPressIn || props.onLongPress || props.onClick || props.onTap;
+      return (candidateAction ? 8 : 0) + (candidateLabel ? 4 : 0) + (props.testID ? 2 : 0) + (candidateRole ? 1 : 0);
+    }
+    function describe(fiber, rootIndex, renderer, order) {
       var name = nameOf(fiber);
       var props = fiber.memoizedProps || {};
-      if (name === 'SceneView' && inactiveScene(props.route)) return [];
+      var host = typeof fiber.type === 'string';
+      var testID = typeof props.testID === 'string' ? props.testID : undefined;
+      var label = typeof props.accessibilityLabel === 'string' ? props.accessibilityLabel :
+        (typeof props['aria-label'] === 'string' ? props['aria-label'] : undefined);
+      var interactive = !!(props.onPress || props.onPressIn || props.onLongPress || props.onClick || props.onTap);
+      var source = sourceOf(fiber);
+      var useful = !!name && (host || !!source || !!testID || !!label || interactive) &&
+        (host || !INTERNAL.has(name) || !!source);
+      return useful ? { fiber: fiber, rootIndex: rootIndex, renderer: renderer, order: order, priority: priorityOf(props) } : null;
+    }
+    // Breadth-first queues are advanced round-robin across roots. The scan is
+    // bounded independently from the output budget so a deep first scene or
+    // first renderer cannot hide a later tab bar before selection begins.
+    var queues = rootEntries.map(function(entry) { return [entry.fiber]; });
+    var entries = [];
+    var visited = 0;
+    var order = 0;
+    while (visited < VISIT_LIMIT && queues.some(function(queue) { return queue.length > 0; })) {
+      for (var rootIndex = 0; rootIndex < queues.length && visited < VISIT_LIMIT; rootIndex++) {
+        var queue = queues[rootIndex];
+        var fiber = queue.shift();
+        if (!fiber) continue;
+        visited++;
+        var props = fiber.memoizedProps || {};
+        if (nameOf(fiber) === 'SceneView' && inactiveScene(props.route)) continue;
+        var entry = describe(fiber, rootIndex, rootEntries[rootIndex].renderer, order++);
+        if (entry) entries.push(entry);
+        var child = fiber.child;
+        while (child) { queue.push(child); child = child.sibling; }
+      }
+    }
+    if (queues.some(function(queue) { return queue.length > 0; })) truncated = true;
+    function takeFair(pool, limit) {
+      var groups = rootEntries.map(function(_, rootIndex) {
+        return pool.filter(function(entry) { return entry.rootIndex === rootIndex; }).sort(function(left, right) {
+          return right.priority - left.priority || left.order - right.order;
+        });
+      });
+      var taken = [];
+      while (taken.length < limit && groups.some(function(group) { return group.length > 0; })) {
+        for (var groupIndex = 0; groupIndex < groups.length && taken.length < limit; groupIndex++) {
+          var next = groups[groupIndex].shift();
+          if (next) taken.push(next);
+        }
+      }
+      return taken;
+    }
+    var semanticEntries = entries.filter(function(entry) { return entry.priority > 0; });
+    var selected = takeFair(semanticEntries, MAX_NODES);
+    var selectedFibers = new Set(selected.map(function(entry) { return entry.fiber; }));
+    var contextualEntries = entries.filter(function(entry) { return !selectedFibers.has(entry.fiber); });
+    selected = selected.concat(takeFair(contextualEntries, Math.max(0, MAX_NODES - selected.length)));
+    if (selected.length < entries.length) truncated = true;
+    var nodesByFiber = new Map();
+    var prioritiesByNode = new Map();
+    selected.sort(function(left, right) { return left.order - right.order; }).forEach(function(entry) {
+      var fiber = entry.fiber;
+      var name = nameOf(fiber);
+      var props = fiber.memoizedProps || {};
       var host = typeof fiber.type === 'string';
       var path = componentPath(fiber);
       var testID = typeof props.testID === 'string' ? props.testID : undefined;
@@ -575,45 +702,45 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         (typeof props.role === 'string' ? props.role : undefined);
       var text = primitiveText(props.children);
       var interactive = !!(props.onPress || props.onPressIn || props.onLongPress || props.onClick || props.onTap);
-      var source = sourceOf(fiber);
-      var useful = !!name && (host || !!source || !!testID || !!label || interactive) &&
-        (host || !INTERNAL.has(name) || !!source);
-      var node = null;
-      if (useful) {
-        count++;
-        node = {
-          ref: 'rn:' + count,
-          role: role,
-          roleDescription: host ? name : 'React component',
-          label: label || (!host ? name : undefined),
-          value: text,
-          identifier: testID,
-          enabled: props.disabled !== true && props.accessibilityState?.disabled !== true,
-          hidden: props.accessibilityElementsHidden === true || props['aria-hidden'] === true,
-          actions: interactive ? ['press'] : undefined,
-          kind: host ? 'host' : 'component',
-          component: path.length ? path[path.length - 1] : (!host ? name : undefined),
-          componentPath: path.length ? path : undefined,
-          hostComponent: host ? name : undefined,
-          testID: testID,
-          text: text,
-          interactive: interactive,
-          sourceLocation: source
-        };
-        if (host) measure(node, fiber);
-      }
-      var children = [];
-      var child = fiber.child;
-      while (child && count < MAX_NODES) {
-        children = children.concat(walk(child, depth + 1));
-        child = child.sibling;
-      }
-      if (child) truncated = true;
-      if (!node) return children;
-      if (children.length) node.children = children;
-      return [node];
+      var node = {
+        ref: 'rn:' + (++count),
+        role: role,
+        roleDescription: host ? name : 'React component',
+        label: label || (!host ? name : undefined),
+        value: text,
+        identifier: testID,
+        enabled: props.disabled !== true && props.accessibilityState?.disabled !== true,
+        hidden: props.accessibilityElementsHidden === true || props['aria-hidden'] === true,
+        actions: interactive ? ['press'] : undefined,
+        kind: host ? 'host' : 'component',
+        component: path.length ? path[path.length - 1] : (!host ? name : undefined),
+        componentPath: path.length ? path : undefined,
+        hostComponent: host ? name : undefined,
+        testID: testID,
+        text: text,
+        interactive: interactive,
+        sourceLocation: sourceOf(fiber)
+      };
+      nodesByFiber.set(fiber, node);
+      prioritiesByNode.set(node, entry.priority);
+      if (host) measure(node, fiber, entry.renderer);
+    });
+    var projected = [];
+    selected.forEach(function(entry) {
+      var node = nodesByFiber.get(entry.fiber);
+      var parent = entry.fiber.return;
+      while (parent && !nodesByFiber.has(parent)) parent = parent.return;
+      var parentNode = parent && nodesByFiber.get(parent);
+      if (parentNode) {
+        if (!parentNode.children) parentNode.children = [];
+        parentNode.children.push(node);
+      } else projected.push(node);
+    });
+    function prioritize(nodes) {
+      nodes.sort(function(left, right) { return (prioritiesByNode.get(right) || 0) - (prioritiesByNode.get(left) || 0); });
+      nodes.forEach(function(node) { if (node.children) prioritize(node.children); });
     }
-    var projected = walk(rootFiber, 0);
+    prioritize(projected);
     await Promise.all(measureJobs);
     function union(node) {
       var frames = [];
@@ -634,6 +761,19 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       }
     }
     projected.forEach(union);
+    function pruneUnmeasuredNavigation(nodes) {
+      return nodes.filter(function(node) {
+        if (node.children) node.children = pruneUnmeasuredNavigation(node.children);
+        var label = typeof node.label === 'string' ? node.label : '';
+        var unmeasuredTab = !node.frame && /,\\s*tab,\\s*\\d+\\s+of\\s+\\d+$/i.test(label);
+        return !unmeasuredTab;
+      });
+    }
+    function projectedCount(nodes) {
+      return nodes.reduce(function(total, node) { return total + 1 + projectedCount(node.children || []); }, 0);
+    }
+    projected = pruneUnmeasuredNavigation(projected);
+    var outputNodeCount = projectedCount(projected) + 1;
     var root = {
       ref: 'rn:root', role: 'AXApplication', roleDescription: 'React Native screen', label: 'Screen',
       frame: { points: { x: 0, y: 0, width: WIDTH, height: HEIGHT }, normalized: { x: 0, y: 0, width: 1, height: 1 } },
@@ -647,19 +787,22 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         if (typeof expo === 'function') expo = expo();
         if (expo && expo.routes) return expo;
       } catch (_) {}
-      var found = null; var stack = [rootFiber];
-      while (stack.length && !found) {
-        var fiber = stack.pop(); if (!fiber) continue;
-        var n = nameOf(fiber); var state = fiber.memoizedState;
-        if (n === 'NavigationContainer' || n === 'NavigationContainerInner' || n === 'BaseNavigationContainer') {
-          while (state && !found) {
-            if (state.memoizedState && state.memoizedState.routes) found = state.memoizedState;
-            else if (state.queue && state.queue.lastRenderedState && state.queue.lastRenderedState.routes) found = state.queue.lastRenderedState;
-            state = state.next;
+      var found = null;
+      for (var rootIndex = 0; rootIndex < rootEntries.length && !found; rootIndex++) {
+        var stack = [rootEntries[rootIndex].fiber];
+        while (stack.length && !found) {
+          var fiber = stack.pop(); if (!fiber) continue;
+          var n = nameOf(fiber); var state = fiber.memoizedState;
+          if (n === 'NavigationContainer' || n === 'NavigationContainerInner' || n === 'BaseNavigationContainer') {
+            while (state && !found) {
+              if (state.memoizedState && state.memoizedState.routes) found = state.memoizedState;
+              else if (state.queue && state.queue.lastRenderedState && state.queue.lastRenderedState.routes) found = state.queue.lastRenderedState;
+              state = state.next;
+            }
+            if (!found && fiber.memoizedProps && fiber.memoizedProps.state?.routes) found = fiber.memoizedProps.state;
           }
-          if (!found && fiber.memoizedProps && fiber.memoizedProps.state?.routes) found = fiber.memoizedProps.state;
+          if (fiber.sibling) stack.push(fiber.sibling); if (fiber.child) stack.push(fiber.child);
         }
-        if (fiber.sibling) stack.push(fiber.sibling); if (fiber.child) stack.push(fiber.child);
       }
       return found;
     }
@@ -680,7 +823,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       return typeof route.name === 'string' && focus.path.indexOf(route.name) === -1;
     }
     var match = null; var matchDepth = -1; var fallbackMatch = null; var fallbackDepth = -1;
-    var fibers = [{ fiber: rootFiber, depth: 0 }];
+    var fibers = rootEntries.map(function(entry) { return { fiber: entry.fiber, depth: 0 }; });
     while (fibers.length) {
       var entry = fibers.pop(); var f = entry && entry.fiber; if (!f) continue;
       var depth = entry.depth; var p = f.memoizedProps || {}; var r = p.route;
@@ -696,15 +839,27 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
     }
     if (!match) match = fallbackMatch;
     function screenFiber(start) {
-      var queue = start ? [start] : []; var fallback = null;
-      while (queue.length) {
-        var f = queue.shift(); var n = nameOf(f); var source = sourceOf(f);
+      var queue = start ? [{ fiber: start, depth: 0 }] : []; var best = null; var bestScore = -Infinity; var inspected = 0;
+      while (queue.length && inspected < 2000) {
+        var entry = queue.shift(); var f = entry.fiber; var depth = entry.depth; var n = nameOf(f); var source = sourceOf(f); inspected++;
         if (n && typeof f.type !== 'string' && !INTERNAL.has(n)) {
-          if (source) return f; if (!fallback) fallback = f;
+          var props = f.memoizedProps || {};
+          var screenName = /(?:Screen|Page)$/i.test(n);
+          var screenSource = !!(source && /\\/screens?\\//i.test(source.file));
+          var screenTestID = typeof props.testID === 'string' && /screen/i.test(props.testID);
+          var generic = /^(?:View|AnimatedView|Animated\\(View\\)|ForwardRef|Memo|Fragment)$/i.test(n);
+          var navigationChrome = /(?:TabBar|TabItem|Navigator|NavigationContainer)/i.test(n) ||
+            !!(source && /(?:node_modules.*(?:bottom-tabs|tab-view)|\\/navigation\\/BottomTabsNavigator)/i.test(source.file));
+          if (!generic && !navigationChrome && (screenName || screenSource || screenTestID)) {
+            var score = (screenName ? 120 : 0) + (screenSource ? 80 : 0) +
+              (screenTestID ? 30 : 0) + (source ? 20 : 0) - depth * 0.01;
+            if (score > bestScore) { best = f; bestScore = score; }
+          }
         }
-        if (f.child) queue.push(f.child);
+        var child = f.child;
+        while (child) { queue.push({ fiber: child, depth: depth + 1 }); child = child.sibling; }
       }
-      return fallback;
+      return best;
     }
     var screen = screenFiber(match);
     var confidence = screen && match ? 'exact' : 'none';
@@ -719,13 +874,13 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       }
       var inferred = best(root, 0); if (inferred) {
         confidence = 'inferred';
-        return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: count + 1, truncated: truncated,
+        return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated,
           screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: inferred.node.component,
             componentPath: inferred.node.componentPath, testID: inferred.node.testID, sourceLocation: inferred.node.sourceLocation, confidence: confidence } };
       }
     }
     var screenProps = screen && screen.memoizedProps || {};
-    return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: count + 1, truncated: truncated,
+    return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated,
       screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: screen && nameOf(screen),
         componentPath: screen && componentPath(screen), testID: typeof screenProps.testID === 'string' ? screenProps.testID : undefined,
         sourceLocation: screen && sourceOf(screen), confidence: confidence } };
