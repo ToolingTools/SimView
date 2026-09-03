@@ -1,6 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import { type ElementTreeOutput, parseDeviceDescription } from "@simview/contracts";
-import { filterDeviceList, formatElementTree } from "../packages/cli/src/index";
+import {
+  filterDeviceList,
+  formatElementTree,
+  formatEntrypointError,
+} from "../packages/cli/src/index";
+
+describe("CLI entrypoint errors", () => {
+  test("keeps JSON errors for commands and plain diagnostics for the MCP adapter", () => {
+    expect(formatEntrypointError(["bun", "simview", "devices"], new Error("failed"))).toBe(
+      '{"error":"failed"}',
+    );
+    expect(formatEntrypointError(["bun", "simview", "mcp"], new Error("failed"))).toBe("failed");
+  });
+});
 
 describe("CLI device list filtering", () => {
   const iosCapabilities = {

@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
-import { link, lstat, mkdir, open, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createConnection, type Socket } from "node:net";
 import { join } from "node:path";
 import {
@@ -201,45 +201,51 @@ async function startupLock(identity: string, signal: AbortSignal): Promise<() =>
     startedAt,
     claim: randomBytes(16).toString("hex"),
   });
+  const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
+  await writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
   const deadline = Date.now() + MCP_STARTUP_TIMEOUT_MS;
-  while (!signal.aborted && Date.now() < deadline) {
-    try {
-      const file = await open(path, "wx", 0o600);
+  try {
+    while (!signal.aborted && Date.now() < deadline) {
       try {
-        await file.writeFile(contents);
-      } finally {
-        await file.close();
-      }
-      return async () => {
-        if ((await readFile(path, "utf8").catch(() => "")) === contents)
-          await unlink(path).catch(() => {});
-      };
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      let text: string;
-      try {
-        await assertPrivatePath(path, "file");
-        text = await readFile(path, "utf8");
-      } catch (lockError) {
-        // Another launcher can release the lock between open, lstat and read.
-        if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw lockError;
-      }
-      try {
-        const owner = z
-          .object({ pid: z.number().int().positive(), startedAt: z.string() })
-          .parse(JSON.parse(text));
+        // Publish only complete lock contents without replacing another launcher's claim.
+        await link(temporary, path);
+        return async () => {
+          if ((await readFile(path, "utf8").catch(() => "")) === contents)
+            await unlink(path).catch(() => {});
+        };
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        let text: string;
+        try {
+          await assertPrivatePath(path, "file");
+          text = await readFile(path, "utf8");
+        } catch (lockError) {
+          // Another launcher can release the lock between link, lstat and read.
+          if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
+          throw lockError;
+        }
+        let owner: { pid: number; startedAt: string } | undefined;
+        try {
+          owner = z
+            .object({ pid: z.number().int().positive(), startedAt: z.string() })
+            .parse(JSON.parse(text));
+        } catch {
+          // Atomic publication means malformed lock contents cannot belong to a live starter.
+          if ((await readFile(path, "utf8").catch(() => "")) === text)
+            await unlink(path).catch(() => {});
+        }
         if (
+          owner &&
           (await processSnapshot([owner.pid])).get(owner.pid)?.startedAt !== owner.startedAt &&
-          (await readFile(path, "utf8")) === text
+          (await readFile(path, "utf8").catch(() => "")) === text
         ) {
           await unlink(path).catch(() => {});
         }
-      } catch {
-        /* A starter may still be writing its lock. */
+        await Bun.sleep(25);
       }
-      await Bun.sleep(25);
     }
+  } finally {
+    await unlink(temporary).catch(() => {});
   }
   throw new Error(signal.aborted ? "MCP connection cancelled" : "MCP daemon startup timed out");
 }

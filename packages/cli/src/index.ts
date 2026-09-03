@@ -13,11 +13,16 @@ export async function run(argv = process.argv): Promise<void> {
   }
 }
 
+export function formatEntrypointError(argv: string[], error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return argv[2] === "mcp" ? message : JSON.stringify({ error: message });
+}
+
 if (import.meta.main) {
   try {
     await run();
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    console.error(formatEntrypointError(process.argv, error));
     process.exitCode = 1;
   }
 }

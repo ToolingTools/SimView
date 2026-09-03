@@ -272,6 +272,28 @@ describe("MCP startup and shutdown coordination", () => {
     );
   }, 20_000);
 
+  test("reclaims a malformed startup lock", async () => {
+    const configuration = await adapterConfiguration();
+    const own = (await processSnapshot([process.pid])).get(process.pid);
+    if (!own) throw new Error("Missing test owner");
+    const identity = randomBytes(10).toString("hex");
+    const lock = mcpDaemonPaths(identity).lock;
+    await ensureMcpRegistry();
+    await writeFile(lock, "", { mode: 0o600 });
+    const socket = await acquireMcpDaemon({
+      ...configuration,
+      identity,
+      owners: [{ pid: process.pid, startedAt: own.startedAt, kind: "agent" }],
+      signal: new AbortController().signal,
+    });
+    try {
+      expect(await Bun.file(lock).exists()).toBe(false);
+    } finally {
+      socket.destroy();
+    }
+    await eventually(async () => (await readMcpRecord(identity)) === undefined);
+  }, 20_000);
+
   test("bounds cleanup even when a session close never resolves", async () => {
     const configuration = await adapterConfiguration();
     const own = (await processSnapshot([process.pid])).get(process.pid);
