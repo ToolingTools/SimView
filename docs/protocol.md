@@ -253,6 +253,16 @@ must not assume an identifier fragment is a complete accessible name. When a
 later destination-verification snapshot proves the native tree settled, its
 revision and fallback diagnostics supersede an earlier embedded post-action
 timeout in the returned observation receipt.
+
+Raw MCP input tools return `accepted`, `inputDispatched`, `safeToContinue`,
+`retryable`, `retryInput`, `recoveryAllowed`, and `code` on every runtime path.
+`accepted: true` preserves its original meaning: SimView submitted and
+acknowledged the action. A post-submission transport error is intentionally
+reported as possibly dispatched with `retryInput: false`; clients reconnect and
+observe, and never replay that action. `press_key` uses the same receipt and
+supports the names advertised by `get_simview_state` under
+`device.capabilities.input.keys`. Current iOS devices include Return and Delete;
+Android devices expose an empty list.
 Destination verification is optional and is not required on every tap in an
 entity-sensitive workflow. Generic section/menu navigation relies on the stable
 semantic post-action observation. A verifier is appropriate only when the

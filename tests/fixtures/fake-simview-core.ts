@@ -34,6 +34,7 @@ const decoders = new WeakMap<object, FrameDecoder>();
 let lastDisconnect = new Date();
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let shuttingDown = false;
+let hasAuthenticated = false;
 
 const listener = Bun.listen({
   unix: socketPath,
@@ -56,6 +57,7 @@ const listener = Bun.listen({
           };
           if (params.token !== token) process.exit(3);
           state.authenticated = true;
+          hasAuthenticated = true;
           state.codec = params.codecs[0] ?? "h264";
           cancelIdleShutdown();
           respond(socket, request.id, {
@@ -114,11 +116,14 @@ function cancelIdleShutdown(): void {
 function scheduleIdleShutdown(): void {
   cancelIdleShutdown();
   if ([...states.values()].some((item) => item.authenticated)) return;
-  const remaining = Math.max(0, lastDisconnect.getTime() + idleTimeoutMilliseconds - Date.now());
+  const timeout = hasAuthenticated
+    ? idleTimeoutMilliseconds
+    : Math.max(10_000, idleTimeoutMilliseconds);
+  const remaining = Math.max(0, lastDisconnect.getTime() + timeout - Date.now());
   idleTimer = setTimeout(() => {
     idleTimer = undefined;
     if ([...states.values()].some((item) => item.authenticated)) return;
-    const deadline = lastDisconnect.getTime() + idleTimeoutMilliseconds;
+    const deadline = lastDisconnect.getTime() + timeout;
     if (Date.now() < deadline) {
       scheduleIdleShutdown();
       return;

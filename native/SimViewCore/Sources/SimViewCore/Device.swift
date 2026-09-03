@@ -56,6 +56,10 @@ struct DeviceDescription: Sendable {
                     "rawTouch": true,
                     "multiTouch": HIDInjector.multiTouchAvailable,
                     "text": "unicode",
+                    "keys": [
+                        "delete", "return", "enter", "tab", "escape", "arrow-up", "arrow-down",
+                        "arrow-left", "arrow-right", "select-all",
+                    ],
                     "buttons": ["home", "lock", "volume-up", "volume-down", "action"],
                 ],
                 "orientation": true,
@@ -74,6 +78,7 @@ struct DeviceDescription: Sendable {
                     "rawTouch": false,
                     "multiTouch": false,
                     "text": "ascii",
+                    "keys": [],
                     "buttons": ["back", "home", "overview", "lock", "volume-up", "volume-down"],
                 ],
                 "orientation": kind == .emulator,

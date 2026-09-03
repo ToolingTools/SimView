@@ -909,6 +909,42 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(preferredCodec([]), "mjpeg")
     }
 
+    func testDeviceCapabilitiesAdvertiseNamedKeysOnlyForIOS() throws {
+        let ios = DeviceDescription(
+            id: "ios:simulator",
+            platform: .ios,
+            kind: .simulator,
+            nativeIdentifier: "simulator",
+            name: "iPhone",
+            state: "ready",
+            runtime: "iOS",
+            available: true,
+            pixelWidth: nil,
+            pixelHeight: nil,
+            metadata: [:]
+        )
+        let iosInput = try XCTUnwrap(ios.capabilities["input"] as? [String: Any])
+        let iosKeys = try XCTUnwrap(iosInput["keys"] as? [String])
+        XCTAssertTrue(iosKeys.contains("return"))
+        XCTAssertTrue(iosKeys.contains("delete"))
+
+        let android = DeviceDescription(
+            id: "android:emulator-5554",
+            platform: .android,
+            kind: .emulator,
+            nativeIdentifier: "emulator-5554",
+            name: "Pixel",
+            state: "ready",
+            runtime: "Android",
+            available: true,
+            pixelWidth: nil,
+            pixelHeight: nil,
+            metadata: [:]
+        )
+        let androidInput = try XCTUnwrap(android.capabilities["input"] as? [String: Any])
+        XCTAssertEqual(androidInput["keys"] as? [String], [])
+    }
+
     func testADBDeviceParserRetainsTransportStatesAndAttributes() {
         let records = ADBClient.parseDevices(
             """

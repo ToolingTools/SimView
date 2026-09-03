@@ -91,7 +91,12 @@ const INTERNAL_NAMES = new Set([
   "ThemeProvider",
 ]);
 
+class StaleMetroConnection extends Error {}
+
 export class MetroInspector {
+  #generation = 0;
+  #connectionGeneration = 0;
+  #connecting: { key: string; generation: number; promise: Promise<InspectorSession> } | undefined;
   #session: InspectorSession | undefined;
   #targetKey: string | undefined;
   #selected: SelectedTarget | undefined;
@@ -128,6 +133,8 @@ export class MetroInspector {
       }
     | undefined
   > {
+    const generation = this.#generation;
+    let activeSession: InspectorSession | undefined;
     try {
       if (this.#negativeDiscovery && this.#negativeDiscovery.deviceId !== device.id) {
         this.#negativeDiscovery = undefined;
@@ -144,6 +151,7 @@ export class MetroInspector {
           METRO_DISCOVERY_PORTS.map((port) => this.#status(METRO_HOST, port).catch(() => null)),
         );
         const servers = await this.#scan(METRO_HOST);
+        if (generation !== this.#generation) return undefined;
         selected = selectMetroTarget(servers, device);
         if (!selected) {
           let detail: ElementFallbackDetail;
@@ -154,6 +162,7 @@ export class MetroInspector {
           } else {
             detail = "metro-unreachable";
           }
+          if (generation !== this.#generation) return undefined;
           this.#negativeDiscovery = {
             deviceId: device.id,
             expiresAt: this.#now() + NEGATIVE_DISCOVERY_TTL_MS,
@@ -164,6 +173,8 @@ export class MetroInspector {
         }
       }
       const session = await this.#connect(selected);
+      activeSession = session;
+      if (generation !== this.#generation) return undefined;
       this.#deviceId = device.id;
       const measurementViewport = metroMeasurementViewport(device, accessibility.screen);
       const raw = await evaluateInspection(
@@ -172,6 +183,7 @@ export class MetroInspector {
         measurementViewport.height,
         maxNodes,
       );
+      if (generation !== this.#generation || session !== this.#session) return undefined;
       if (!raw?.root) {
         this.#lastError = "The React Native inspector returned no Fiber root";
         this.#fallbackReason = "metro-fiber-unavailable";
@@ -180,6 +192,7 @@ export class MetroInspector {
       }
       scaleMetroPointFrames(raw.root, measurementViewport.scaleX, measurementViewport.scaleY);
       const projectRoot = await symbolicateTree(raw, selected.server, this.#projectRoot);
+      if (generation !== this.#generation || session !== this.#session) return undefined;
 
       const capturedAt = new Date().toISOString();
       const viewport = accessibility.screen;
@@ -237,6 +250,12 @@ export class MetroInspector {
       this.#negativeDiscovery = undefined;
       return { snapshot, screenContext };
     } catch (error) {
+      if (
+        error instanceof StaleMetroConnection ||
+        generation !== this.#generation ||
+        (activeSession && activeSession !== this.#session)
+      )
+        return undefined;
       this.#lastError = error instanceof Error ? error.message : String(error);
       this.#fallbackReason = "metro-inspection-failed";
       this.#fallbackDetail = "metro-connect-or-evaluate-failed";
@@ -259,6 +278,7 @@ export class MetroInspector {
   }
 
   close(): void {
+    this.#generation += 1;
     this.#disconnectSession();
     this.#negativeDiscovery = undefined;
     this.#lastError = undefined;
@@ -269,16 +289,35 @@ export class MetroInspector {
   async #connect(selected: SelectedTarget): Promise<InspectorSession> {
     const targetKey = `${selected.server.host}:${selected.server.port}:${selected.target.id}`;
     if (this.#session?.isConnected && this.#targetKey === targetKey) return this.#session;
+    if (this.#connecting?.key === targetKey && this.#connecting.generation === this.#generation)
+      return this.#connecting.promise;
     this.#disconnectSession();
     this.#negativeDiscovery = undefined;
-
-    const target = supportsMultipleDebuggers(selected.target)
-      ? selected.target
-      : ((await existingProxyTarget(selected)) ?? selected.target);
-    this.#session = await this.#connectSession(target);
-    this.#targetKey = targetKey;
-    this.#selected = selected;
-    return this.#session;
+    const generation = this.#generation;
+    const connectionGeneration = this.#connectionGeneration;
+    const current = () =>
+      generation === this.#generation && connectionGeneration === this.#connectionGeneration;
+    const promise = (async () => {
+      const target = supportsMultipleDebuggers(selected.target)
+        ? selected.target
+        : ((await existingProxyTarget(selected)) ?? selected.target);
+      if (!current()) throw new StaleMetroConnection();
+      const session = await this.#connectSession(target);
+      if (!current()) {
+        session.close();
+        throw new StaleMetroConnection();
+      }
+      this.#session = session;
+      this.#targetKey = targetKey;
+      this.#selected = selected;
+      return session;
+    })();
+    this.#connecting = { key: targetKey, generation, promise };
+    try {
+      return await promise;
+    } finally {
+      if (this.#connecting?.promise === promise) this.#connecting = undefined;
+    }
   }
 
   #setUnavailable(detail: ElementFallbackDetail): void {
@@ -288,6 +327,8 @@ export class MetroInspector {
   }
 
   #disconnectSession(): void {
+    this.#connectionGeneration += 1;
+    this.#connecting = undefined;
     this.#session?.close();
     this.#session = undefined;
     this.#targetKey = undefined;

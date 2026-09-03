@@ -350,6 +350,10 @@ describe("app helpers", () => {
     expect(claimFullscreenRequest(gate, undefined)).toBe(false);
     expect(gate.claimed).toBe(false);
     expect(
+      claimFullscreenRequest(gate, { displayMode: "inline", availableDisplayModes: ["inline"] }),
+    ).toBe(false);
+    expect(gate.claimed).toBe(false);
+    expect(
       claimFullscreenRequest(gate, {
         displayMode: "inline",
         availableDisplayModes: ["inline", "fullscreen"],

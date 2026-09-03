@@ -11,6 +11,7 @@ import {
   type ElementTreePage,
   elementTreeOutputSchema,
   elementTreePageSchema,
+  inputReceiptSchema,
   inspectPointOutputSchema,
   previewPacketBatchSchema,
   type SaveReviewImagesOutput,
@@ -91,7 +92,34 @@ type PointerInput = {
   x: number;
   y: number;
 };
-type StartupPhase = "connecting" | "waiting-for-frame" | "ready" | "error";
+type StartupPhase = "connecting" | "waiting-for-frame" | "ready" | "error" | "disconnected";
+type StartupCopy = { title: string; message: string };
+
+function startupCopy(phase: StartupPhase, error: string, deviceName?: string): StartupCopy {
+  switch (phase) {
+    case "disconnected":
+      return {
+        title: "Review disconnected",
+        message: "Reconnect SimView from your agent to start a new review.",
+      };
+    case "error":
+      return {
+        title: "Device unavailable",
+        message: `${error} Choose an available device from the device menu.`,
+      };
+    case "waiting-for-frame":
+      return {
+        title: "Starting live preview",
+        message: `Waiting for the first frame${deviceName ? ` from ${deviceName}` : ""}…`,
+      };
+    case "connecting":
+    case "ready":
+      return {
+        title: "Connecting to device",
+        message: "Finding an available device and starting capture…",
+      };
+  }
+}
 
 declare global {
   interface Window {
@@ -154,6 +182,7 @@ function SimView() {
   const [devicesLoading, setDevicesLoading] = useState(false);
   const [switchingDevice, setSwitchingDevice] = useState<string>();
   const [embedded, setEmbedded] = useState(false);
+  const [openingBrowser, setOpeningBrowser] = useState(false);
   const [discardConfirmOpen, setDiscardConfirmOpen] = useState(false);
   const [discardingAnnotations, setDiscardingAnnotations] = useState(false);
   const [typeTextOpen, setTypeTextOpen] = useState(false);
@@ -216,7 +245,9 @@ function SimView() {
     setEmbedded(true);
     bridge.onhostcontextchanged = (update) => {
       setHostContext((current) => ({ ...(current ?? {}), ...update }));
+      if (bridgeConnectedRef.current && connectedForFullscreenRef.current) void enterFullscreen();
     };
+    bridge.onclose = markDisconnected;
     bridge.ontoolresult = (result) => {
       const nextState = parseSessionState(result.structuredContent);
       if (nextState) {
@@ -246,9 +277,14 @@ function SimView() {
       });
   }, []);
 
-  async function enterFullscreen() {
+  async function enterFullscreen(manual = false) {
     const context = bridge.getHostContext();
-    if (!claimFullscreenRequest(fullscreenRequestGateRef.current, context)) return;
+    if (
+      manual
+        ? !context?.availableDisplayModes?.includes("fullscreen")
+        : !claimFullscreenRequest(fullscreenRequestGateRef.current, context)
+    )
+      return;
     try {
       const result = await bridge.requestDisplayMode({ mode: "fullscreen" });
       setHostContext((current) => ({
@@ -259,6 +295,26 @@ function SimView() {
       if (result.mode !== "fullscreen") show(`Host kept SimView in ${result.mode} mode`);
     } catch (error) {
       show(`Unable to enter fullscreen: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  function markDisconnected() {
+    bridgeConnectedRef.current = false;
+    connectedForFullscreenRef.current = false;
+    setState((current) => ({ ...current, connected: false }));
+    setStartupPhase("disconnected");
+    elementTreeAbortRef.current?.abort();
+  }
+
+  async function openBrowserPreview() {
+    setOpeningBrowser(true);
+    try {
+      const result = await bridge.callServerTool({ name: "app_open_browser", arguments: {} });
+      if (result.isError) throw new Error("The review could not be opened");
+    } catch (error) {
+      show(`Unable to open browser: ${errorMessage(error)}`);
+    } finally {
+      setOpeningBrowser(false);
     }
   }
 
@@ -353,7 +409,9 @@ function SimView() {
     socket.onopen = () => socket.send(JSON.stringify({ type: "authenticate", token }));
     socket.onmessage = (event) => consumeFrame(new Uint8Array(event.data as ArrayBuffer));
     socket.onerror = () => show("Preview stream disconnected");
+    socket.onclose = markDisconnected;
     return () => {
+      socket.onclose = null;
       socket.close();
       decoderRef.current?.close();
       decoderRef.current = undefined;
@@ -391,6 +449,10 @@ function SimView() {
             { signal: controller.signal },
           );
           if (stopped) return;
+          if (result.isError) {
+            markDisconnected();
+            return;
+          }
           const batch = previewPacketBatchSchema.parse(result.structuredContent);
           if (batch.reset && batch.configuration) {
             consumeFrame(streamMessage(0x10, decodeBase64(batch.configuration)));
@@ -406,6 +468,14 @@ function SimView() {
           if (!reportedError) {
             show(`Preview bridge interrupted: ${errorMessage(error)}`);
             reportedError = true;
+          }
+          if (
+            /connection closed|not connected|review is closed|transport.*closed/i.test(
+              errorMessage(error),
+            )
+          ) {
+            markDisconnected();
+            return;
           }
           await pause(250);
         }
@@ -702,13 +772,17 @@ function SimView() {
 
   async function relayInput(method: string, params: unknown) {
     if (embedded) {
-      await bridge.callServerTool({
+      const result = await bridge.callServerTool({
         name: "device_input",
         arguments: {
           method,
           params: params as Record<string, unknown>,
         },
       });
+      const receipt = inputReceiptSchema.parse(result.structuredContent);
+      if (!receipt.accepted) {
+        throw new Error(receipt.message ?? `Device input failed (${receipt.code})`);
+      }
       return;
     }
     if (!state.relayOrigin || !token) return;
@@ -717,7 +791,10 @@ function SimView() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ method, params }),
     });
-    if (!response.ok) throw new Error(`Device input failed (${response.status})`);
+    const receipt = inputReceiptSchema.parse(await response.json());
+    if (!response.ok || !receipt.accepted) {
+      throw new Error(receipt.message ?? `Device input failed (${receipt.code})`);
+    }
   }
 
   async function refreshSelectedDeviceState() {
@@ -1685,6 +1762,7 @@ function SimView() {
   else if (selectedPlatform === "android") sceneProviderLabel = "UIAutomator";
   else if (state.iosAccessibility?.status === "enhanced-ready") sceneProviderLabel = "XCTest";
   else sceneProviderLabel = uiContext?.status.connected ? "UIKit + AX" : "Simulator AX";
+  const startup = startupCopy(startupPhase, startupError, state.device?.name);
 
   return (
     <main
@@ -1859,6 +1937,32 @@ function SimView() {
           </button>
         </fieldset>
         <div class="top-actions">
+          {embedded && (
+            <button
+              type="button"
+              class="tool-button"
+              title="Open in browser"
+              aria-label="Open in browser"
+              disabled={!state.connected || openingBrowser}
+              onClick={() => void openBrowserPreview()}
+            >
+              <Icon name="browser" />
+            </button>
+          )}
+          {embedded &&
+            hostContext?.availableDisplayModes?.includes("fullscreen") &&
+            hostContext.displayMode !== "fullscreen" && (
+              <button
+                type="button"
+                class="tool-button"
+                title="Enter fullscreen"
+                aria-label="Enter fullscreen"
+                disabled={!state.connected}
+                onClick={() => void enterFullscreen(true)}
+              >
+                <Icon name="expand" />
+              </button>
+            )}
           <button
             type="button"
             class="tool-button sidebar-toggle"
@@ -1935,21 +2039,11 @@ function SimView() {
             )}
             {startupPhase !== "ready" && (
               <div class={`empty startup ${startupPhase === "error" ? "startup-error" : ""}`}>
-                {startupPhase !== "error" && <span class="startup-spinner" aria-hidden="true" />}
-                <strong>
-                  {startupPhase === "error"
-                    ? "Device unavailable"
-                    : startupPhase === "waiting-for-frame"
-                      ? "Starting live preview"
-                      : "Connecting to device"}
-                </strong>
-                <span>
-                  {startupPhase === "error"
-                    ? `${startupError} Choose an available device from the device menu.`
-                    : startupPhase === "waiting-for-frame"
-                      ? `Waiting for the first frame${state.device?.name ? ` from ${state.device.name}` : ""}…`
-                      : "Finding an available device and starting capture…"}
-                </span>
+                {startupPhase !== "error" && startupPhase !== "disconnected" && (
+                  <span class="startup-spinner" aria-hidden="true" />
+                )}
+                <strong>{startup.title}</strong>
+                <span>{startup.message}</span>
               </div>
             )}
             {visibleDraftSelection && (
@@ -2709,6 +2803,13 @@ function croppedAnnotationScreenshot(
 
 function iconPaths(name: string): ComponentChildren {
   switch (name) {
+    case "browser":
+      return (
+        <>
+          <rect x="3" y="4" width="18" height="16" rx="2" />
+          <path d="M3 9h18M6 6.5h1M9 6.5h1" />
+        </>
+      );
     case "cursor":
       return (
         <>

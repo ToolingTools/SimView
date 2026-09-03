@@ -15,6 +15,7 @@ final class ClientConnection: Hashable, @unchecked Sendable {
     private(set) var authenticated = false
     private(set) var codec = "h264"
     private(set) var previewEnabled = false
+    private(set) var observationMode = "semantic"
     private weak var server: SimViewServer?
     private var decoder = FrameDecoder()
     private var source: DispatchSourceRead?
@@ -52,6 +53,10 @@ final class ClientConnection: Hashable, @unchecked Sendable {
         authenticated = true
         authenticationTimeout?.cancel()
         authenticationTimeout = nil
+    }
+
+    func setObservationMode(_ mode: String) {
+        observationMode = mode
     }
 
     func setPreviewEnabled(_ enabled: Bool) {
@@ -179,6 +184,7 @@ final class SimViewServer: @unchecked Sendable {
     private var signalSources: [DispatchSourceSignal] = []
     private var connections = Set<ClientConnection>()
     private var lastDisconnect = Date()
+    private var hasAuthenticatedClient = false
     private var selectedDevice: DeviceDescription?
     private let capture = FrameCapture()
     private let hid = HIDInjector()
@@ -295,6 +301,7 @@ final class SimViewServer: @unchecked Sendable {
                     request.params["codecs"]?.arrayValue?.compactMap(\.stringValue)
                     ?? ["mjpeg"]
                 connection.authenticate(codec: preferredCodec(codecs))
+                hasAuthenticatedClient = true
                 let configuredForAndroid = preferredDeviceID?.hasPrefix("android:") == true
                 sendResult(
                     [
@@ -345,15 +352,19 @@ final class SimViewServer: @unchecked Sendable {
         let wasAuthenticated = connection.authenticated
         connections.remove(connection)
         connection.close()
-        if wasAuthenticated, connection.codec == "mjpeg",
-            !connections.contains(where: { $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg" }),
-            androidAgent != nil
-        {
-            androidCapture?.stop()
-        }
         if wasAuthenticated, !connections.contains(where: \.authenticated) {
             lastDisconnect = Date()
+            if idleTimeout <= 0 { shutdown(exitCode: 0) }
             stopCapture()
+        } else if wasAuthenticated {
+            if let device = selectedDevice { try? reconcileCaptureDemand(for: device) }
+            if connection.codec == "mjpeg",
+                !connections.contains(where: {
+                    $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg"
+                }), androidAgent != nil
+            {
+                androidCapture?.stop()
+            }
         }
     }
 
@@ -392,30 +403,21 @@ final class SimViewServer: @unchecked Sendable {
             sendResult(value, requestID: request.id, to: connection)
         case "capture.start":
             let device = try selectDevice(request.deviceIdentifier)
-            observationMode = request.params["observationMode"]?.stringValue ?? "hybrid"
-            observation.setImagePreparationPolicy(
-                observationMode == "semantic" ? .onDemand : .eagerOnChange
-            )
-            if observationMode == "hybrid" || device.platform == .android {
-                try startCapture(device)
-            } else {
-                if captureActive { stopCapture() }
-                selectedDevice = device
-                accessibilityObservation.reset()
-                startIOSAccessibilityObservation(for: device)
-            }
+            let requestedMode = request.params["observationMode"]?.stringValue ?? "hybrid"
+            connection.setObservationMode(requestedMode)
+            try reconcileCaptureDemand(for: device)
             sendResult(
                 [
                     "device": deviceResponseDictionary(device),
                     "codec": connection.codec,
                     "frameRate": device.platform == .android && androidAgent == nil ? 4 : 60,
-                    "observationMode": observationMode,
+                    "observationMode": requestedMode,
                 ], requestID: request.id, to: connection)
         case "capture.preview":
             let enabled = request.params["enabled"] == .bool(true)
             connection.setPreviewEnabled(enabled)
+            if let device = selectedDevice { try reconcileCaptureDemand(for: device) }
             if enabled {
-                if !captureActive, let device = selectedDevice { try startCapture(device) }
                 if connection.codec == "h264" {
                     bootstrapH264Preview(for: connection)
                 }
@@ -932,6 +934,26 @@ final class SimViewServer: @unchecked Sendable {
             stopCapture()
             throw error
         }
+    }
+
+    private func reconcileCaptureDemand(for device: DeviceDescription) throws {
+        observationMode =
+            connections.contains(where: { $0.authenticated && $0.observationMode == "hybrid" })
+            ? "hybrid" : "semantic"
+        observation.setImagePreparationPolicy(
+            observationMode == "semantic" ? .onDemand : .eagerOnChange
+        )
+        let previewRequired = connections.contains(where: {
+            $0.authenticated && $0.previewEnabled
+        })
+        if observationMode == "hybrid" || device.platform == .android || previewRequired {
+            try startCapture(device)
+            return
+        }
+        if captureActive { stopCapture() }
+        selectedDevice = device
+        accessibilityObservation.reset()
+        startIOSAccessibilityObservation(for: device)
     }
 
     private func stopCapture() {
@@ -1666,8 +1688,9 @@ final class SimViewServer: @unchecked Sendable {
             if let parentPID, parentPID > 1, kill(parentPID, 0) != 0 {
                 self.shutdown(exitCode: 0)
             }
+            let timeout = self.hasAuthenticatedClient ? self.idleTimeout : max(10, self.idleTimeout)
             if !self.connections.contains(where: \.authenticated),
-                Date().timeIntervalSince(self.lastDisconnect) >= self.idleTimeout
+                Date().timeIntervalSince(self.lastDisconnect) >= timeout
             {
                 self.shutdown(exitCode: 0)
             }
@@ -1687,6 +1710,7 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func shutdown(exitCode: Int32) -> Never {
+        DispatchQueue.global().asyncAfter(deadline: .now() + 5) { exit(1) }
         probe.close()
         stopCapture()
         listener?.cancel()

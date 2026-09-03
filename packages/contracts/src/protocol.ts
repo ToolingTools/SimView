@@ -52,6 +52,24 @@ export const deviceButtonSchema = z.enum([
 ]);
 export type DeviceButton = z.infer<typeof deviceButtonSchema>;
 
+export const inputKeyNames = [
+  "delete",
+  "return",
+  "enter",
+  "tab",
+  "escape",
+  "arrow-up",
+  "arrow-down",
+  "arrow-left",
+  "arrow-right",
+  "select-all",
+] as const;
+export const inputKeySchema = z.enum(inputKeyNames);
+export type InputKey = z.infer<typeof inputKeySchema>;
+
+export const inputKeyModifierSchema = z.enum(["command", "shift", "option", "control"]);
+export type InputKeyModifier = z.infer<typeof inputKeyModifierSchema>;
+
 export const deviceCapabilitiesSchema = z.object({
   capture: z.object({
     h264: z.boolean(),
@@ -63,6 +81,7 @@ export const deviceCapabilitiesSchema = z.object({
     rawTouch: z.boolean().optional(),
     multiTouch: z.boolean().optional(),
     text: z.enum(["none", "ascii", "unicode"]),
+    keys: z.array(inputKeySchema).optional(),
     buttons: z.array(deviceButtonSchema),
   }),
   orientation: z.boolean(),
@@ -79,6 +98,7 @@ const iosCapabilities: DeviceCapabilities = {
     rawTouch: true,
     multiTouch: false,
     text: "unicode",
+    keys: [...inputKeyNames],
     buttons: ["home", "lock", "volume-up", "volume-down", "action"],
   },
   orientation: true,
@@ -407,22 +427,8 @@ export const methodSchemas = {
   },
   "input.key": {
     params: z.object({
-      key: z.enum([
-        "delete",
-        "return",
-        "enter",
-        "tab",
-        "escape",
-        "arrow-up",
-        "arrow-down",
-        "arrow-left",
-        "arrow-right",
-        "select-all",
-      ]),
-      modifiers: z
-        .array(z.enum(["command", "shift", "option", "control"]))
-        .max(4)
-        .optional(),
+      key: inputKeySchema,
+      modifiers: z.array(inputKeyModifierSchema).max(4).optional(),
       repeat: z.number().int().min(1).max(100).optional(),
     }),
     result: acceptedResultSchema,

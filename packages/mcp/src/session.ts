@@ -24,7 +24,10 @@ import {
   type ElementFallbackDetail,
   type ElementFallbackReason,
   type ElementTreeOutput,
+  type InputReceipt,
   type IOSAccessibilityStatus,
+  inputReceiptSchema,
+  type McpConnectionContext,
   normalizedPointSchema,
   normalizeSemanticSearchText,
   relayAuthenticationSchema,
@@ -155,6 +158,56 @@ export type NativeTapRecovery = {
   coordinateFallback?: NativeCoordinateFallback;
 };
 
+type RejectedInputReceiptOptions = {
+  code: string;
+  message: string;
+  inputDispatched: boolean;
+  retryable: boolean;
+  recoveryAllowed: boolean;
+  recoveryAction?: InputReceipt["recoveryAction"];
+};
+
+class InputDispatchFailure extends Error {
+  constructor(readonly receipt: InputReceipt) {
+    super(receipt.message ?? "Device input failed");
+    this.name = "InputDispatchFailure";
+  }
+}
+
+export function acceptedInputReceipt(result: Record<string, unknown>): InputReceipt {
+  return inputReceiptSchema.parse({
+    ...result,
+    accepted: true,
+    inputDispatched: true,
+    safeToContinue: true,
+    retryable: false,
+    retryInput: false,
+    recoveryAllowed: false,
+    code: "input_accepted",
+  });
+}
+
+export function rejectedInputReceipt(options: RejectedInputReceiptOptions): InputReceipt {
+  return inputReceiptSchema.parse({
+    accepted: false,
+    safeToContinue: false,
+    retryInput: false,
+    ...options,
+  });
+}
+
+export function inputReceiptFromError(error: unknown): InputReceipt {
+  if (error instanceof InputDispatchFailure) return error.receipt;
+  return rejectedInputReceipt({
+    code: "input_dispatch_uncertain",
+    message: error instanceof Error ? error.message : "Device input transport failed",
+    inputDispatched: true,
+    retryable: false,
+    recoveryAllowed: true,
+    recoveryAction: "reconnect_then_observe",
+  });
+}
+
 export function nativeTapRecovery(resolution: NativeTapResolution): NativeTapRecovery {
   switch (resolution.code) {
     case "target_offscreen":
@@ -282,7 +335,46 @@ export class SimViewSession {
   #reviewImageDirectories = new Set<string>();
   #closePromise: Promise<void> | undefined = undefined;
   #connectionGeneration = 0;
-  #metroInspector = new MetroInspector();
+  #metroInspector: MetroInspector;
+  #closed = false;
+  #connectionTail: Promise<void> = Promise.resolve();
+  readonly appRoot: string;
+  readonly resourceVersion: string | undefined;
+
+  constructor(private readonly context?: McpConnectionContext) {
+    this.appRoot = context?.appRoot ?? resolveAppRoot();
+    this.resourceVersion = context?.resourceVersion;
+    this.#metroInspector = new MetroInspector({ projectRoot: context?.projectRoot });
+  }
+
+  #assertOpen(): void {
+    if (this.#closed)
+      throw new Error("SimView review is closed; reconnect the agent to start a new review");
+  }
+
+  #connectionOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#connectionTail.then(() => {
+      this.#assertOpen();
+      return operation();
+    });
+    this.#connectionTail = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
+  }
+
+  #acquireClient(deviceId: string): Promise<SimViewClient> {
+    const options = {
+      deviceId,
+      codec: "h264" as const,
+      binary: this.context?.coreBinary,
+      environment: this.context?.nativeEnvironment,
+    };
+    return this.context?.backendMode === "ephemeral"
+      ? SimViewClient.start(options)
+      : SimViewClient.acquire({ ...options, backendMode: this.context?.backendMode });
+  }
   #observationMode: "hybrid" | "semantic" = "semantic";
   #latestObservation: WarmObservation | undefined;
   #latestAccessibilityObservation: AccessibilityObservation | undefined;
@@ -334,6 +426,13 @@ export class SimViewSession {
     deviceId?: string,
     options: { startRelay?: boolean; observationMode?: "hybrid" | "semantic" } = {},
   ): Promise<SessionState> {
+    return this.#connectionOperation(() => this.#open(deviceId, options));
+  }
+
+  async #open(
+    deviceId: string | undefined,
+    options: { startRelay?: boolean; observationMode?: "hybrid" | "semantic" },
+  ): Promise<SessionState> {
     if (!this.client?.connected) {
       if (this.client) {
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
@@ -345,7 +444,8 @@ export class SimViewSession {
         this.#latestObservation = undefined;
         this.#resetPreviewPackets();
       }
-      const devices = await SimViewClient.listDevices();
+      const devices = await this.devices();
+      this.#assertOpen();
       const available = devices.filter((device) => device.available);
       this.device = deviceId
         ? available.find((device) => matchesDeviceId(device, deviceId))
@@ -354,7 +454,12 @@ export class SimViewSession {
         throw new Error("No available device is connected");
       }
       try {
-        this.client = await SimViewClient.acquire({ deviceId: this.device.id, codec: "h264" });
+        const client = await this.#acquireClient(this.device.id);
+        if (this.#closed) {
+          await client.close();
+          this.#assertOpen();
+        }
+        this.client = client;
         this.#connectionGeneration += 1;
         this.#bindFrames();
         this.#observationMode = options.observationMode ?? "semantic";
@@ -362,8 +467,10 @@ export class SimViewSession {
           ...selectedDeviceParams(this.device),
           observationMode: this.#observationMode,
         });
+        this.#assertOpen();
         this.device = capture.device;
         await this.#refreshIOSAccessibilityStatus();
+        this.#assertOpen();
         if (options.startRelay === true) this.startRelay();
         void this.#primeObservation();
       } catch (error) {
@@ -377,7 +484,7 @@ export class SimViewSession {
         throw error;
       }
     } else if (deviceId) {
-      if (!matchesDeviceId(this.device, deviceId)) await this.selectDevice(deviceId);
+      if (!matchesDeviceId(this.device, deviceId)) await this.#selectDevice(deviceId);
       else await this.refreshDevice();
     }
     return this.state();
@@ -388,7 +495,7 @@ export class SimViewSession {
   }
 
   devices(): Promise<DeviceDescription[]> {
-    return SimViewClient.listDevices();
+    return SimViewClient.listDevices(this.context?.coreBinary, this.context?.nativeEnvironment);
   }
 
   async refreshDevice(): Promise<SessionState> {
@@ -399,14 +506,20 @@ export class SimViewSession {
   }
 
   async selectDevice(deviceId: string): Promise<SessionState> {
+    return this.#connectionOperation(() => this.#selectDevice(deviceId));
+  }
+
+  async #selectDevice(deviceId: string): Promise<SessionState> {
     const selected = (await this.availableDevices()).find((device) =>
       matchesDeviceId(device, deviceId),
     );
     if (!selected) throw new Error(`Device ${deviceId} is not available`);
     if (selected.id === this.device?.id) return this.state();
 
-    const nextClient = await SimViewClient.acquire({ deviceId: selected.id, codec: "h264" });
+    this.#assertOpen();
+    const nextClient = await this.#acquireClient(selected.id);
     try {
+      this.#assertOpen();
       const capture = await nextClient.request("capture.start", {
         ...selectedDeviceParams(selected),
         observationMode: this.#observationMode,
@@ -419,9 +532,11 @@ export class SimViewSession {
       this.mjpegClient = undefined;
       this.#mjpegClientPromise = undefined;
       if (this.client) await this.client.close();
+      this.#assertOpen();
       this.client = nextClient;
       this.device = capture.device;
       await this.#refreshIOSAccessibilityStatus();
+      this.#assertOpen();
       this.frameId = undefined;
       this.#latestObservation = undefined;
       this.#clearSemanticState();
@@ -637,9 +752,11 @@ export class SimViewSession {
   }
 
   async saveReviewImages(input: SaveReviewImagesInput): Promise<SaveReviewImagesOutput> {
+    this.#assertOpen();
     const directory = await mkdtemp(join(tmpdir(), `simview-review-${this.reviewId}-`));
     this.#reviewImageDirectories.add(directory);
     try {
+      this.#assertOpen();
       await chmod(directory, 0o700);
       const screenshotPath = join(directory, "frozen-frame.png");
       await writePng(screenshotPath, input.screenshot);
@@ -1632,6 +1749,7 @@ export class SimViewSession {
   }
 
   startRelay(port = 0): void {
+    this.#assertOpen();
     if (this.relay) return;
     const session = this;
     this.relay = Bun.serve<ViewerData>({
@@ -1641,7 +1759,7 @@ export class SimViewSession {
         const url = new URL(request.url);
         const bearer = request.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
         if (url.pathname === "/") {
-          return new Response(await browserHtml(), {
+          return new Response(await browserHtml(session.appRoot), {
             headers: {
               "content-type": "text/html; charset=utf-8",
               "cache-control": "no-store",
@@ -1652,7 +1770,7 @@ export class SimViewSession {
           });
         }
         if (url.pathname === "/preview.js") {
-          return previewScriptResponse();
+          return previewScriptResponse(undefined, session.appRoot);
         }
         if (url.pathname === "/stream") {
           const codec: StreamCodec = url.searchParams.get("codec") === "mjpeg" ? "mjpeg" : "h264";
@@ -1693,9 +1811,10 @@ export class SimViewSession {
             return Response.json(await session.selectDevice(selectedId));
           }
           if (url.pathname === "/input" && request.method === "POST") {
-            return Response.json(
-              await session.dispatchInput(relayInputSchema.parse(await request.json())),
+            const receipt = await session.dispatchInputReceipt(
+              relayInputSchema.parse(await request.json()),
             );
+            return Response.json(receipt, { status: receipt.accepted ? 200 : 409 });
           }
           if (url.pathname === "/annotation" && request.method === "POST") {
             const body = annotationMutationSchema.parse(await request.json());
@@ -1854,6 +1973,7 @@ export class SimViewSession {
   }
 
   requireClient(): SimViewClient {
+    this.#assertOpen();
     if (!this.client?.connected) {
       throw new Error("No device is connected; call connect_device before using device controls");
     }
@@ -1870,49 +1990,126 @@ export class SimViewSession {
   }
 
   async dispatchInput(input: z.output<typeof relayInputSchema>): Promise<Record<string, unknown>> {
-    const client = this.requireClient();
+    let client: SimViewClient;
+    try {
+      client = this.requireClient();
+    } catch (error) {
+      throw new InputDispatchFailure(
+        rejectedInputReceipt({
+          code: "input_unavailable",
+          message: error instanceof Error ? error.message : "Device input is unavailable",
+          inputDispatched: false,
+          retryable: true,
+          recoveryAllowed: true,
+          recoveryAction: "connect_device",
+        }),
+      );
+    }
     const capabilities = this.device?.capabilities.input;
-    if (!capabilities) throw new Error("The selected device has no input capabilities");
-    this.#clearSemanticState();
+    if (!capabilities) {
+      throw new InputDispatchFailure(
+        rejectedInputReceipt({
+          code: "input_unavailable",
+          message: "The selected device has no input capabilities",
+          inputDispatched: false,
+          retryable: true,
+          recoveryAllowed: true,
+          recoveryAction: "connect_device",
+        }),
+      );
+    }
+    const unsupported = (message: string) =>
+      new InputDispatchFailure(
+        rejectedInputReceipt({
+          code: "input_unsupported",
+          message,
+          inputDispatched: false,
+          retryable: false,
+          recoveryAllowed: true,
+          recoveryAction: "use_supported_input",
+        }),
+      );
     switch (input.method) {
       case "input.touch":
         if (!(capabilities.rawTouch ?? capabilities.touch))
-          throw new Error("Raw touch is not supported by the selected device");
-        return client.request(input.method, input.params);
+          throw unsupported("Raw touch is not supported by the selected device");
+        break;
       case "input.tap":
-        if (!capabilities.touch) throw new Error("Tap is not supported by the selected device");
-        return client.request(input.method, input.params);
+        if (!capabilities.touch) throw unsupported("Tap is not supported by the selected device");
+        break;
       case "input.longPress":
         if (!capabilities.touch)
-          throw new Error("Long press is not supported by the selected device");
-        return client.request(input.method, input.params);
+          throw unsupported("Long press is not supported by the selected device");
+        break;
       case "input.swipe":
-        if (!capabilities.touch) throw new Error("Swipe is not supported by the selected device");
-        return client.request(input.method, input.params);
+        if (!capabilities.touch) throw unsupported("Swipe is not supported by the selected device");
+        break;
       case "input.gesture":
         if (input.params.tracks.length > 1 && !capabilities.multiTouch) {
-          throw new Error("Multi-touch gestures are not supported by the selected device runtime");
+          throw unsupported(
+            "Multi-touch gestures are not supported by the selected device runtime",
+          );
         }
         if (!(capabilities.rawTouch ?? capabilities.touch)) {
-          throw new Error("Continuous gestures are not supported by the selected device");
+          throw unsupported("Continuous gestures are not supported by the selected device");
         }
-        return client.request(input.method, input.params);
+        break;
       case "input.typeText":
         if (capabilities.text === "none")
-          throw new Error("Text input is not supported by the selected device");
-        return client.request(input.method, input.params);
+          throw unsupported("Text input is not supported by the selected device");
+        break;
       case "input.key":
-        return client.request(input.method, input.params);
+        if (
+          this.device?.platform === "android" ||
+          (capabilities.keys !== undefined && !capabilities.keys.includes(input.params.key))
+        ) {
+          throw unsupported(
+            `${input.params.key} key input is not supported by the selected device`,
+          );
+        }
+        break;
       case "input.button":
         if (!capabilities.buttons.includes(input.params.button)) {
-          throw new Error(`${input.params.button} is not supported by the selected device`);
+          throw unsupported(`${input.params.button} is not supported by the selected device`);
         }
-        return client.request(input.method, input.params);
+        break;
+    }
+    this.#clearSemanticState();
+    try {
+      switch (input.method) {
+        case "input.touch":
+          return await client.request(input.method, input.params);
+        case "input.tap":
+          return await client.request(input.method, input.params);
+        case "input.longPress":
+          return await client.request(input.method, input.params);
+        case "input.swipe":
+          return await client.request(input.method, input.params);
+        case "input.gesture":
+          return await client.request(input.method, input.params);
+        case "input.typeText":
+          return await client.request(input.method, input.params);
+        case "input.key":
+          return await client.request(input.method, input.params);
+        case "input.button":
+          return await client.request(input.method, input.params);
+      }
+    } catch (error) {
+      throw new InputDispatchFailure(inputReceiptFromError(error));
+    }
+  }
+
+  async dispatchInputReceipt(input: z.output<typeof relayInputSchema>): Promise<InputReceipt> {
+    try {
+      return acceptedInputReceipt(await this.dispatchInput(input));
+    } catch (error) {
+      return inputReceiptFromError(error);
     }
   }
 
   async close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
+    this.#closed = true;
     this.#closePromise = this.#close();
     return this.#closePromise;
   }
@@ -1925,16 +2122,17 @@ export class SimViewSession {
     this.viewers.clear();
     this.relay?.stop(true);
     this.relay = undefined;
+    this.#metroInspector.close();
     if (this.mjpegClient) await this.mjpegClient.close();
     this.mjpegClient = undefined;
     this.#mjpegClientPromise = undefined;
     if (this.client) await this.client.close();
     this.client = undefined;
+    await this.#connectionTail;
     this.device = undefined;
     this.frameId = undefined;
     this.#latestObservation = undefined;
     this.#clearSemanticState();
-    this.#metroInspector.close();
     this.#annotationsByDevice.clear();
     this.#resetPreviewPackets();
     await Promise.all(
@@ -2873,8 +3071,7 @@ async function writePng(path: string, encoded: string): Promise<void> {
   await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
 }
 
-async function browserHtml(): Promise<string> {
-  const appRoot = resolveAppRoot();
+async function browserHtml(appRoot: string): Promise<string> {
   const built = Bun.file(join(appRoot, "dist", "preview.html"));
   if (await built.exists()) return built.text();
   return Bun.file(join(appRoot, "src", "preview.html")).text();

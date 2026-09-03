@@ -3,6 +3,7 @@ export * from "./annotation";
 export * from "./elements";
 export * from "./json";
 export * from "./mcp";
+export * from "./mcp-daemon";
 export * from "./protocol";
 export * from "./relay";
 export * from "./review-images";
