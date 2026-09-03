@@ -9,7 +9,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "@simview/client": "workspace:*",
     "@simview/contracts": "workspace:*",
-    "metro-bridge": "0.2.8",
+    "metro-bridge": "0.2.10",
     "zod": "4.4.3"
   },
   "scripts": {

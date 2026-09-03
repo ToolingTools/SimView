@@ -21,7 +21,7 @@
     },
     "packages/app": {
       "name": "@simview/app",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "dependencies": {
         "@modelcontextprotocol/ext-apps": "1.7.5",
         "@simview/contracts": "workspace:*",
@@ -30,7 +30,7 @@
     },
     "packages/cli": {
       "name": "@simview/cli",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "dependencies": {
         "@simview/client": "workspace:*",
         "@simview/core": "workspace:*",
@@ -39,7 +39,7 @@
     },
     "packages/client": {
       "name": "@simview/client",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "dependencies": {
         "@simview/contracts": "workspace:*",
         "@simview/core": "workspace:*",
@@ -48,23 +48,23 @@
     },
     "packages/contracts": {
       "name": "@simview/contracts",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "dependencies": {
         "zod": "4.4.3",
       },
     },
     "packages/core": {
       "name": "@simview/core",
-      "version": "0.3.0",
+      "version": "0.4.1",
     },
     "packages/mcp": {
       "name": "@simview/mcp",
-      "version": "0.3.0",
+      "version": "0.4.1",
       "dependencies": {
         "@modelcontextprotocol/server": "^2.0.0",
         "@simview/client": "workspace:*",
         "@simview/contracts": "workspace:*",
-        "metro-bridge": "0.2.8",
+        "metro-bridge": "0.2.10",
         "zod": "4.4.3",
       },
     },
@@ -438,7 +438,7 @@
 
     "merge-descriptors": ["merge-descriptors@2.0.0", "", {}, "sha512-Snk314V5ayFLhp3fkUREub6WtjBfPdCPY1Ln8/8munuLuiYhsABgBVWsozAG+MWMbVEvcdcpbi9R7ww22l9Q3g=="],
 
-    "metro-bridge": ["metro-bridge@0.2.8", "", { "dependencies": { "ws": "^8.20.0" }, "optionalDependencies": { "chrome-launcher": "^1.2.1", "chromium-edge-launcher": "^0.3.0" }, "peerDependencies": { "react-native": ">=0.70.0" }, "optionalPeers": ["react-native"] }, "sha512-yZZQ63Bid+FJwg9cE1Y/AflpFc8TeU9s7HO88wjiayuq8cGfc4LnZpsrwA759vLFR2R7zjcvaMc01k7RC25L5w=="],
+    "metro-bridge": ["metro-bridge@0.2.10", "", { "dependencies": { "ws": "^8.20.0" }, "optionalDependencies": { "chrome-launcher": "^1.2.1", "chromium-edge-launcher": "^0.3.0" }, "peerDependencies": { "react-native": ">=0.70.0" }, "optionalPeers": ["react-native"] }, "sha512-4hhoQJvqDzNNkN8IKf712+YSfdTZtXQFeiXuaPpXdpbLooGP+8+Q0S6Zm25VzWY2gqCTLr6gaTN/jpd14QKBYA=="],
 
     "mime-db": ["mime-db@1.54.0", "", {}, "sha512-aU5EJuIN2WDemCcAp2vFBfp/m4EAhWJnUNSSw0ixs7/kXbd6Pg64EmwJkNdFhB8aWt1sH2CTXrLxo/iAGV3oPQ=="],
 
