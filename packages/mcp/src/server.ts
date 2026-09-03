@@ -6,7 +6,6 @@ import {
   McpServer,
   ResourceTemplate,
 } from "@modelcontextprotocol/server";
-import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { compactAccessibilityTree } from "@simview/client";
 import {
   accessibilityNodeSchema,
@@ -51,7 +50,6 @@ import {
   uiContextSchema,
 } from "@simview/contracts";
 import { z } from "zod";
-import { resolveAppRoot } from "./app-assets";
 import { inlineAppModule } from "./app-html";
 import { dispatchSemanticTextAction } from "./semantic-interactions";
 import {
@@ -180,8 +178,8 @@ function sortedDeviceInventory(inventory: DeviceDescription[], options: DeviceLi
     );
 }
 
-function resourceMetadata(reviewId: string) {
-  const resourceUri = `ui://simview/${VERSION}/reviews/${reviewId}/preview.html`;
+function resourceMetadata(reviewId: string, version = VERSION) {
+  const resourceUri = `ui://simview/${version}/reviews/${reviewId}/preview.html`;
   return {
     resourceUri,
     openPreview: {
@@ -911,10 +909,10 @@ export function createServer(
   } = {},
 ): McpServer {
   const server = new McpServer(
-    { name: "simview", version: VERSION },
+    { name: "simview", version: session.resourceVersion ?? VERSION },
     { capabilities: { resources: { subscribe: true } } },
   );
-  const metadata = resourceMetadata(session.reviewId);
+  const metadata = resourceMetadata(session.reviewId, session.resourceVersion);
   let accessibilityResourceSubscribed = false;
   server.server.setRequestHandler(
     "resources/subscribe",
@@ -2010,7 +2008,7 @@ export function createServer(
 
   const readPreviewResource = async (uri = new URL(metadata.resourceUri)) => {
     observeEmbeddedApp();
-    const html = await appHtml(session.state());
+    const html = await appHtml(session.state(), session.appRoot);
     return {
       contents: [
         {
@@ -2708,6 +2706,22 @@ function registerAppBridgeTools(
   metadata: ResourceMetadata,
 ): void {
   server.registerTool(
+    "app_open_browser",
+    {
+      title: "Open review in browser",
+      description: "Open this review in a resizable browser window.",
+      inputSchema: {},
+      outputSchema: z.object({ opened: z.boolean() }),
+      _meta: metadata.appOnly,
+    },
+    () => {
+      session.requireClient();
+      session.startRelay();
+      session.openBrowser();
+      return { content: [], structuredContent: { opened: true } };
+    },
+  );
+  server.registerTool(
     "save_review_images",
     {
       title: "Save review images",
@@ -2857,8 +2871,7 @@ function registerAnnotationTools(
   );
 }
 
-async function appHtml(initialState: SessionState): Promise<string> {
-  const root = resolveAppRoot();
+async function appHtml(initialState: SessionState, root: string): Promise<string> {
   const templatePath = join(root, "dist", "preview.html");
   const scriptPath = join(root, "dist", "preview.js");
   const [template, script] = await Promise.all([
@@ -2890,61 +2903,8 @@ function toolResult(text: string, structuredContent: unknown, isError = false) {
 }
 
 export async function runServer(): Promise<void> {
-  const parentPID = process.ppid;
-  const sessions = new Set<SimViewSession>();
-  let handle: ReturnType<typeof serveStdio> | undefined;
-  let shutdownPromise: Promise<void> | undefined;
-  const terminate = () => {
-    void shutdown().then(() => process.exit(0));
-  };
-  const shutdown = (): Promise<void> => {
-    if (shutdownPromise) return shutdownPromise;
-    shutdownPromise = (async () => {
-      clearInterval(parentWatchdog);
-      process.stdin.off("end", shutdown);
-      process.stdin.off("close", shutdown);
-      process.off("SIGINT", terminate);
-      process.off("SIGTERM", terminate);
-      process.off("disconnect", terminate);
-      await Promise.all([...sessions].map((session) => session.close().catch(() => {})));
-      await handle?.close().catch(() => {});
-    })();
-    return shutdownPromise;
-  };
-  const parentWatchdog = setInterval(() => {
-    if (parentPID <= 1) {
-      void shutdown();
-      return;
-    }
-    try {
-      process.kill(parentPID, 0);
-    } catch {
-      void shutdown();
-    }
-  }, 2_000);
-  parentWatchdog.unref();
-  process.stdin.once("end", shutdown);
-  process.stdin.once("close", shutdown);
-  process.once("SIGINT", terminate);
-  process.once("SIGTERM", terminate);
-  process.once("disconnect", terminate);
-  handle = serveStdio(
-    () => {
-      const session = new SimViewSession();
-      sessions.add(session);
-      const server = createServer(session);
-      const onclose = server.server.onclose;
-      server.server.onclose = () => {
-        onclose?.();
-        sessions.delete(session);
-        void session.close();
-      };
-      return server;
-    },
-    {
-      onerror: () => void shutdown(),
-    },
-  );
+  const { runAdapter } = await import("./adapter");
+  await runAdapter();
 }
 
 function supportsMcpApps(

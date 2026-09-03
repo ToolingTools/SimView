@@ -24,6 +24,7 @@ import {
 type DataHandler = (payload: Uint8Array) => void;
 
 export interface SessionOptions {
+  environment?: Record<string, string> | undefined;
   deviceId?: string | undefined;
   udid?: string | undefined;
   codec?: Codec | undefined;
@@ -32,6 +33,8 @@ export interface SessionOptions {
 }
 
 export interface AcquireOptions {
+  environment?: Record<string, string> | undefined;
+  backendMode?: "shared" | "ephemeral" | undefined;
   deviceId?: string | undefined;
   udid?: string | undefined;
   codec?: Codec | undefined;
@@ -94,6 +97,7 @@ export class SimViewClient {
             : []),
       ],
       {
+        env: options.environment ?? process.env,
         stdin: new TextEncoder().encode(token),
         stdout: "inherit",
         stderr: "inherit",
@@ -113,13 +117,21 @@ export class SimViewClient {
   }
 
   static async acquire(options: AcquireOptions): Promise<SimViewClient> {
-    if (process.env.SIMVIEW_BACKEND_MODE === "ephemeral") return SimViewClient.start(options);
+    if ((options.backendMode ?? process.env.SIMVIEW_BACKEND_MODE) === "ephemeral")
+      return SimViewClient.start(options);
     const { acquireDaemon } = await import("./daemon");
     return acquireDaemon(options, SimViewClient);
   }
 
-  static async listDevices(binary = resolveBinary()): Promise<DeviceDescription[]> {
-    const child = Bun.spawn([binary, "devices"], { stdout: "pipe", stderr: "pipe" });
+  static async listDevices(
+    binary = resolveBinary(),
+    environment?: Record<string, string>,
+  ): Promise<DeviceDescription[]> {
+    const child = Bun.spawn([binary, "devices"], {
+      env: environment ?? process.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
     const [stdout, stderr, exitCode] = await Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),

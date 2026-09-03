@@ -27,6 +27,7 @@ import {
 } from "../packages/mcp/src/session";
 
 const appCalledTools = [
+  "app_open_browser",
   "app_connect_device",
   "app_enable_ui_probe",
   "app_get_accessibility_tree",
@@ -331,6 +332,24 @@ describe("MCP app tools", () => {
 
       expect(session.browserOpened).toBe(0);
       expect(session.relayStarted).toBe(0);
+    } finally {
+      await closeHarness();
+    }
+  });
+
+  test("opens the existing review from the app without returning its relay capability", async () => {
+    const session = previewSession();
+    const server = createServer(session);
+    const { client, closeHarness } = await connectMcpTestServer("browser-button", session, server);
+    try {
+      const reviewId = session.reviewId;
+      const result = await client.callTool({ name: "app_open_browser", arguments: {} });
+      expect(result.structuredContent).toEqual({ opened: true });
+      expect(result.content).toEqual([]);
+      expect(session.reviewId).toBe(reviewId);
+      expect(session.browserOpened).toBe(1);
+      expect(session.relayStarted).toBe(1);
+      expect(JSON.stringify(result)).not.toContain(session.relayToken);
     } finally {
       await closeHarness();
     }

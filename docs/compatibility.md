@@ -69,8 +69,7 @@ For every supported row:
    remains isolated.
 9. Close one session and verify the other stream continues. After the final
    authenticated client closes, verify capture and encoders stop immediately;
-   the compatible backend may remain alive only for its five-minute reconnect
-   window.
+   the compatible backend must exit within the five-second cleanup deadline.
 10. Leave the simulator static and verify only the 5 fps idle heartbeat encodes.
 11. Retrieve the frontmost host-side accessibility tree and inspect one point.
 12. Relaunch one third-party fixture with the bundled probe and verify scene,

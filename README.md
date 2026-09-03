@@ -169,16 +169,32 @@ Android reads UIAutomator.
 `preview` binds an authenticated relay to a random port on `127.0.0.1`. The
 session token is random, endpoints reject unauthenticated requests, and the
 native core uses a mode-0700 temporary directory with a mode-0600 Unix socket.
-MCP sessions acquire one detached native backend per platform and native device
-identifier, so several Codex/MCP tasks share the same capture and encoder
-process. Each task still has
-its own stdio bridge, relay, review ID, and annotations. The backend stops
-capture when its last authenticated client leaves and exits after five idle
-minutes. `SimViewClient.start()` remains the explicit ephemeral/test path; set
-`SIMVIEW_BACKEND_MODE=ephemeral` to diagnose the registry in isolation.
-Use `simview daemon status`, `stop --device-id <id>` (or `stop --all`), and
-`prune` to inspect or explicitly manage sanitized backend records. `prune`
-only removes records whose recorded process is confirmed dead.
+`simview mcp` is a thin stdio adapter. Agents automatically start or join one
+shared MCP daemon per user and compatible build, through a private authenticated
+Unix socket. Each connection keeps its own project context, review ID,
+annotations and browser relay. The daemon exits when its last agent disconnects;
+no login service or HTTP MCP configuration is needed. Adapters watch both their
+immediate agent owner and GUI application ancestors, so an orphaned Cursor worker
+does not keep a review alive after Cursor quits. Normal shutdown is bounded to
+five seconds and does not terminate host-owned workers.
+
+MCP sessions acquire one native backend per device and compatible binary.
+Capture stops when its last authenticated client leaves, and the shared backend
+begins shutdown immediately. Startup has a separate
+10-second allowance. `SimViewClient.start()` remains the explicit ephemeral/test
+path; use `SIMVIEW_BACKEND_MODE=ephemeral` to diagnose native sharing in isolation.
+
+Use `simview mcp status --json` for shared MCP daemon PIDs, build identities and
+connection/owner counts. Use `simview daemon status`, `stop --device-id <id>`
+(or `stop --all`), and `prune` for native backends. Diagnostics omit credentials
+and UI contents. Incompatible builds can temporarily have separate daemons.
+
+Cursor 3.18.15 advertises only inline MCP Apps. The preview's **Open in browser**
+button opens the same review in a resizable window. Hosts advertising fullscreen
+still receive an automatic request and offer a manual fullscreen button. A browser
+preview closes its connection when its owning agent disconnects; reconnect from
+the agent to start another review.
+
 All device-scoped CLI commands accept `--device-id`; `--udid` remains an iOS
 compatibility alias.
 
@@ -385,3 +401,5 @@ publishing, and the catalog-only Codex/Claude marketplace layout.
 
 Apache-2.0. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for adapted
 Apache-licensed implementation references.
+
+Connection and preview diagnostics are covered in [Troubleshooting](docs/troubleshooting.md).

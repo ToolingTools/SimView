@@ -25,6 +25,7 @@ import {
   type ElementFallbackReason,
   type ElementTreeOutput,
   type IOSAccessibilityStatus,
+  type McpConnectionContext,
   normalizedPointSchema,
   normalizeSemanticSearchText,
   relayAuthenticationSchema,
@@ -282,7 +283,46 @@ export class SimViewSession {
   #reviewImageDirectories = new Set<string>();
   #closePromise: Promise<void> | undefined = undefined;
   #connectionGeneration = 0;
-  #metroInspector = new MetroInspector();
+  #metroInspector: MetroInspector;
+  #closed = false;
+  #connectionTail: Promise<void> = Promise.resolve();
+  readonly appRoot: string;
+  readonly resourceVersion: string | undefined;
+
+  constructor(private readonly context?: McpConnectionContext) {
+    this.appRoot = context?.appRoot ?? resolveAppRoot();
+    this.resourceVersion = context?.resourceVersion;
+    this.#metroInspector = new MetroInspector({ projectRoot: context?.projectRoot });
+  }
+
+  #assertOpen(): void {
+    if (this.#closed)
+      throw new Error("SimView review is closed; reconnect the agent to start a new review");
+  }
+
+  #connectionOperation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#connectionTail.then(() => {
+      this.#assertOpen();
+      return operation();
+    });
+    this.#connectionTail = result.then(
+      () => {},
+      () => {},
+    );
+    return result;
+  }
+
+  #acquireClient(deviceId: string): Promise<SimViewClient> {
+    const options = {
+      deviceId,
+      codec: "h264" as const,
+      binary: this.context?.coreBinary,
+      environment: this.context?.nativeEnvironment,
+    };
+    return this.context?.backendMode === "ephemeral"
+      ? SimViewClient.start(options)
+      : SimViewClient.acquire({ ...options, backendMode: this.context?.backendMode });
+  }
   #observationMode: "hybrid" | "semantic" = "semantic";
   #latestObservation: WarmObservation | undefined;
   #latestAccessibilityObservation: AccessibilityObservation | undefined;
@@ -334,6 +374,13 @@ export class SimViewSession {
     deviceId?: string,
     options: { startRelay?: boolean; observationMode?: "hybrid" | "semantic" } = {},
   ): Promise<SessionState> {
+    return this.#connectionOperation(() => this.#open(deviceId, options));
+  }
+
+  async #open(
+    deviceId: string | undefined,
+    options: { startRelay?: boolean; observationMode?: "hybrid" | "semantic" },
+  ): Promise<SessionState> {
     if (!this.client?.connected) {
       if (this.client) {
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
@@ -345,7 +392,8 @@ export class SimViewSession {
         this.#latestObservation = undefined;
         this.#resetPreviewPackets();
       }
-      const devices = await SimViewClient.listDevices();
+      const devices = await this.devices();
+      this.#assertOpen();
       const available = devices.filter((device) => device.available);
       this.device = deviceId
         ? available.find((device) => matchesDeviceId(device, deviceId))
@@ -354,7 +402,12 @@ export class SimViewSession {
         throw new Error("No available device is connected");
       }
       try {
-        this.client = await SimViewClient.acquire({ deviceId: this.device.id, codec: "h264" });
+        const client = await this.#acquireClient(this.device.id);
+        if (this.#closed) {
+          await client.close();
+          this.#assertOpen();
+        }
+        this.client = client;
         this.#connectionGeneration += 1;
         this.#bindFrames();
         this.#observationMode = options.observationMode ?? "semantic";
@@ -362,8 +415,10 @@ export class SimViewSession {
           ...selectedDeviceParams(this.device),
           observationMode: this.#observationMode,
         });
+        this.#assertOpen();
         this.device = capture.device;
         await this.#refreshIOSAccessibilityStatus();
+        this.#assertOpen();
         if (options.startRelay === true) this.startRelay();
         void this.#primeObservation();
       } catch (error) {
@@ -377,7 +432,7 @@ export class SimViewSession {
         throw error;
       }
     } else if (deviceId) {
-      if (!matchesDeviceId(this.device, deviceId)) await this.selectDevice(deviceId);
+      if (!matchesDeviceId(this.device, deviceId)) await this.#selectDevice(deviceId);
       else await this.refreshDevice();
     }
     return this.state();
@@ -388,7 +443,7 @@ export class SimViewSession {
   }
 
   devices(): Promise<DeviceDescription[]> {
-    return SimViewClient.listDevices();
+    return SimViewClient.listDevices(this.context?.coreBinary, this.context?.nativeEnvironment);
   }
 
   async refreshDevice(): Promise<SessionState> {
@@ -399,14 +454,20 @@ export class SimViewSession {
   }
 
   async selectDevice(deviceId: string): Promise<SessionState> {
+    return this.#connectionOperation(() => this.#selectDevice(deviceId));
+  }
+
+  async #selectDevice(deviceId: string): Promise<SessionState> {
     const selected = (await this.availableDevices()).find((device) =>
       matchesDeviceId(device, deviceId),
     );
     if (!selected) throw new Error(`Device ${deviceId} is not available`);
     if (selected.id === this.device?.id) return this.state();
 
-    const nextClient = await SimViewClient.acquire({ deviceId: selected.id, codec: "h264" });
+    this.#assertOpen();
+    const nextClient = await this.#acquireClient(selected.id);
     try {
+      this.#assertOpen();
       const capture = await nextClient.request("capture.start", {
         ...selectedDeviceParams(selected),
         observationMode: this.#observationMode,
@@ -419,9 +480,11 @@ export class SimViewSession {
       this.mjpegClient = undefined;
       this.#mjpegClientPromise = undefined;
       if (this.client) await this.client.close();
+      this.#assertOpen();
       this.client = nextClient;
       this.device = capture.device;
       await this.#refreshIOSAccessibilityStatus();
+      this.#assertOpen();
       this.frameId = undefined;
       this.#latestObservation = undefined;
       this.#clearSemanticState();
@@ -637,9 +700,11 @@ export class SimViewSession {
   }
 
   async saveReviewImages(input: SaveReviewImagesInput): Promise<SaveReviewImagesOutput> {
+    this.#assertOpen();
     const directory = await mkdtemp(join(tmpdir(), `simview-review-${this.reviewId}-`));
     this.#reviewImageDirectories.add(directory);
     try {
+      this.#assertOpen();
       await chmod(directory, 0o700);
       const screenshotPath = join(directory, "frozen-frame.png");
       await writePng(screenshotPath, input.screenshot);
@@ -1632,6 +1697,7 @@ export class SimViewSession {
   }
 
   startRelay(port = 0): void {
+    this.#assertOpen();
     if (this.relay) return;
     const session = this;
     this.relay = Bun.serve<ViewerData>({
@@ -1641,7 +1707,7 @@ export class SimViewSession {
         const url = new URL(request.url);
         const bearer = request.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
         if (url.pathname === "/") {
-          return new Response(await browserHtml(), {
+          return new Response(await browserHtml(session.appRoot), {
             headers: {
               "content-type": "text/html; charset=utf-8",
               "cache-control": "no-store",
@@ -1652,7 +1718,7 @@ export class SimViewSession {
           });
         }
         if (url.pathname === "/preview.js") {
-          return previewScriptResponse();
+          return previewScriptResponse(undefined, session.appRoot);
         }
         if (url.pathname === "/stream") {
           const codec: StreamCodec = url.searchParams.get("codec") === "mjpeg" ? "mjpeg" : "h264";
@@ -1854,6 +1920,7 @@ export class SimViewSession {
   }
 
   requireClient(): SimViewClient {
+    this.#assertOpen();
     if (!this.client?.connected) {
       throw new Error("No device is connected; call connect_device before using device controls");
     }
@@ -1913,6 +1980,7 @@ export class SimViewSession {
 
   async close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
+    this.#closed = true;
     this.#closePromise = this.#close();
     return this.#closePromise;
   }
@@ -1925,16 +1993,17 @@ export class SimViewSession {
     this.viewers.clear();
     this.relay?.stop(true);
     this.relay = undefined;
+    this.#metroInspector.close();
     if (this.mjpegClient) await this.mjpegClient.close();
     this.mjpegClient = undefined;
     this.#mjpegClientPromise = undefined;
     if (this.client) await this.client.close();
     this.client = undefined;
+    await this.#connectionTail;
     this.device = undefined;
     this.frameId = undefined;
     this.#latestObservation = undefined;
     this.#clearSemanticState();
-    this.#metroInspector.close();
     this.#annotationsByDevice.clear();
     this.#resetPreviewPackets();
     await Promise.all(
@@ -2873,8 +2942,7 @@ async function writePng(path: string, encoded: string): Promise<void> {
   await writeFile(path, bytes, { flag: "wx", mode: 0o600 });
 }
 
-async function browserHtml(): Promise<string> {
-  const appRoot = resolveAppRoot();
+async function browserHtml(appRoot: string): Promise<string> {
   const built = Bun.file(join(appRoot, "dist", "preview.html"));
   if (await built.exists()) return built.text();
   return Bun.file(join(appRoot, "src", "preview.html")).text();

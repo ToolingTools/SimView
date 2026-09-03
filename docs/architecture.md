@@ -140,14 +140,16 @@ The process model has two layers:
   per platform-qualified native identifier and compatible
   protocol/version/binary identity. `udid` remains an iOS compatibility alias.
   The
-  backend record lives under `${tmpdir()}/simview-daemons/<uid>/<instanceId>`;
+  backend record lives under the canonical per-user temporary directory at
+  `simview-daemons/<uid>/<instanceId>`;
   directories are mode 0700, records and sockets are mode 0600, and the token
   is never returned by status or logged. Atomic startup locks ensure concurrent
   tasks cannot create duplicate compatible backends.
 
 The backend stops capture, clears pending frames, and stops encoders when its
-last authenticated client disconnects. It remains available for a five-minute
-reconnect window, then exits. A new packaged native binary gets a different
+last authenticated client disconnects. Shared backends use zero idle delay and
+begin shutdown immediately. Before the first authenticated client,
+a separate ten-second startup allowance prevents premature exit. A new packaged native binary gets a different
 instance ID from its SHA-256, so it cannot attach to an incompatible old
 backend. `SimViewClient.start()` remains the explicit ephemeral/test path, and
 `SIMVIEW_BACKEND_MODE=ephemeral` is the rollback switch.
@@ -157,6 +159,41 @@ diagnostics. The top-level CLI exposes them as `simview daemon status`,
 `simview daemon stop --device-id <id>` (or `--all`), and `simview daemon prune`.
 These commands operate only on trusted registry records and never print backend
 capability tokens.
+
+## Shared MCP service
+
+The CLI MCP entrypoint lazily loads an adapter, without importing the device or
+MCP server graph. Its authenticated Unix connection pins a separate SDK stdio
+transport, McpServer and SimViewSession in the shared daemon. JSON-RPC IDs are
+connection-local; the adapter forwards bytes with stream backpressure and never
+replays a request after disconnection. No HTTP MCP endpoint is exposed.
+
+The registry is `<system user temporary directory>/sv-mcp/<uid>`, independent
+of the host's `TMPDIR`, with mode-0700 directories and
+mode-0600 records, locks and sockets. Compatibility includes release, adapter
+protocol and build contents (including native core and preview assets), so
+identical installations share a daemon while different builds remain isolated.
+Tokens are delivered through stdin at launch and a bounded private socket
+preamble; they are never printed. Status connections do not retain the service.
+
+Each connection supplies its own absolute project/core/asset paths, native mode,
+resource version, an allowlist of native tool environment settings, and a Claude
+Desktop detection hint. The first launcher's global
+configuration cannot select another connection's project or app assets.
+
+Adapters and the daemon validate owner PIDs and process start identities every
+second, including original GUI application ancestors. EOF, broken output,
+signals, socket loss or owner exit close that review. Cleanup is idempotent,
+serialized against device startup/switching, and scoped to the connection. After
+the final adapter leaves, the daemon stops accepting connections and drains under
+a five-second deadline. A cancelled starter reaps its own child before releasing
+the startup lock. New arrivals retry a draining instance without replaying MCP
+requests. Browser viewers never retain a review after its agent leaves.
+
+The app-only `app_open_browser` tool reuses the review's authenticated browser
+relay and returns only `{ opened: true }`. Embedded data continues over the MCP
+host bridge. Fullscreen requests are capability-gated; explicit user retries are
+independent of the automatic request gate.
 
 ## Contract and validation boundary
 

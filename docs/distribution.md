@@ -38,7 +38,7 @@ The packaged client resolves the bundled native core before any local build
 output. Shared backend instance IDs include that packaged binary's SHA-256, the
 SimView version, protocol version, and platform-qualified device identity. Updating a plugin or npm
 package therefore creates a compatible backend identity instead of attaching
-to an older executable; old backends drain through their normal idle timeout.
+to an older executable; old backends exit after their final authenticated client disconnects.
 
 Each release also contains `SHA256SUMS`, `release-manifest.json` (artifact names,
 architectures, hashes, and signatures), and `sbom.cdx.json` (the resolved

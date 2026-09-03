@@ -11,12 +11,12 @@ import {
   unlink,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { basename, join, resolve, sep } from "node:path";
 import { type Codec, PROTOCOL_VERSION, SIMVIEW_VERSION } from "@simview/contracts";
 import { resolveBinary } from "@simview/core";
 import { z } from "zod";
 import type { AcquireOptions, SimViewClient } from "./client";
+import { userTemporaryDirectory } from "./runtime-directory";
 
 const RECORD_SCHEMA_VERSION = 1;
 const STARTUP_TIMEOUT_MS = 10_000;
@@ -67,11 +67,11 @@ export interface DaemonRegistryAdapter {
 function registryRoot(): string {
   const uid = process.getuid?.();
   if (uid === undefined) throw new Error("Shared SimView backends require a numeric user ID");
-  return join(tmpdir(), "simview-daemons", String(uid));
+  return join(userTemporaryDirectory(), "simview-daemons", String(uid));
 }
 
 function registryBase(): string {
-  return join(tmpdir(), "simview-daemons");
+  return join(userTemporaryDirectory(), "simview-daemons");
 }
 
 async function binarySha256(binary: string): Promise<string> {
@@ -80,9 +80,18 @@ async function binarySha256(binary: string): Promise<string> {
     .digest("hex");
 }
 
-function instanceIdFor(deviceId: string, binaryHash: string): string {
+function instanceIdFor(
+  deviceId: string,
+  binaryHash: string,
+  environment?: Record<string, string>,
+): string {
   return createHash("sha256")
     .update(`${deviceId}\0${PROTOCOL_VERSION}\0${SIMVIEW_VERSION}\0${binaryHash}`)
+    .update(
+      environment
+        ? JSON.stringify(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b)))
+        : "",
+    )
     .digest("hex")
     .slice(0, 20);
 }
@@ -173,21 +182,33 @@ async function publishRecord(instanceDirectory: string, record: DaemonRecord): P
 
 async function acquireLock(instanceDirectory: string): Promise<() => Promise<void>> {
   const lockPath = join(instanceDirectory, "startup.lock");
+  const contents = `${process.pid}\n${Date.now()}\n${randomBytes(16).toString("hex")}\n`;
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
       const handle = await open(lockPath, "wx", 0o600);
-      await handle.writeFile(`${process.pid}\n${Date.now()}\n`);
-      await handle.close();
-      return async () => unlink(lockPath).catch(() => {});
+      try {
+        await handle.writeFile(contents);
+      } finally {
+        await handle.close();
+      }
+      return async () => {
+        if ((await readFile(lockPath, "utf8").catch(() => "")) === contents)
+          await unlink(lockPath).catch(() => {});
+      };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const details = await lstat(lockPath).catch(() => undefined);
       if (details?.isSymbolicLink()) throw new Error(`Unsafe SimView startup lock: ${lockPath}`);
       if (details && Date.now() - details.mtimeMs > LOCK_STALE_MS) {
-        const contents = await readFile(lockPath, "utf8").catch(() => "");
-        const ownerPID = Number(contents.split("\n", 1)[0]);
-        if (Number.isSafeInteger(ownerPID) && ownerPID > 0 && !isAlive(ownerPID)) {
+        const existing = await readFile(lockPath, "utf8").catch(() => "");
+        const ownerPID = Number(existing.split("\n", 1)[0]);
+        if (
+          Number.isSafeInteger(ownerPID) &&
+          ownerPID > 0 &&
+          !isAlive(ownerPID) &&
+          (await readFile(lockPath, "utf8").catch(() => "")) === existing
+        ) {
           await unlink(lockPath).catch(() => {});
           continue;
         }
@@ -232,7 +253,7 @@ async function attachAndVerify(
 ): Promise<SimViewClient> {
   const client = await adapter.attach(record.socketPath, record.token, codec);
   try {
-    const health = await client.request("health.get", {}, { timeoutMs: 2_000 });
+    const health = await client.request("health.get", {}, { timeoutMs: STARTUP_TIMEOUT_MS });
     assertHealthIdentity(health, {
       pid: record.pid,
       instanceId: record.instanceId,
@@ -283,10 +304,32 @@ export async function acquireDaemon(
   options: AcquireOptions,
   adapter: DaemonRegistryAdapter,
 ): Promise<SimViewClient> {
+  const deadline = Date.now() + STARTUP_TIMEOUT_MS;
+  for (;;) {
+    try {
+      return await acquireDaemonAttempt(options, adapter);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      const closing =
+        error instanceof Error && /connection closed|socket closed/i.test(error.message);
+      if (
+        Date.now() >= deadline ||
+        (!closing && code !== "ENOENT" && code !== "ECONNREFUSED" && code !== "ECONNRESET")
+      )
+        throw error;
+      await Bun.sleep(25);
+    }
+  }
+}
+
+async function acquireDaemonAttempt(
+  options: AcquireOptions,
+  adapter: DaemonRegistryAdapter,
+): Promise<SimViewClient> {
   const binary = resolve(options.binary ?? resolveBinary());
   const hash = await binarySha256(binary);
   const identity = resolveDeviceIdentity(options);
-  const instanceId = instanceIdFor(identity.deviceId, hash);
+  const instanceId = instanceIdFor(identity.deviceId, hash, options.environment);
   const root = registryRoot();
   const instanceDirectory = join(root, instanceId);
   await ensurePrivateDirectory(registryBase());
@@ -318,7 +361,7 @@ export async function acquireDaemon(
         "--token-fd",
         "0",
         "--idle-timeout",
-        "300",
+        "0",
         "--device-id",
         identity.deviceId,
         ...(identity.platform === "ios" ? ["--udid", identity.nativeId] : []),
@@ -326,6 +369,7 @@ export async function acquireDaemon(
         instanceId,
       ],
       {
+        env: options.environment ?? process.env,
         stdin: new TextEncoder().encode(token),
         stdout: "ignore",
         stderr: "ignore",
@@ -406,9 +450,10 @@ export async function daemonStatuses(adapter: DaemonRegistryAdapter): Promise<Da
       );
       continue;
     }
-    await assertPrivateSocket(record.socketPath);
-    const client = await adapter.attach(record.socketPath, record.token);
+    let client: SimViewClient | undefined;
     try {
+      await assertPrivateSocket(record.socketPath);
+      client = await adapter.attach(record.socketPath, record.token);
       const health = await client.request("health.get", {}, { timeoutMs: 2_000 });
       assertHealthIdentity(health, {
         pid: record.pid,
@@ -416,8 +461,18 @@ export async function daemonStatuses(adapter: DaemonRegistryAdapter): Promise<Da
         deviceId: recordDeviceId(record),
       });
       statuses.push(statusFromRecord(record, health));
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (
+        code !== "ENOENT" &&
+        code !== "ECONNREFUSED" &&
+        code !== "ECONNRESET" &&
+        !(error instanceof Error && /connection closed|socket closed/i.test(error.message))
+      )
+        throw error;
+      // A zero-idle backend may disappear between reading its record and attaching.
     } finally {
-      await client.close();
+      await client?.close();
     }
   }
   return statuses;

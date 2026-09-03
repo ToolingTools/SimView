@@ -44,6 +44,33 @@ function server(...targets: MetroTarget[]): MetroServerInfo {
 }
 
 describe("Metro React Native target selection", () => {
+  test("closes a debugger connection that finishes after the inspector closes", async () => {
+    let finishConnection!: (session: FakeInspectorSession) => void;
+    let connectionStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      connectionStarted = resolve;
+    });
+    const pending = new Promise<FakeInspectorSession>((resolve) => {
+      finishConnection = resolve;
+    });
+    const inspector = new MetroInspector({
+      scan: async () => [server(target())],
+      status: async () => null,
+      connect: () => {
+        connectionStarted();
+        return pending;
+      },
+    });
+    const inspection = inspector.inspect(device, accessibilitySnapshot(), "closing");
+    await started;
+    inspector.close();
+    const late = new FakeInspectorSession({ result: { value: undefined } });
+    finishConnection(late);
+    expect(await inspection).toBeUndefined();
+    expect(late.closed).toBe(true);
+    expect(inspector.lastError).toBeUndefined();
+  });
+
   test("prefers an exact logical Simulator identifier", () => {
     const other = target({ id: "other", reactNative: { logicalDeviceId: "OTHER" } });
     const exact = target({ id: "exact", reactNative: { logicalDeviceId: "SIM-123" } });
