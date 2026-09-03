@@ -31,6 +31,9 @@ import {
   elementTreePageSchema,
   flattenAccessibilityTree,
   gestureTracksSchema,
+  inputKeyModifierSchema,
+  inputKeySchema,
+  inputReceiptSchema,
   inspectPointOutputSchema,
   jsonObjectSchema,
   jsonValueSchema,
@@ -61,8 +64,10 @@ import {
 import {
   type AccessibilityObservation,
   type DestinationVerification,
+  inputReceiptFromError,
   type NativeTapResolution,
   nativeTapRecovery,
+  rejectedInputReceipt,
   SimViewSession,
   type WarmObservation,
 } from "./session";
@@ -615,20 +620,6 @@ const semanticSelectorFields = {
   index: z.number().int().min(0).optional(),
 };
 
-const namedKeySchema = z.enum([
-  "delete",
-  "return",
-  "enter",
-  "tab",
-  "escape",
-  "arrow-up",
-  "arrow-down",
-  "arrow-left",
-  "arrow-right",
-  "select-all",
-]);
-const keyModifierSchema = z.enum(["command", "shift", "option", "control"]);
-
 function containsUnsupportedTextControl(value: string): boolean {
   for (const character of value) {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -661,8 +652,8 @@ const actionSchema = z.discriminatedUnion("type", [
   z
     .object({
       type: z.literal("press_key"),
-      key: namedKeySchema,
-      modifiers: z.array(keyModifierSchema).max(4).optional(),
+      key: inputKeySchema,
+      modifiers: z.array(inputKeyModifierSchema).max(4).optional(),
       repeat: z.number().int().min(1).max(100).default(1),
     })
     .strict(),
@@ -810,19 +801,13 @@ function preflightActions(
 }
 
 function rejectedDispatchedAction(error: unknown) {
-  return {
-    accepted: false,
-    safeToContinue: false,
-    inputDispatched: true,
-    code: "action_rejected",
-    retryable: false,
-    retryInput: false,
-    ...(error instanceof Error ? { message: error.message } : {}),
-  } as const;
+  return inputReceiptFromError(error);
 }
 
 const DISPATCHED_INPUT_HARD_STOP =
   "HARD STOP — INPUT WAS DISPATCHED. No further device input may be sent until the user supplies new direction or an independent UI change occurs.";
+const RAW_INPUT_RECEIPT_GUIDANCE =
+  "Returns an explicit dispatch receipt. accepted:true means SimView submitted and acknowledged the input. If inputDispatched:true accompanies an error, the action may have reached the device: retryInput remains false, so reconnect and observe without replaying it.";
 
 function rejectedSemanticTap(
   resolution: NativeTapResolution,
@@ -1383,14 +1368,8 @@ export function createServer(
   };
   const dispatchAction = async (action: z.output<typeof actionSchema>) => {
     const acceptedInput = async (input: z.output<typeof relayInputSchema>) => {
-      const receipt = await session.dispatchInput(input);
-      return {
-        ...receipt,
-        accepted: true,
-        safeToContinue: true,
-        inputDispatched: true,
-        interaction: receipt,
-      };
+      const receipt = await session.dispatchInputReceipt(input);
+      return receipt.accepted ? { ...receipt, interaction: receipt } : receipt;
     };
     switch (action.type) {
       case "tap":
@@ -1479,10 +1458,16 @@ export function createServer(
         const verificationBaseline = action.verifyDestination
           ? await captureObservationBaseline(session)
           : undefined;
-        const receipt = await session.dispatchInput({
+        const receipt = await session.dispatchInputReceipt({
           method: "input.tap",
           params: resolution.point,
         });
+        if (!receipt.accepted) {
+          return {
+            ...receipt,
+            interaction: compactNativeTapResolution(resolution),
+          };
+        }
         const destinationVerification = action.verifyDestination
           ? await session.verifyNativeDestination(action.verifyDestination, {
               afterRevision: verificationBaseline?.afterRevision,
@@ -1929,14 +1914,13 @@ export function createServer(
     "press_key",
     {
       title: "Press key",
-      description:
-        "Press a named keyboard key. Use this for Return, Tab, Delete, Escape, or arrow-key navigation instead of embedding control characters in type_text.",
+      description: `Press a named keyboard key. Use this for Return, Tab, Delete, Escape, or arrow-key navigation instead of embedding control characters in type_text. ${RAW_INPUT_RECEIPT_GUIDANCE}`,
       inputSchema: {
-        key: namedKeySchema,
-        modifiers: z.array(keyModifierSchema).max(4).optional(),
+        key: inputKeySchema,
+        modifiers: z.array(inputKeyModifierSchema).max(4).optional(),
         repeat: z.number().int().min(1).max(100).default(1),
       },
-      outputSchema: genericObjectOutputSchema,
+      outputSchema: inputReceiptSchema,
     },
     ({ key, modifiers, repeat }) =>
       runStandaloneSemanticAction(
@@ -2604,16 +2588,24 @@ function registerAccessibilityTools(
 function registerInputTools(server: McpServer, session: SimViewSession): void {
   const input = async (value: unknown) => {
     const parsed = relayInputSchema.parse(value);
-    const result = await session.dispatchInput(parsed);
-    return toolResult("Device input accepted.", result);
+    const receipt = await session.dispatchInputReceipt(parsed);
+    return toolResult(
+      receipt.accepted
+        ? "Device input accepted."
+        : receipt.inputDispatched
+          ? `${DISPATCHED_INPUT_HARD_STOP} Reconnect and observe without replaying the input.`
+          : "Device input was rejected before dispatch; follow the receipt recovery action.",
+      receipt,
+      !receipt.accepted,
+    );
   };
   server.registerTool(
     "tap",
     {
       title: "Tap",
-      description: "Tap a normalized device coordinate.",
+      description: `Tap a normalized device coordinate. ${RAW_INPUT_RECEIPT_GUIDANCE}`,
       inputSchema: { x: z.number().min(0).max(1), y: z.number().min(0).max(1) },
-      outputSchema: acceptedOutputSchema,
+      outputSchema: inputReceiptSchema,
     },
     ({ x, y }) => input({ method: "input.tap", params: { x, y } }),
   );
@@ -2621,13 +2613,13 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "swipe",
     {
       title: "Swipe",
-      description: "Swipe between normalized device coordinates.",
+      description: `Swipe between normalized device coordinates. ${RAW_INPUT_RECEIPT_GUIDANCE}`,
       inputSchema: {
         from: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
         to: z.object({ x: z.number().min(0).max(1), y: z.number().min(0).max(1) }),
         durationMs: z.number().int().min(50).max(10_000).default(350),
       },
-      outputSchema: acceptedOutputSchema,
+      outputSchema: inputReceiptSchema,
     },
     ({ from, to, durationMs }) =>
       input({ method: "input.swipe", params: { from, to, durationMs } }),
@@ -2636,10 +2628,9 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "perform_gesture",
     {
       title: "Perform gesture",
-      description:
-        "Perform one or two normalized timestamped pointer tracks (up to five seconds and 120 total samples).",
+      description: `Perform one or two normalized timestamped pointer tracks (up to five seconds and 120 total samples). ${RAW_INPUT_RECEIPT_GUIDANCE}`,
       inputSchema: { tracks: gestureTracksSchema },
-      outputSchema: acceptedOutputSchema,
+      outputSchema: inputReceiptSchema,
     },
     ({ tracks }) => input({ method: "input.gesture", params: { tracks } }),
   );
@@ -2647,13 +2638,13 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "long_press",
     {
       title: "Long press",
-      description: "Hold a normalized device coordinate.",
+      description: `Hold a normalized device coordinate. ${RAW_INPUT_RECEIPT_GUIDANCE}`,
       inputSchema: {
         x: z.number().min(0).max(1),
         y: z.number().min(0).max(1),
         durationMs: z.number().int().min(100).max(10_000).default(600),
       },
-      outputSchema: acceptedOutputSchema,
+      outputSchema: inputReceiptSchema,
     },
     ({ x, y, durationMs }) => input({ method: "input.longPress", params: { x, y, durationMs } }),
   );
@@ -2661,24 +2652,24 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "type_text",
     {
       title: "Type text",
-      description: "Type text at the selected device's declared ASCII or Unicode capability level.",
+      description: `Type text at the selected device's declared ASCII or Unicode capability level. ${RAW_INPUT_RECEIPT_GUIDANCE}`,
       inputSchema: { text: z.string().max(10_000) },
-      outputSchema: acceptedOutputSchema,
+      outputSchema: inputReceiptSchema,
     },
     ({ text }) => {
       if (containsUnsupportedTextControl(text)) {
         return Promise.resolve(
           toolResult(
             "type_text accepts literal printable text only; use press_key for Return, Tab, or Delete.",
-            {
-              accepted: false,
-              safeToContinue: false,
-              inputDispatched: false,
-              retryInput: false,
-              recoveryAllowed: false,
+            rejectedInputReceipt({
               code: "special_key_requires_press_key",
+              message:
+                "type_text accepts literal printable text only; use press_key for Return, Tab, or Delete.",
+              inputDispatched: false,
               retryable: false,
-            },
+              recoveryAllowed: true,
+              recoveryAction: "press_key",
+            }),
             true,
           ),
         );
@@ -2690,11 +2681,11 @@ function registerInputTools(server: McpServer, session: SimViewSession): void {
     "press_button",
     {
       title: "Press button",
-      description: "Press a supported device hardware or navigation button.",
+      description: `Press a supported device hardware or navigation button. ${RAW_INPUT_RECEIPT_GUIDANCE}`,
       inputSchema: {
         button: z.enum(["home", "back", "overview", "lock", "volume-up", "volume-down", "action"]),
       },
-      outputSchema: acceptedOutputSchema,
+      outputSchema: inputReceiptSchema,
     },
     ({ button }) => input({ method: "input.button", params: { button } }),
   );
@@ -2790,15 +2781,16 @@ function registerAppBridgeTools(
           ]),
           params: z.record(z.string(), z.unknown()),
         },
-        outputSchema: acceptedOutputSchema,
+        outputSchema: inputReceiptSchema,
         _meta: metadata.appOnly,
       },
       async ({ method, params }) => {
         const parsed = relayInputSchema.parse({ method, params });
-        const result = await session.dispatchInput(parsed);
+        const receipt = await session.dispatchInputReceipt(parsed);
         return {
           content: [],
-          structuredContent: result,
+          structuredContent: receipt,
+          ...(!receipt.accepted ? { isError: true } : {}),
         };
       },
     );

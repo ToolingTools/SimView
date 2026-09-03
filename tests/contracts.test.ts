@@ -13,6 +13,7 @@ import {
   elementSearchQuerySchema,
   elementTreeOutputSchema,
   elementTreePageSchema,
+  inputReceiptSchema,
   inspectPointOutputSchema,
   iosAccessibilityStatusSchema,
   methodSchemas,
@@ -48,6 +49,44 @@ describe("shared protocol contracts", () => {
     });
     expect(
       accessibilitySelectorSchema.safeParse({ identifier: "submit", unsupported: true }).success,
+    ).toBe(false);
+  });
+
+  test("requires explicit non-replayable input receipts", () => {
+    expect(
+      inputReceiptSchema.parse({
+        accepted: true,
+        inputDispatched: true,
+        safeToContinue: true,
+        retryable: false,
+        retryInput: false,
+        recoveryAllowed: false,
+        code: "input_accepted",
+      }),
+    ).toMatchObject({ accepted: true, inputDispatched: true, retryInput: false });
+    expect(
+      inputReceiptSchema.parse({
+        accepted: false,
+        inputDispatched: true,
+        safeToContinue: false,
+        retryable: false,
+        retryInput: false,
+        recoveryAllowed: true,
+        recoveryAction: "reconnect_then_observe",
+        code: "input_dispatch_uncertain",
+      }),
+    ).toMatchObject({ accepted: false, recoveryAction: "reconnect_then_observe" });
+    expect(inputReceiptSchema.safeParse({ accepted: true }).success).toBe(false);
+    expect(
+      inputReceiptSchema.safeParse({
+        accepted: false,
+        inputDispatched: true,
+        safeToContinue: false,
+        retryable: true,
+        retryInput: true,
+        recoveryAllowed: true,
+        code: "unsafe_retry",
+      }).success,
     ).toBe(false);
   });
 
@@ -207,14 +246,13 @@ describe("shared protocol contracts", () => {
   });
 
   test("normalizes legacy iOS descriptions and validates Android device capabilities", () => {
-    expect(
-      parseDeviceDescription({
-        udid: "SIM-123",
-        name: "iPhone",
-        state: "Booted",
-        runtime: "iOS 26.0",
-      }),
-    ).toMatchObject({
+    const legacyIOSDevice = parseDeviceDescription({
+      udid: "SIM-123",
+      name: "iPhone",
+      state: "Booted",
+      runtime: "iOS 26.0",
+    });
+    expect(legacyIOSDevice).toMatchObject({
       id: "ios:SIM-123",
       platform: "ios",
       kind: "simulator",
@@ -222,6 +260,9 @@ describe("shared protocol contracts", () => {
       available: true,
       udid: "SIM-123",
     });
+    expect(legacyIOSDevice.capabilities.input.keys).toEqual(
+      expect.arrayContaining(["return", "delete"]),
+    );
 
     expect(
       deviceDescriptionSchema.parse({
@@ -238,6 +279,7 @@ describe("shared protocol contracts", () => {
           input: {
             touch: true,
             text: "unicode",
+            keys: [],
             buttons: ["home", "back", "overview", "lock"],
           },
           orientation: true,

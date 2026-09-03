@@ -221,7 +221,7 @@ Tools:
 - `open_simview`
 - `connect_device`
 - `list_devices`
-- `tap`, `swipe`, `long_press`, `type_text`, `press_button`, `set_orientation`, `perform_gesture`
+- `tap`, `swipe`, `long_press`, `type_text`, `press_key`, `press_button`, `set_orientation`, `perform_gesture`
 - `perform_actions`
 - `take_screenshot`
 - `observe_screen`, `get_element_tree`, `get_accessibility_tree`, `search_elements`, `find_elements`, `tap_element`
@@ -233,6 +233,15 @@ Tools:
 `list_devices` returns only available devices by default and caps each response
 at 25 entries. Pass `availableOnly: false` with `offset` and `limit` to inspect
 shutdown or unavailable inventory without overflowing MCP host result limits.
+
+Every raw input tool returns an explicit non-replayable receipt. An
+`accepted: true` receipt means SimView submitted and acknowledged the input. A
+pre-dispatch capability or connection failure reports `inputDispatched: false`;
+a transport failure after submission reports `inputDispatched: true`,
+`safeToContinue: false`, and `retryInput: false`, so callers reconnect and
+observe without replaying the action. `get_simview_state` exposes the selected
+device's named-key support in `device.capabilities.input.keys`; iOS includes
+Return and Delete, while Android currently reports no named-key support.
 
 The standalone browser preview uses the authenticated localhost stream. The
 embedded MCP App does not make localhost HTTP or WebSocket requests: Codex

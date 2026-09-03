@@ -24,7 +24,9 @@ import {
   type ElementFallbackDetail,
   type ElementFallbackReason,
   type ElementTreeOutput,
+  type InputReceipt,
   type IOSAccessibilityStatus,
+  inputReceiptSchema,
   type McpConnectionContext,
   normalizedPointSchema,
   normalizeSemanticSearchText,
@@ -155,6 +157,56 @@ export type NativeTapRecovery = {
   recoveryAction?: NativeTapRecoveryAction;
   coordinateFallback?: NativeCoordinateFallback;
 };
+
+type RejectedInputReceiptOptions = {
+  code: string;
+  message: string;
+  inputDispatched: boolean;
+  retryable: boolean;
+  recoveryAllowed: boolean;
+  recoveryAction?: InputReceipt["recoveryAction"];
+};
+
+class InputDispatchFailure extends Error {
+  constructor(readonly receipt: InputReceipt) {
+    super(receipt.message ?? "Device input failed");
+    this.name = "InputDispatchFailure";
+  }
+}
+
+export function acceptedInputReceipt(result: Record<string, unknown>): InputReceipt {
+  return inputReceiptSchema.parse({
+    ...result,
+    accepted: true,
+    inputDispatched: true,
+    safeToContinue: true,
+    retryable: false,
+    retryInput: false,
+    recoveryAllowed: false,
+    code: "input_accepted",
+  });
+}
+
+export function rejectedInputReceipt(options: RejectedInputReceiptOptions): InputReceipt {
+  return inputReceiptSchema.parse({
+    accepted: false,
+    safeToContinue: false,
+    retryInput: false,
+    ...options,
+  });
+}
+
+export function inputReceiptFromError(error: unknown): InputReceipt {
+  if (error instanceof InputDispatchFailure) return error.receipt;
+  return rejectedInputReceipt({
+    code: "input_dispatch_uncertain",
+    message: error instanceof Error ? error.message : "Device input transport failed",
+    inputDispatched: true,
+    retryable: false,
+    recoveryAllowed: true,
+    recoveryAction: "reconnect_then_observe",
+  });
+}
 
 export function nativeTapRecovery(resolution: NativeTapResolution): NativeTapRecovery {
   switch (resolution.code) {
@@ -1759,9 +1811,10 @@ export class SimViewSession {
             return Response.json(await session.selectDevice(selectedId));
           }
           if (url.pathname === "/input" && request.method === "POST") {
-            return Response.json(
-              await session.dispatchInput(relayInputSchema.parse(await request.json())),
+            const receipt = await session.dispatchInputReceipt(
+              relayInputSchema.parse(await request.json()),
             );
+            return Response.json(receipt, { status: receipt.accepted ? 200 : 409 });
           }
           if (url.pathname === "/annotation" && request.method === "POST") {
             const body = annotationMutationSchema.parse(await request.json());
@@ -1937,44 +1990,120 @@ export class SimViewSession {
   }
 
   async dispatchInput(input: z.output<typeof relayInputSchema>): Promise<Record<string, unknown>> {
-    const client = this.requireClient();
+    let client: SimViewClient;
+    try {
+      client = this.requireClient();
+    } catch (error) {
+      throw new InputDispatchFailure(
+        rejectedInputReceipt({
+          code: "input_unavailable",
+          message: error instanceof Error ? error.message : "Device input is unavailable",
+          inputDispatched: false,
+          retryable: true,
+          recoveryAllowed: true,
+          recoveryAction: "connect_device",
+        }),
+      );
+    }
     const capabilities = this.device?.capabilities.input;
-    if (!capabilities) throw new Error("The selected device has no input capabilities");
-    this.#clearSemanticState();
+    if (!capabilities) {
+      throw new InputDispatchFailure(
+        rejectedInputReceipt({
+          code: "input_unavailable",
+          message: "The selected device has no input capabilities",
+          inputDispatched: false,
+          retryable: true,
+          recoveryAllowed: true,
+          recoveryAction: "connect_device",
+        }),
+      );
+    }
+    const unsupported = (message: string) =>
+      new InputDispatchFailure(
+        rejectedInputReceipt({
+          code: "input_unsupported",
+          message,
+          inputDispatched: false,
+          retryable: false,
+          recoveryAllowed: true,
+          recoveryAction: "use_supported_input",
+        }),
+      );
     switch (input.method) {
       case "input.touch":
         if (!(capabilities.rawTouch ?? capabilities.touch))
-          throw new Error("Raw touch is not supported by the selected device");
-        return client.request(input.method, input.params);
+          throw unsupported("Raw touch is not supported by the selected device");
+        break;
       case "input.tap":
-        if (!capabilities.touch) throw new Error("Tap is not supported by the selected device");
-        return client.request(input.method, input.params);
+        if (!capabilities.touch) throw unsupported("Tap is not supported by the selected device");
+        break;
       case "input.longPress":
         if (!capabilities.touch)
-          throw new Error("Long press is not supported by the selected device");
-        return client.request(input.method, input.params);
+          throw unsupported("Long press is not supported by the selected device");
+        break;
       case "input.swipe":
-        if (!capabilities.touch) throw new Error("Swipe is not supported by the selected device");
-        return client.request(input.method, input.params);
+        if (!capabilities.touch) throw unsupported("Swipe is not supported by the selected device");
+        break;
       case "input.gesture":
         if (input.params.tracks.length > 1 && !capabilities.multiTouch) {
-          throw new Error("Multi-touch gestures are not supported by the selected device runtime");
+          throw unsupported(
+            "Multi-touch gestures are not supported by the selected device runtime",
+          );
         }
         if (!(capabilities.rawTouch ?? capabilities.touch)) {
-          throw new Error("Continuous gestures are not supported by the selected device");
+          throw unsupported("Continuous gestures are not supported by the selected device");
         }
-        return client.request(input.method, input.params);
+        break;
       case "input.typeText":
         if (capabilities.text === "none")
-          throw new Error("Text input is not supported by the selected device");
-        return client.request(input.method, input.params);
+          throw unsupported("Text input is not supported by the selected device");
+        break;
       case "input.key":
-        return client.request(input.method, input.params);
+        if (
+          this.device?.platform === "android" ||
+          (capabilities.keys !== undefined && !capabilities.keys.includes(input.params.key))
+        ) {
+          throw unsupported(
+            `${input.params.key} key input is not supported by the selected device`,
+          );
+        }
+        break;
       case "input.button":
         if (!capabilities.buttons.includes(input.params.button)) {
-          throw new Error(`${input.params.button} is not supported by the selected device`);
+          throw unsupported(`${input.params.button} is not supported by the selected device`);
         }
-        return client.request(input.method, input.params);
+        break;
+    }
+    this.#clearSemanticState();
+    try {
+      switch (input.method) {
+        case "input.touch":
+          return await client.request(input.method, input.params);
+        case "input.tap":
+          return await client.request(input.method, input.params);
+        case "input.longPress":
+          return await client.request(input.method, input.params);
+        case "input.swipe":
+          return await client.request(input.method, input.params);
+        case "input.gesture":
+          return await client.request(input.method, input.params);
+        case "input.typeText":
+          return await client.request(input.method, input.params);
+        case "input.key":
+          return await client.request(input.method, input.params);
+        case "input.button":
+          return await client.request(input.method, input.params);
+      }
+    } catch (error) {
+      throw new InputDispatchFailure(inputReceiptFromError(error));
+    }
+  }
+
+  async dispatchInputReceipt(input: z.output<typeof relayInputSchema>): Promise<InputReceipt> {
+    try {
+      return acceptedInputReceipt(await this.dispatchInput(input));
+    } catch (error) {
+      return inputReceiptFromError(error);
     }
   }
 

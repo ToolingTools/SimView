@@ -45,6 +45,41 @@ export const semanticErrorSchema = z.object({
 });
 export type SemanticError = z.output<typeof semanticErrorSchema>;
 
+export const inputRecoveryActionSchema = z.enum([
+  "connect_device",
+  "use_supported_input",
+  "press_key",
+  "reconnect_then_observe",
+]);
+
+export const inputReceiptSchema = z
+  .object({
+    accepted: z
+      .boolean()
+      .describe("True only after the input request was submitted and acknowledged by SimView."),
+    inputDispatched: z
+      .boolean()
+      .describe(
+        "Whether the action reached, or may have reached, the device input transport. Never replay when true.",
+      ),
+    safeToContinue: z
+      .boolean()
+      .describe("Whether subsequent device input is safe without first completing recovery."),
+    retryable: z.boolean().describe("Whether the failure condition may be recoverable."),
+    retryInput: z
+      .literal(false)
+      .describe(
+        "Raw input is never automatically replayable, including after transport uncertainty.",
+      ),
+    recoveryAllowed: z.boolean(),
+    recoveryAction: inputRecoveryActionSchema.optional(),
+    code: z.string().min(1),
+    message: z.string().min(1).optional(),
+  })
+  .passthrough();
+
+export type InputReceipt = z.output<typeof inputReceiptSchema>;
+
 export const previewPacketBatchSchema = z.object({
   reset: z.boolean(),
   configuration: z.string().optional(),

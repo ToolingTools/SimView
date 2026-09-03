@@ -1894,7 +1894,8 @@ describe("MCP app tools", () => {
       expect(standalone.structuredContent).toMatchObject({
         inputDispatched: true,
         retryInput: false,
-        code: "action_rejected",
+        recoveryAction: "reconnect_then_observe",
+        code: "input_dispatch_uncertain",
       });
 
       const batch = await client.callTool({
@@ -1909,7 +1910,14 @@ describe("MCP app tools", () => {
         completedActionCount: 0,
         dispatchedActionCount: 1,
         failedActionIndex: 0,
-        receipts: [{ inputDispatched: true, retryInput: false, code: "action_rejected" }],
+        receipts: [
+          {
+            inputDispatched: true,
+            retryInput: false,
+            recoveryAction: "reconnect_then_observe",
+            code: "input_dispatch_uncertain",
+          },
+        ],
       });
     } finally {
       await Promise.all([client.close(), server.close(), session.close()]);
@@ -3472,6 +3480,129 @@ describe("MCP app tools", () => {
         source: "src/ShopMenuScreen.tsx",
       },
     });
+  });
+});
+
+describe("raw input receipts", () => {
+  test("advertises the non-replayable receipt contract on every raw input tool", async () => {
+    const session = new SimViewSession();
+    session.device = iosDevice("raw-receipt", "Raw Receipt");
+    session.client = {
+      connected: true,
+      request: async () => ({ accepted: true }),
+      close: async () => {},
+    } as never;
+    const server = createServer(session);
+    const { client, closeHarness } = await connectMcpTestServer("raw-receipts", session, server);
+    try {
+      const tools = new Map((await client.listTools()).tools.map((tool) => [tool.name, tool]));
+      for (const name of [
+        "tap",
+        "swipe",
+        "perform_gesture",
+        "long_press",
+        "type_text",
+        "press_key",
+        "press_button",
+        "device_input",
+        "simulator_input",
+      ] as const) {
+        const schema = tools.get(name)?.outputSchema as { required?: string[] } | undefined;
+        expect(schema?.required).toEqual(
+          expect.arrayContaining([
+            "accepted",
+            "inputDispatched",
+            "safeToContinue",
+            "retryable",
+            "retryInput",
+            "recoveryAllowed",
+            "code",
+          ]),
+        );
+      }
+      const result = await client.callTool({
+        name: "long_press",
+        arguments: { x: 0.5, y: 0.5, durationMs: 600 },
+      });
+      expect(result.isError).not.toBe(true);
+      expect(result.structuredContent).toMatchObject({
+        accepted: true,
+        inputDispatched: true,
+        safeToContinue: true,
+        retryable: false,
+        retryInput: false,
+        recoveryAllowed: false,
+        code: "input_accepted",
+      });
+      const state = await client.callTool({ name: "get_simview_state", arguments: {} });
+      expect(state.structuredContent).toMatchObject({
+        device: {
+          capabilities: {
+            input: { keys: expect.arrayContaining(["return", "delete"]) },
+          },
+        },
+      });
+    } finally {
+      await closeHarness();
+    }
+  });
+
+  test("returns transport uncertainty without replaying input", async () => {
+    const session = new SimViewSession();
+    session.device = iosDevice("raw-transport-loss", "Raw Transport Loss");
+    let connected = true;
+    let requests = 0;
+    session.client = {
+      get connected() {
+        return connected;
+      },
+      request: async () => {
+        requests += 1;
+        connected = false;
+        throw new Error("simview-core connection closed");
+      },
+      close: async () => {},
+    } as never;
+    const server = createServer(session);
+    const { client, closeHarness } = await connectMcpTestServer(
+      "raw-transport-loss",
+      session,
+      server,
+    );
+    try {
+      const uncertain = await client.callTool({
+        name: "long_press",
+        arguments: { x: 0.5, y: 0.5, durationMs: 600 },
+      });
+      expect(uncertain.isError).toBe(true);
+      expect(uncertain.structuredContent).toMatchObject({
+        accepted: false,
+        inputDispatched: true,
+        safeToContinue: false,
+        retryInput: false,
+        recoveryAction: "reconnect_then_observe",
+        code: "input_dispatch_uncertain",
+      });
+      expect((uncertain.content as Array<{ text?: string }>)[0]?.text).toContain(
+        "HARD STOP — INPUT WAS DISPATCHED",
+      );
+
+      const unavailable = await client.callTool({
+        name: "tap",
+        arguments: { x: 0.5, y: 0.5 },
+      });
+      expect(unavailable.isError).toBe(true);
+      expect(unavailable.structuredContent).toMatchObject({
+        accepted: false,
+        inputDispatched: false,
+        retryInput: false,
+        recoveryAction: "connect_device",
+        code: "input_unavailable",
+      });
+      expect(requests).toBe(1);
+    } finally {
+      await closeHarness();
+    }
   });
 });
 

@@ -160,8 +160,8 @@ Android Emulator, or authorized Android device connected through ADB.
    unavailable post-action state, make one fresh semantic observation. Never
    repeat the accepted tap, and never fall back to coordinates merely because
    its embedded observation was stale.
-6. Use `tap`, `swipe`, `long_press`, `type_text`, and `press_button` for isolated
-   actions when no useful accessible target exists, or for the single
+6. Use `tap`, `swipe`, `long_press`, `type_text`, `press_key`, and `press_button`
+   for isolated actions when no useful accessible target exists, or for the single
    `tap_known_coordinate` recovery described above. Use `perform_gesture` for a
    timestamped pointer track. Two-track gestures require the device's
    `multiTouch` capability. Coordinates are normalized from 0 to 1.
@@ -169,7 +169,11 @@ Android Emulator, or authorized Android device connected through ADB.
    Use `replace_text` with an identifier, name, value, or placeholder selector
    when a field must be cleared and replaced exactly. Use `press_key` for Return,
    Delete, Tab, Escape, arrows, and other named special keys; never paste
-   backspace characters.
+   backspace characters. Check `get_simview_state` at
+   `device.capabilities.input.keys` before using a named key. Every raw input
+   result includes a non-replayable dispatch receipt. If it reports
+   `inputDispatched: true` with an error, reconnect and observe without replaying
+   the action; continue only after recovery makes `safeToContinue` true.
 7. Use `inspect_point` to attach semantic context to a coordinate. Enable the
    UIKit probe only for an iOS Simulator when class, controller, window, or
    scene context is needed and relaunching an explicitly selected third-party

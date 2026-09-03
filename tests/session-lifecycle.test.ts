@@ -77,3 +77,85 @@ describe("review shutdown races", () => {
     }
   });
 });
+
+describe("input dispatch lifecycle", () => {
+  test("distinguishes a pre-dispatch unsupported action from transport uncertainty", async () => {
+    const session = new SimViewSession();
+    const device = parseDeviceDescription({
+      udid: "input-receipt",
+      name: "Input Receipt",
+      state: "Booted",
+      runtime: "iOS",
+    });
+    let connected = true;
+    let requests = 0;
+    session.device = {
+      ...device,
+      capabilities: {
+        ...device.capabilities,
+        input: { ...device.capabilities.input, touch: false, rawTouch: false },
+      },
+    };
+    session.client = {
+      get connected() {
+        return connected;
+      },
+      request: async () => {
+        requests += 1;
+        connected = false;
+        throw new Error("simview-core connection closed");
+      },
+      close: async () => {},
+    } as unknown as SimViewClient;
+
+    try {
+      expect(
+        await session.dispatchInputReceipt({
+          method: "input.longPress",
+          params: { x: 0.5, y: 0.5, durationMs: 600 },
+        }),
+      ).toMatchObject({
+        accepted: false,
+        inputDispatched: false,
+        retryInput: false,
+        recoveryAction: "use_supported_input",
+        code: "input_unsupported",
+      });
+      expect(requests).toBe(0);
+
+      session.device = device;
+      expect(
+        await session.dispatchInputReceipt({
+          method: "input.longPress",
+          params: { x: 0.5, y: 0.5, durationMs: 600 },
+        }),
+      ).toMatchObject({
+        accepted: false,
+        inputDispatched: true,
+        safeToContinue: false,
+        retryable: false,
+        retryInput: false,
+        recoveryAllowed: true,
+        recoveryAction: "reconnect_then_observe",
+        code: "input_dispatch_uncertain",
+      });
+      expect(requests).toBe(1);
+
+      expect(
+        await session.dispatchInputReceipt({
+          method: "input.tap",
+          params: { x: 0.5, y: 0.5 },
+        }),
+      ).toMatchObject({
+        accepted: false,
+        inputDispatched: false,
+        retryInput: false,
+        recoveryAction: "connect_device",
+        code: "input_unavailable",
+      });
+      expect(requests).toBe(1);
+    } finally {
+      await session.close();
+    }
+  });
+});

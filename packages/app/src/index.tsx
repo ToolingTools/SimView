@@ -11,6 +11,7 @@ import {
   type ElementTreePage,
   elementTreeOutputSchema,
   elementTreePageSchema,
+  inputReceiptSchema,
   inspectPointOutputSchema,
   previewPacketBatchSchema,
   type SaveReviewImagesOutput,
@@ -771,13 +772,17 @@ function SimView() {
 
   async function relayInput(method: string, params: unknown) {
     if (embedded) {
-      await bridge.callServerTool({
+      const result = await bridge.callServerTool({
         name: "device_input",
         arguments: {
           method,
           params: params as Record<string, unknown>,
         },
       });
+      const receipt = inputReceiptSchema.parse(result.structuredContent);
+      if (!receipt.accepted) {
+        throw new Error(receipt.message ?? `Device input failed (${receipt.code})`);
+      }
       return;
     }
     if (!state.relayOrigin || !token) return;
@@ -786,7 +791,10 @@ function SimView() {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ method, params }),
     });
-    if (!response.ok) throw new Error(`Device input failed (${response.status})`);
+    const receipt = inputReceiptSchema.parse(await response.json());
+    if (!response.ok || !receipt.accepted) {
+      throw new Error(receipt.message ?? `Device input failed (${receipt.code})`);
+    }
   }
 
   async function refreshSelectedDeviceState() {
