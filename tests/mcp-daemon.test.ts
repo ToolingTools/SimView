@@ -96,6 +96,15 @@ describe("shared MCP service", () => {
       expect(one.resources[0]?.uri).toContain("/first-host/");
       expect(two.resources[0]?.uri).toContain("/second-host/");
       expect(one.resources[0]?.uri).not.toBe(two.resources[0]?.uri);
+      const [templatesOne, templatesTwo] = await Promise.all([
+        first.client.listResourceTemplates(),
+        second.client.listResourceTemplates(),
+      ]);
+      expect(templatesOne.resourceTemplates[0]?.uriTemplate).toContain("/first-host/");
+      expect(templatesTwo.resourceTemplates[0]?.uriTemplate).toContain("/second-host/");
+      expect(templatesOne.resourceTemplates[0]?.uriTemplate).not.toBe(
+        templatesTwo.resourceTemplates[0]?.uriTemplate,
+      );
       const [stateOne, stateTwo] = await Promise.all([
         first.client.callTool({ name: "get_simview_state", arguments: {} }),
         second.client.callTool({ name: "get_simview_state", arguments: {} }),

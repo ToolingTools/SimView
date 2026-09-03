@@ -893,11 +893,12 @@ export function createServer(
     now?: () => number;
   } = {},
 ): McpServer {
+  const resourceVersion = session.resourceVersion ?? VERSION;
   const server = new McpServer(
-    { name: "simview", version: session.resourceVersion ?? VERSION },
+    { name: "simview", version: resourceVersion },
     { capabilities: { resources: { subscribe: true } } },
   );
-  const metadata = resourceMetadata(session.reviewId, session.resourceVersion);
+  const metadata = resourceMetadata(session.reviewId, resourceVersion);
   let accessibilityResourceSubscribed = false;
   server.server.setRequestHandler(
     "resources/subscribe",
@@ -2026,7 +2027,7 @@ export function createServer(
 
   server.registerResource(
     "SimView review preview",
-    new ResourceTemplate(`ui://simview/${VERSION}/reviews/{reviewId}/preview.html`, {
+    new ResourceTemplate(`ui://simview/${resourceVersion}/reviews/{reviewId}/preview.html`, {
       list: undefined,
     }),
     {
