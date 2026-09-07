@@ -726,6 +726,7 @@ export class SimViewSession {
           };
         })
       : undefined;
+    if (imagePromise) void imagePromise.catch(() => {});
     try {
       const metadata = await client.request("observation.get", {
         visual,
@@ -783,6 +784,7 @@ export class SimViewSession {
       throw new Error("Screenshots are not supported by the selected device");
     }
     const client = this.requireClient();
+    let cancelBytesWait = () => {};
     const bytesPromise = new Promise<Uint8Array>((resolve, reject) => {
       const timeout = setTimeout(() => {
         unsubscribe();
@@ -793,11 +795,20 @@ export class SimViewSession {
         unsubscribe();
         resolve(bytes);
       });
+      cancelBytesWait = () => {
+        clearTimeout(timeout);
+        unsubscribe();
+      };
     });
-    const metadata = await client.request("capture.screenshot", {});
-    const bytes = await bytesPromise;
-    this.frameId = metadata.frameId;
-    return { bytes, ...metadata };
+    const metadataPromise = client.request("capture.screenshot", {});
+    try {
+      const [metadata, bytes] = await Promise.all([metadataPromise, bytesPromise]);
+      this.frameId = metadata.frameId;
+      return { bytes, ...metadata };
+    } catch (error) {
+      cancelBytesWait();
+      throw error;
+    }
   }
 
   async accessibilitySnapshot(

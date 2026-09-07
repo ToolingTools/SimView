@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { FrameDecoder, FrameKind, encodeFrame, SimViewClient } from "@simview/client";
+import { encodeFrame, FrameDecoder, FrameKind, SimViewClient } from "@simview/client";
 import type { ProtocolRequest } from "@simview/contracts";
 import { SimViewSession } from "../packages/mcp/src/session";
 
@@ -19,14 +19,19 @@ describe("browser preview ownership", () => {
     const session = new SimViewSession();
     session.client = primary;
     session.startRelay(await availablePort());
-    cleanups.push(() => session.close(), () => core.close());
+    cleanups.push(
+      () => session.close(),
+      () => core.close(),
+    );
 
     const origin = relayOrigin(session).replace(/^http/, "ws");
     const h264 = await authenticatedSocket(`${origin}/stream?codec=h264`, session.relayToken);
     await waitFor(() => core.connections.some((connection) => connection.previewEnabled));
     const mjpeg = await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
     await waitFor(() =>
-      core.connections.some((connection) => connection.codec === "mjpeg" && connection.previewEnabled),
+      core.connections.some(
+        (connection) => connection.codec === "mjpeg" && connection.previewEnabled,
+      ),
     );
 
     const secondary = core.connections.find((connection) => connection.codec === "mjpeg");
@@ -39,8 +44,10 @@ describe("browser preview ownership", () => {
     );
 
     h264.close();
-    await waitFor(() =>
-      core.connections.find((connection) => connection.codec === "h264")?.previewEnabled === false,
+    await waitFor(
+      () =>
+        core.connections.find((connection) => connection.codec === "h264")?.previewEnabled ===
+        false,
     );
   });
 
@@ -50,7 +57,10 @@ describe("browser preview ownership", () => {
     const session = new SimViewSession();
     session.client = primary;
     session.startRelay(await availablePort());
-    cleanups.push(() => session.close(), () => core.close());
+    cleanups.push(
+      () => session.close(),
+      () => core.close(),
+    );
 
     const origin = relayOrigin(session).replace(/^http/, "ws");
     const h264 = await authenticatedSocket(`${origin}/stream?codec=h264`, session.relayToken);
@@ -60,17 +70,18 @@ describe("browser preview ownership", () => {
       `${origin}/stream?codec=mjpeg`,
       session.relayToken,
     );
-    await waitFor(() =>
-      core.connections.filter((connection) => connection.codec === "mjpeg").length === 1 &&
-      core.connections.find((connection) => connection.codec === "mjpeg")?.closed === true,
+    await waitFor(
+      () =>
+        core.connections.filter((connection) => connection.codec === "mjpeg").length === 1 &&
+        core.connections.find((connection) => connection.codec === "mjpeg")?.closed === true,
     );
     firstMjpeg.close();
 
     const retry = await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
     await waitFor(() =>
-      core.connections.filter((connection) => connection.codec === "mjpeg").some(
-        (connection) => connection.previewEnabled && !connection.closed,
-      ),
+      core.connections
+        .filter((connection) => connection.codec === "mjpeg")
+        .some((connection) => connection.previewEnabled && !connection.closed),
     );
     retry.close();
     h264.close();
