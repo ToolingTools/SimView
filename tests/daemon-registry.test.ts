@@ -160,6 +160,65 @@ describe("shared backend registry contracts", () => {
       await pruneDaemons(udid);
     }
   });
+
+  test("reuses one backend for omitted, explicit, and reordered effective environments", async () => {
+    const binary = fileURLToPath(new URL("fixtures/fake-simview-core.ts", import.meta.url));
+    await chmod(binary, 0o755);
+    const udid = randomUUID().toUpperCase();
+    const environment = Object.fromEntries(
+      Object.entries(process.env).filter(
+        (entry): entry is [string, string] => entry[1] !== undefined,
+      ),
+    );
+    let first: SimViewClient | undefined;
+    let second: SimViewClient | undefined;
+    let third: SimViewClient | undefined;
+    try {
+      first = await SimViewClient.acquire({ udid, binary });
+      second = await SimViewClient.acquire({ udid, binary, environment });
+      third = await SimViewClient.acquire({
+        udid,
+        binary,
+        environment: Object.fromEntries(Object.entries(environment).reverse()),
+      });
+      expect(new Set([first.socketPath, second.socketPath, third.socketPath]).size).toBe(1);
+      expect((await first.request("health.get", {})).clients).toBe(3);
+    } finally {
+      await Promise.all([first?.close(), second?.close(), third?.close()]);
+      await stopDaemons(SimViewClient, { udid }).catch(() => {});
+      await waitForDaemonExit(udid);
+      await pruneDaemons(udid);
+    }
+  });
+
+  test("isolates shared backends by requester cwd", async () => {
+    const binary = fileURLToPath(new URL("fixtures/fake-simview-core.ts", import.meta.url));
+    await chmod(binary, 0o755);
+    const [firstCwd, secondCwd] = await Promise.all([
+      mkdtemp(join(tmpdir(), "simview-cwd-one-")),
+      mkdtemp(join(tmpdir(), "simview-cwd-two-")),
+    ]);
+    const udid = randomUUID().toUpperCase();
+    let first: SimViewClient | undefined;
+    let second: SimViewClient | undefined;
+    try {
+      first = await SimViewClient.acquire({ udid, binary, cwd: firstCwd });
+      second = await SimViewClient.acquire({ udid, binary, cwd: secondCwd });
+      expect(first.socketPath).not.toBe(second.socketPath);
+      expect(
+        (await daemonStatuses(SimViewClient)).filter((item) => item.udid === udid),
+      ).toHaveLength(2);
+    } finally {
+      await Promise.all([first?.close(), second?.close()]);
+      await stopDaemons(SimViewClient, { udid }).catch(() => {});
+      await waitForDaemonExit(udid);
+      await pruneDaemons(udid);
+      await Promise.all([
+        rm(firstCwd, { recursive: true, force: true }),
+        rm(secondCwd, { recursive: true, force: true }),
+      ]);
+    }
+  });
 });
 
 async function waitForDaemonExit(udid: string): Promise<void> {

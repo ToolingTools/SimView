@@ -1,12 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { realpath } from "node:fs/promises";
 import {
   encodeFrame,
   FrameDecoder,
   FrameKind,
   type ProtocolRequest,
+  resolveNativeEnvironment,
   SimViewClient,
 } from "@simview/client";
 
@@ -66,6 +68,92 @@ describe("SimViewClient", () => {
         ).rejects.toThrow("cancelled");
       },
     );
+  });
+
+  test("cancels and reaps a hanging device discovery child", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "simview-discovery-test-"));
+    const binary = join(directory, "hang.ts");
+    const pidPath = join(directory, "child.pid");
+    const descendantPath = join(directory, "descendant.pid");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env bun\nconst descendant = Bun.spawn([process.execPath, '-e', ${JSON.stringify(`await Bun.write(${JSON.stringify(descendantPath)}, String(process.pid)); await Bun.sleep(60_000);`)}], { stdout: 'inherit', stderr: 'inherit' });\nawait Bun.write(${JSON.stringify(pidPath)}, String(process.pid));\nawait Bun.sleep(60_000);\n`,
+      { mode: 0o700 },
+    );
+    await chmod(binary, 0o700);
+    const controller = new AbortController();
+    const discovery = SimViewClient.listDevices(binary, undefined, {
+      signal: controller.signal,
+      timeoutMs: 10_000,
+    });
+    let pid: number | undefined;
+    let descendantPID: number | undefined;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const value = await readFile(pidPath, "utf8").catch(() => "");
+      const descendantValue = await readFile(descendantPath, "utf8").catch(() => "");
+      if (value && descendantValue) {
+        pid = Number(value);
+        descendantPID = Number(descendantValue);
+        break;
+      }
+      await Bun.sleep(10);
+    }
+    expect(pid).toBeGreaterThan(0);
+    expect(descendantPID).toBeGreaterThan(0);
+    controller.abort(new Error("review closed"));
+    await expect(discovery).rejects.toThrow("review closed");
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        process.kill(pid as number, 0);
+        process.kill(descendantPID as number, 0);
+      } catch {
+        await rm(directory, { recursive: true, force: true });
+        return;
+      }
+      await Bun.sleep(10);
+    }
+    try {
+      process.kill(pid as number, "SIGKILL");
+      process.kill(descendantPID as number, "SIGKILL");
+    } catch {
+      // The child exited between the final probe and cleanup.
+    }
+    await rm(directory, { recursive: true, force: true });
+    throw new Error("Cancelled discovery child was not reaped");
+  });
+
+  test("runs device discovery in its requester cwd", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "simview-discovery-cwd-test-"));
+    const binary = join(directory, "cwd.ts");
+    const cwdPath = join(directory, "observed-cwd");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env bun\nawait Bun.write(${JSON.stringify(cwdPath)}, process.cwd());\nconsole.log('[]');\n`,
+      { mode: 0o700 },
+    );
+    await chmod(binary, 0o700);
+    try {
+      await expect(
+        SimViewClient.listDevices(binary, undefined, { cwd: directory }),
+      ).resolves.toEqual([]);
+      expect((await readFile(cwdPath, "utf8")).trim()).toBe(await realpath(directory));
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  test("canonicalizes relative native paths while preserving empty overrides", () => {
+    const environment = resolveNativeEnvironment(
+      {
+        PATH: "bin::/usr/bin",
+        SIMVIEW_ADB_PATH: "",
+        SIMVIEW_PROBE_DYLIB: "probe.dylib",
+      },
+      "/tmp/requester",
+    );
+    expect(environment.PATH).toBe("/tmp/requester/bin:/tmp/requester:/usr/bin");
+    expect(environment.SIMVIEW_ADB_PATH).toBe("");
+    expect(environment.SIMVIEW_PROBE_DYLIB).toBe("/tmp/requester/probe.dylib");
   });
 });
 

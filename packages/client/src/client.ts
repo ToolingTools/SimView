@@ -62,7 +62,6 @@ const pathEnvironmentKeys = new Set([
   "SIMVIEW_ANDROID_AGENT_PATH",
   "SIMVIEW_PROBE_DYLIB",
   "SIMVIEW_XCTEST_PROVIDER_XCTESTRUN",
-  "SIMVIEW_BOUNDED_ANDROID_OBSERVATION_DECODER",
 ]);
 
 /** Resolve the exact native environment used by a child, including relative overrides. */
@@ -81,7 +80,13 @@ export function resolveNativeEnvironment(
             key,
             value
               .split(delimiter)
-              .map((entry) => (entry && !isAbsolute(entry) ? resolve(resolvedCwd, entry) : entry))
+              .map((entry) =>
+                entry === ""
+                  ? resolvedCwd
+                  : !isAbsolute(entry)
+                    ? resolve(resolvedCwd, entry)
+                    : entry,
+              )
               .join(delimiter),
           ],
         ];
@@ -89,20 +94,36 @@ export function resolveNativeEnvironment(
       return [
         [
           key,
-          pathEnvironmentKeys.has(key) && !isAbsolute(value) ? resolve(resolvedCwd, value) : value,
+          pathEnvironmentKeys.has(key) && value !== "" && !isAbsolute(value)
+            ? resolve(resolvedCwd, value)
+            : value,
         ],
       ];
     }),
   );
 }
 
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The process group may have already exited; the direct child is handled below.
+  }
+}
+
 async function terminateProcess(child: Bun.Subprocess): Promise<void> {
-  if (child.exitCode !== null) return;
-  child.kill();
+  if (child.exitCode !== null) {
+    signalProcessGroup(child.pid, "SIGTERM");
+    signalProcessGroup(child.pid, "SIGKILL");
+    return;
+  }
+  signalProcessGroup(child.pid, "SIGTERM");
+  if (child.exitCode === null) child.kill();
   const exited = await Promise.race([
     child.exited.then(() => true),
     Bun.sleep(2_000).then(() => false),
   ]);
+  signalProcessGroup(child.pid, "SIGKILL");
   if (!exited && child.exitCode === null) {
     child.kill(9);
     await child.exited;
@@ -194,12 +215,15 @@ export class SimViewClient {
     environment?: Record<string, string>,
     options: ListDevicesOptions = {},
   ): Promise<DeviceDescription[]> {
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new DOMException("Request aborted", "AbortError");
     const cwd = resolve(options.cwd ?? process.cwd());
     const child = Bun.spawn([resolve(cwd, binary), "devices"], {
       cwd,
       env: resolveNativeEnvironment(environment, cwd),
       stdout: "pipe",
       stderr: "pipe",
+      detached: true,
     });
     const output = Promise.all([
       new Response(child.stdout).text(),

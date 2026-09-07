@@ -337,6 +337,7 @@ export class SimViewSession {
   #reviewImageDirectories = new Set<string>();
   #closePromise: Promise<void> | undefined = undefined;
   #deviceDiscoveryControllers = new Set<AbortController>();
+  #deviceDiscoveryPromises = new Set<Promise<DeviceDescription[]>>();
   #connectionGeneration = 0;
   #metroInspector: MetroInspector;
   #closed = false;
@@ -498,13 +499,27 @@ export class SimViewSession {
     return (await this.devices()).filter((device) => device.available);
   }
 
-  devices(): Promise<DeviceDescription[]> {
+  async devices(signal?: AbortSignal): Promise<DeviceDescription[]> {
+    this.#assertOpen();
     const controller = new AbortController();
     this.#deviceDiscoveryControllers.add(controller);
-    return SimViewClient.listDevices(this.context?.coreBinary, this.context?.nativeEnvironment, {
-      cwd: this.context?.cwd,
-      signal: controller.signal,
-    }).finally(() => this.#deviceDiscoveryControllers.delete(controller));
+    const abort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    const promise = SimViewClient.listDevices(
+      this.context?.coreBinary,
+      this.context?.nativeEnvironment,
+      {
+        cwd: this.context?.cwd,
+        signal: controller.signal,
+      },
+    ).finally(() => {
+      signal?.removeEventListener("abort", abort);
+      this.#deviceDiscoveryControllers.delete(controller);
+      this.#deviceDiscoveryPromises.delete(promise);
+    });
+    this.#deviceDiscoveryPromises.add(promise);
+    return promise;
   }
 
   async refreshDevice(): Promise<SessionState> {
@@ -2139,6 +2154,7 @@ export class SimViewSession {
     this.#connectionGeneration += 1;
     for (const controller of this.#deviceDiscoveryControllers) controller.abort();
     this.#deviceDiscoveryControllers.clear();
+    await Promise.allSettled(this.#deviceDiscoveryPromises);
     for (const unsubscribe of this.#unsubscribers) unsubscribe();
     this.#unsubscribers = [];
     for (const viewer of this.viewers) viewer.close(1001, "SimView review closed");

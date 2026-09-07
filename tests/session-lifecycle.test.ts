@@ -76,6 +76,12 @@ describe("review shutdown races", () => {
       await session.close();
     }
   });
+
+  test("rejects device discovery started after review close", async () => {
+    const session = new SimViewSession();
+    await session.close();
+    await expect(session.devices()).rejects.toThrow("review is closed");
+  });
 });
 
 describe("input dispatch lifecycle", () => {

@@ -139,7 +139,7 @@ export async function runMcpDaemon(): Promise<void> {
             environment: {
               CLAUDE_CODE_ENTRYPOINT: hello.context.claudeDesktop ? "claude-desktop" : undefined,
             },
-            deviceProvider: () => session.devices(),
+            deviceProvider: (signal) => session.devices(signal),
           });
           const originalClose = mcp.server.onclose;
           mcp.server.onclose = () => {

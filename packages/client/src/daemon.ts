@@ -6,6 +6,7 @@ import {
   mkdir,
   open,
   readdir,
+  rmdir,
   readFile,
   rename,
   rm,
@@ -86,9 +87,12 @@ function instanceIdFor(
   deviceId: string,
   binaryHash: string,
   environment: Record<string, string>,
+  cwd: string,
 ): string {
   return createHash("sha256")
-    .update(`${deviceId}\0${PROTOCOL_VERSION}\0${SIMVIEW_VERSION}\0${binaryHash}`)
+    .update(
+      `${deviceId}\0${PROTOCOL_VERSION}\0${SIMVIEW_VERSION}\0${binaryHash}\0${resolve(cwd)}\0`,
+    )
     .update(JSON.stringify(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b))))
     .digest("hex")
     .slice(0, 20);
@@ -182,6 +186,7 @@ async function removeAbandonedInstance(instanceDirectory: string): Promise<boole
   if (lockDetails) {
     const contents = await readFile(lockPath, "utf8").catch(() => "");
     let owner: { pid: number; startedAt: string } | undefined;
+    let legacyOwnerAlive = false;
     try {
       const parsed: unknown = JSON.parse(contents);
       if (
@@ -193,15 +198,30 @@ async function removeAbandonedInstance(instanceDirectory: string): Promise<boole
         owner = parsed as { pid: number; startedAt: string };
       }
     } catch {
-      // Legacy empty/malformed locks are safe to remove after the stale window.
+      const legacyPID = Number(contents.split("\n", 1)[0]);
+      legacyOwnerAlive = Number.isSafeInteger(legacyPID) && legacyPID > 0 && isAlive(legacyPID);
     }
-    const snapshot = owner ? await processSnapshot([owner.pid]).catch(() => new Map()) : new Map();
-    if (owner && snapshot.get(owner.pid)?.startedAt === owner.startedAt) return false;
+    if (legacyOwnerAlive) return false;
+    if (owner) {
+      let snapshot;
+      try {
+        snapshot = await processSnapshot([owner.pid]);
+      } catch {
+        return false;
+      }
+      if (snapshot.get(owner.pid)?.startedAt === owner.startedAt) return false;
+    }
     if ((await readFile(lockPath, "utf8").catch(() => "")) !== contents) return false;
     await unlink(lockPath).catch(() => {});
   }
-  await rm(instanceDirectory, { recursive: true, force: true });
-  return true;
+  try {
+    await rmdir(instanceDirectory);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return true;
+    if ((error as NodeJS.ErrnoException).code === "ENOTEMPTY") return false;
+    throw error;
+  }
 }
 
 async function publishRecord(instanceDirectory: string, record: DaemonRecord): Promise<void> {
@@ -251,6 +271,7 @@ async function acquireLock(instanceDirectory: string): Promise<() => Promise<voi
       if (details && Date.now() - details.mtimeMs > LOCK_STALE_MS) {
         const existing = await readFile(lockPath, "utf8").catch(() => "");
         let owner: { pid: number; startedAt: string } | undefined;
+        let legacyOwnerAlive = false;
         try {
           const parsed: unknown = JSON.parse(existing);
           if (
@@ -262,12 +283,18 @@ async function acquireLock(instanceDirectory: string): Promise<() => Promise<voi
             owner = parsed as { pid: number; startedAt: string };
           }
         } catch {
-          // Empty and malformed legacy locks are reclaimable once stale.
+          const legacyPID = Number(existing.split("\n", 1)[0]);
+          legacyOwnerAlive = Number.isSafeInteger(legacyPID) && legacyPID > 0 && isAlive(legacyPID);
         }
-        const snapshot = owner
-          ? await processSnapshot([owner.pid]).catch(() => new Map())
-          : new Map();
-        const ownerAlive = owner && snapshot.get(owner.pid)?.startedAt === owner.startedAt;
+        let ownerAlive = legacyOwnerAlive;
+        if (owner) {
+          try {
+            const snapshot = await processSnapshot([owner.pid]);
+            ownerAlive = snapshot.get(owner.pid)?.startedAt === owner.startedAt;
+          } catch {
+            ownerAlive = true;
+          }
+        }
         if (!ownerAlive && (await readFile(lockPath, "utf8").catch(() => "")) === existing) {
           await unlink(lockPath).catch(() => {});
           continue;
@@ -391,7 +418,7 @@ async function acquireDaemonAttempt(
   const hash = await binarySha256(binary);
   const identity = resolveDeviceIdentity(options);
   const environment = resolveNativeEnvironment(options.environment, cwd);
-  const instanceId = instanceIdFor(identity.deviceId, hash, environment);
+  const instanceId = instanceIdFor(identity.deviceId, hash, environment, cwd);
   const root = registryRoot();
   const instanceDirectory = join(root, instanceId);
   await ensurePrivateDirectory(registryBase());

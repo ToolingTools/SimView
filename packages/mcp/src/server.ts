@@ -881,14 +881,16 @@ export function createServer(
   {
     browserFallbackDelayMs = BROWSER_FALLBACK_DELAY_MS,
     environment = process.env,
-    deviceProvider = () =>
-      import("@simview/client").then(({ SimViewClient }) => SimViewClient.listDevices()),
+    deviceProvider = (signal?: AbortSignal) =>
+      import("@simview/client").then(({ SimViewClient }) =>
+        SimViewClient.listDevices(undefined, undefined, { signal }),
+      ),
     deviceInventorySnapshotTTLMS = DEVICE_INVENTORY_SNAPSHOT_TTL_MS,
     now = Date.now,
   }: {
     browserFallbackDelayMs?: number;
     environment?: Readonly<Record<string, string | undefined>>;
-    deviceProvider?: () => Promise<DeviceDescription[]>;
+    deviceProvider?: (signal?: AbortSignal) => Promise<DeviceDescription[]>;
     deviceInventorySnapshotTTLMS?: number;
     now?: () => number;
   } = {},
@@ -971,7 +973,7 @@ export function createServer(
       state,
     );
   };
-  const listDevices = async (options: DeviceListOptions = {}) => {
+  const listDevices = async (options: DeviceListOptions = {}, signal?: AbortSignal) => {
     if (options.cursor) {
       if (
         options.availableOnly !== undefined ||
@@ -1004,7 +1006,7 @@ export function createServer(
         page,
       );
     }
-    const inventory = await deviceProvider();
+    const inventory = await deviceProvider(signal);
     if ((options.offset ?? 0) > 0) {
       const page = deviceListPage(inventory, options);
       const label = options.availableOnly === false ? "matching" : "available";
@@ -1647,7 +1649,7 @@ export function createServer(
       outputSchema: deviceListSchema,
       _meta: metadata.modelOnly,
     },
-    (options) => listDevices(options),
+    (options, extra) => listDevices(options, extra.mcpReq.signal),
   );
 
   server.registerTool(
@@ -1671,9 +1673,10 @@ export function createServer(
       outputSchema: deviceListSchema,
       _meta: metadata.appOnly,
     },
-    (options) =>
+    (options, extra) =>
       listDevices(
         options.cursor ? options : { ...options, availableOnly: options.availableOnly ?? false },
+        extra.mcpReq.signal,
       ),
   );
 
