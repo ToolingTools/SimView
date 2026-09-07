@@ -259,10 +259,15 @@ export class SimViewClient {
     }
   }
 
-  static async attach(socketPath: string, token: string, codec: Codec = "h264") {
+  static async attach(
+    socketPath: string,
+    token: string,
+    codec: Codec = "h264",
+    options: RequestOptions = {},
+  ) {
     const client = new SimViewClient(socketPath, token);
     try {
-      await client.connect(codec);
+      await client.connect(codec, options);
       return client;
     } catch (error) {
       await client.close().catch(() => {});
@@ -302,7 +307,7 @@ export class SimViewClient {
     throw new Error("Timed out waiting for simview-core socket");
   }
 
-  async connect(codec: Codec = "h264"): Promise<void> {
+  async connect(codec: Codec = "h264", options: RequestOptions = {}): Promise<void> {
     if (this.#connected) throw new Error("SimView client is already connected");
     const decoder = this.#decoder;
     const socket = await Bun.connect({
@@ -320,11 +325,15 @@ export class SimViewClient {
     this.#socket = socket;
     this.#connected = true;
     try {
-      await this.request("hello", {
-        token: this.token,
-        codecs: [codec, codec === "h264" ? "mjpeg" : "h264"],
-        maxFrameRate: 60,
-      });
+      await this.request(
+        "hello",
+        {
+          token: this.token,
+          codecs: [codec, codec === "h264" ? "mjpeg" : "h264"],
+          maxFrameRate: 60,
+        },
+        options,
+      );
     } catch (error) {
       this.#disconnect(error);
       throw error;

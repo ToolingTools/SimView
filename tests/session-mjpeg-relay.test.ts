@@ -86,15 +86,70 @@ describe("browser preview ownership", () => {
     retry.close();
     h264.close();
   });
+
+  test("closes promptly while the secondary hello is hanging", async () => {
+    const core = await previewCore({ hangMjpegHello: true });
+    const session = new SimViewSession();
+    const primary = await SimViewClient.attach(core.socketPath, core.token, "h264");
+    session.client = primary;
+    session.startRelay(await availablePort());
+    cleanups.push(
+      () => session.close(),
+      () => core.close(),
+    );
+
+    const origin = relayOrigin(session).replace(/^http/, "ws");
+    const mjpeg = await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
+    await waitFor(() => core.connections.some((connection) => connection.codec === "mjpeg"));
+
+    const startedAt = performance.now();
+    await session.close();
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    await waitFor(() => core.connections.every((connection) => connection.closed));
+    mjpeg.close();
+  });
+
+  test("closes promptly while secondary preview enable is hanging", async () => {
+    const core = await previewCore({ hangMjpegPreview: true });
+    const session = new SimViewSession();
+    const primary = await SimViewClient.attach(core.socketPath, core.token, "h264");
+    session.client = primary;
+    session.startRelay(await availablePort());
+    cleanups.push(
+      () => session.close(),
+      () => core.close(),
+    );
+
+    const origin = relayOrigin(session).replace(/^http/, "ws");
+    const mjpeg = await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
+    await waitFor(() =>
+      core.connections.some(
+        (connection) => connection.codec === "mjpeg" && connection.previewRequested,
+      ),
+    );
+
+    const startedAt = performance.now();
+    await session.close();
+    expect(performance.now() - startedAt).toBeLessThan(1_000);
+    await waitFor(() => core.connections.every((connection) => connection.closed));
+    mjpeg.close();
+  });
 });
 
 type PreviewConnection = {
   codec: "h264" | "mjpeg" | undefined;
   previewEnabled: boolean;
+  previewRequested: boolean;
   closed: boolean;
 };
 
-async function previewCore(options: { failFirstMjpegPreview?: boolean } = {}) {
+async function previewCore(
+  options: {
+    failFirstMjpegPreview?: boolean;
+    hangMjpegHello?: boolean;
+    hangMjpegPreview?: boolean;
+  } = {},
+) {
   const directory = await mkdtemp(join(tmpdir(), "simview-preview-test-"));
   const socketPath = join(directory, "core.sock");
   const token = "a".repeat(64);
@@ -106,7 +161,12 @@ async function previewCore(options: { failFirstMjpegPreview?: boolean } = {}) {
     unix: socketPath,
     socket: {
       open(socket) {
-        const state: PreviewConnection = { codec: undefined, previewEnabled: false, closed: false };
+        const state: PreviewConnection = {
+          codec: undefined,
+          previewEnabled: false,
+          previewRequested: false,
+          closed: false,
+        };
         connections.push(state);
         states.set(socket, state);
       },
@@ -121,6 +181,7 @@ async function previewCore(options: { failFirstMjpegPreview?: boolean } = {}) {
           let result: unknown;
           if (request.method === "hello") {
             state.codec = params.codecs?.[0];
+            if (state.codec === "mjpeg" && options.hangMjpegHello) continue;
             result = {
               protocolVersion: 4,
               codec: state.codec,
@@ -134,6 +195,8 @@ async function previewCore(options: { failFirstMjpegPreview?: boolean } = {}) {
               },
             };
           } else if (request.method === "capture.preview") {
+            state.previewRequested = params.enabled === true;
+            if (state.codec === "mjpeg" && options.hangMjpegPreview) continue;
             if (state.codec === "mjpeg" && params.enabled === true && failFirstMjpegPreview) {
               failFirstMjpegPreview = false;
               socket.write(

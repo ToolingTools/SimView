@@ -328,6 +328,7 @@ export class SimViewSession {
   #mjpegClientPromise: Promise<SimViewClient> | undefined = undefined;
   #mjpegGeneration = 0;
   #mjpegUnsubscribe: (() => void) | undefined = undefined;
+  #mjpegAbortController: AbortController | undefined = undefined;
   #previewSequence = 0;
   #previewPackets: PreviewPacket[] = [];
   #previewWaiters = new Set<() => void>();
@@ -2334,8 +2335,13 @@ export class SimViewSession {
     const primary = this.requireClient();
     const generation = this.#connectionGeneration;
     const mjpegGeneration = this.#mjpegGeneration;
+    const abortController = new AbortController();
+    this.#mjpegAbortController = abortController;
     let connectionPromise: Promise<SimViewClient>;
-    connectionPromise = SimViewClient.attach(primary.socketPath, primary.token, "mjpeg")
+    connectionPromise = SimViewClient.attach(primary.socketPath, primary.token, "mjpeg", {
+      signal: abortController.signal,
+      timeoutMs: 2_000,
+    })
       .then(async (client) => {
         let ownsClient = false;
         try {
@@ -2348,7 +2354,11 @@ export class SimViewSession {
           ) {
             throw new Error("Simulator changed while the MJPEG fallback was connecting");
           }
-          await client.request("capture.preview", { enabled: true });
+          await client.request(
+            "capture.preview",
+            { enabled: true },
+            { signal: abortController.signal, timeoutMs: 2_000 },
+          );
           if (
             generation !== this.#connectionGeneration ||
             mjpegGeneration !== this.#mjpegGeneration ||
@@ -2370,10 +2380,12 @@ export class SimViewSession {
             }
           });
           ownsClient = true;
+          if (this.#mjpegAbortController === abortController) {
+            this.#mjpegAbortController = undefined;
+          }
           return client;
         } catch (error) {
           if (!ownsClient) {
-            await client.request("capture.preview", { enabled: false }).catch(() => {});
             await client.close().catch(() => {});
           }
           throw error;
@@ -2395,13 +2407,14 @@ export class SimViewSession {
   async #releaseMjpegClient(): Promise<void> {
     this.#mjpegGeneration += 1;
     const pending = this.#mjpegClientPromise;
+    this.#mjpegAbortController?.abort(new Error("MJPEG preview connection released"));
+    this.#mjpegAbortController = undefined;
     this.#mjpegClientPromise = undefined;
     this.#mjpegUnsubscribe?.();
     this.#mjpegUnsubscribe = undefined;
     const client = this.mjpegClient;
     this.mjpegClient = undefined;
     if (client) {
-      await client.request("capture.preview", { enabled: false }).catch(() => {});
       await client.close().catch(() => {});
     }
     await pending?.catch(() => {});
