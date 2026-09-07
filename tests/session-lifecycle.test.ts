@@ -76,6 +76,77 @@ describe("review shutdown races", () => {
       await session.close();
     }
   });
+
+  test("releases packet demand when a backend disconnects during a packet request", async () => {
+    const session = new SimViewSession();
+    const device = parseDeviceDescription({
+      udid: "preview-reconnect",
+      name: "Preview",
+      state: "Booted",
+      runtime: "iOS",
+    });
+    session.devices = async () => [device];
+    let disconnected = () => {};
+    let hangPreview = true;
+    const previewStarted = deferred<void>();
+    const enabled: boolean[] = [];
+    const client = {
+      connected: true,
+      onDisconnect(callback: () => void) {
+        disconnected = callback;
+        return () => {};
+      },
+      on: () => () => {},
+      close: async () => {},
+      async request(
+        method: string,
+        params: { enabled?: boolean },
+        options?: { signal?: AbortSignal },
+      ) {
+        if (method === "capture.start") return { device };
+        if (method === "accessibility.providerStatus")
+          return { schemaVersion: 1, status: "native-ready", activeProvider: "core-simulator-ax" };
+        if (method === "capture.preview") {
+          enabled.push(params.enabled === true);
+          if (hangPreview) {
+            previewStarted.resolve();
+            await new Promise<void>((_resolve, reject) => {
+              options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+                once: true,
+              });
+            });
+          }
+          return { enabled: params.enabled };
+        }
+        if (method === "capture.keyframe") return { accepted: true };
+        throw new Error("Unavailable in lifecycle fixture");
+      },
+    } as unknown as SimViewClient;
+    const acquire = spyOn(SimViewClient, "acquire").mockResolvedValue(client);
+    try {
+      await session.open(device.id);
+      const pending = session.previewPackets(undefined, 1, 50).catch((error: unknown) => error);
+      await previewStarted.promise;
+      disconnected();
+      expect(
+        await Promise.race([pending, Bun.sleep(500).then(() => "not cancelled")]),
+      ).toBeInstanceOf(Error);
+      hangPreview = false;
+      await session.open(device.id);
+      await session.previewPackets(undefined, 1, 50);
+      await Bun.sleep(5_100);
+      expect(enabled.at(-1)).toBe(false);
+    } finally {
+      acquire.mockRestore();
+      await session.close();
+    }
+  }, 10_000);
+
+  test("rejects device discovery started after review close", async () => {
+    const session = new SimViewSession();
+    await session.close();
+    await expect(session.devices()).rejects.toThrow("review is closed");
+  });
 });
 
 describe("input dispatch lifecycle", () => {

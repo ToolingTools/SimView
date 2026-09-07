@@ -4,7 +4,8 @@ SimView has separate iOS and Android compatibility boundaries. A successful
 build is not support evidence for either platform.
 
 All private paths, class names, selectors, C symbols, and ABI declarations live
-under `native/SimViewCore/Sources/SimViewCore/Compatibility`.
+under `native/SimViewCore/Sources/SimViewCore/Compatibility` and the native
+`SimViewAXShim` accessibility boundary.
 
 The iOS backend currently probes:
 
@@ -30,6 +31,98 @@ record a passing real-device-set run here.
 | 26.5 (17F42) | 26.5.2 | arm64 | iOS 26.1, iPhone 17 Pro Max | direct PNG passes | Indigo probes and authenticated tap pass | AX 25-node tree and injected UIKit probe pass |
 | previous stable minor | — | arm64 | — | — | — | not tested |
 | second previous minor | — | arm64 | — | — | — | not tested |
+
+### 0.4.3 lifecycle regression run
+
+The 7 September 2026 local run used Xcode 26.5 (17F42), macOS 26.6.2,
+arm64, and an iPhone 17 Pro Simulator on iOS 26.5.
+
+- The fresh release build passed 214 Bun tests and 69 Swift tests with no
+  failures; one application-specific, opt-in Swift test was skipped.
+- The generated npm package passed isolated `npm exec` and `bunx` doctor
+  checks. All release archive checksums passed.
+- Two packaged MCP adapters shared one MCP daemon and one compatible native
+  backend, with distinct review resources. Semantic observation returned 14
+  nodes. Closing one review preserved the other; the final close stopped both
+  daemons in 111 ms.
+- A compiled MCP daemon closed during discovery reaped both the discovery
+  process and its SIGTERM-ignoring descendant and removed its registry record.
+- An ordinary MJPEG browser connection delivered 97 frames during the sample.
+  Closing its final viewer released the fallback connection while its primary
+  native client remained usable.
+- On a warmed Simulator, the XCTest provider reached `enhanced-ready`;
+  terminal native shutdown reaped its child and removed its generated private
+  `.xctestrun` file. Initial provider activation attempts timed out during
+  Simulator preparation.
+
+This run covers the 0.4.3 lifecycle and preview regressions. The full input,
+orientation, latency, soak, signing, and notarization release gates below still
+apply.
+
+### 0.4.3 foreground and capture acceptance
+
+The follow-up on 7 September 2026 keeps Bun 1.3.14 and metro-bridge 0.2.10.
+The former MJPEG fixture failure passed 50 consecutive runs under coverage.
+Foreground matching, retained XCTest retargeting, and screenshot/preview
+lifecycle regressions have dedicated automated coverage. The final release build
+passed 252 Bun coverage tests and 71 Swift tests (zero failures; one opt-in
+Simulator test skipped), formatting, toolchain/version checks, typechecking, and
+fresh fixture builds. The production audit found no vulnerabilities. Fresh
+release artifacts and isolated npm/Bun package smoke tests passed. The packaged
+core and XCTest runner repeated the full MKM → Spenny → MKM, idle screenshot,
+and preview/lease acceptance successfully.
+
+Live checks used the same iPhone 17 Pro/iOS 26.5 Simulator, macOS 26.6.2 arm64,
+and Xcode 26.5 (17F42), with the existing MKM and Spenny installations:
+
+- MKM (`com.mkm.ecommerce.test`) returned a 692-node Fiber tree, 490–492
+  measured nodes, a focused route, and 198 project-relative source locations.
+  Incomplete host measurements correctly reported partial quality. Metro's
+  opaque logical-device hash required a unique device-name match plus positive
+  foreground app identity. MKM search and native semantic tapping selected
+  its Shop tab, with native selected-state confirmation.
+- MKM → Spenny → MKM passed while MKM's Metro server remained running. Spenny
+  (`studio.churro.spenny`) returned a complete 89-node native XCTest tree and
+  native iOS context with no MKM route or component source locations. Switching
+  back recovered MKM enrichment. The same XCTest runner followed app switches
+  without activating or relaunching either app.
+- Spenny also passed native semantic inspection, search, navigation input,
+  screenshots, and previews with Metro discovery disabled in the harness.
+  This simulates an unavailable Metro server; the user's bundler was left
+  running. The accepted navigation tap changed its native tree from 89 to 111
+  nodes. No Hermes or app-side instrumentation was required.
+- Both apps took fresh PNGs from idle capture, releasing the temporary
+  connection and demand while preserving the primary client.
+- Spenny's MJPEG-only preview delivered 19 frames with zero H.264 encodes.
+  Mixed preview delivered both codecs; closing H.264 preserved MJPEG and
+  stopped H.264 encoding. Closing all viewers and expiring the five-second
+  embedded polling lease released capture; subsequent screenshots succeeded.
+- Provider teardown left the Simulator booted after switching from SIGTERM
+  cancellation to authenticated runner shutdown and bounded host-process
+  reaping. Earlier attempts using the old teardown shut down the Simulator;
+  those attempts are not passing evidence. No screenshots or UI trees were saved.
+
+The foreground detector now maps the accessibility frontmost process ID to a
+unique Simulator launch-service bundle ID and rechecks identity after lookup.
+Multiple background apps can retain `spawn role = ui focal`, so that launch
+policy flag is no longer used as foreground evidence. Private selectors remain
+inside the native compatibility boundary. Background or unidentified UIKit
+probe context is not merged into another app's native context.
+
+A subsequent local PR review used the explicitly selected Pixel 9 Pro XL AVD
+(`emulator-5554`, Android 16 / API 36) with MKM Test
+(`com.mkm.ecommerce.test`). Native semantic search and navigation selected the
+Shop tab. After connecting the installed development client to its existing
+Metro server, the current source returned 629 Fiber nodes, 365 measured nodes,
+149 project-relative source locations, and route context for the Android app;
+incomplete host measurements reported partial quality. Exact PNG capture passed
+at 1344×2992. React Native's model/release/API device name is matched against ADB
+metadata, with app identity and ambiguity checks retained. Initial observations
+discarded changing semantic state; the settled observation passed. No UI trees
+or screenshots were saved. The local review follow-up passed `bun run check`: 254
+Bun tests, 72 Swift tests (one opt-in skip), formatting, typechecking, and fresh
+fixture builds. The full input, orientation, latency, soak, signing,
+and notarization matrix below remains outside this follow-up's observed coverage.
 
 ### Android matrix
 

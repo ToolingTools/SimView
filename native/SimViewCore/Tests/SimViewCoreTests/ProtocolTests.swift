@@ -854,34 +854,20 @@ final class ProtocolTests: XCTestCase {
         XCTAssertThrowsError(try validateAccessibilitySelector(["exact": true]))
     }
 
-    func testFindsFocalUIKitApplicationBundleID() {
-        let domain = """
+    func testForegroundApplicationRequiresUniqueMatchingProcess() {
+        let listing = """
             50359 - UIKitApplication:com.example.app[06ff][rb-legacy]
-            4747 - UIKitApplication:com.apple.mobilecal[e65c][rb-legacy]
+            4747 - UIKitApplication:com.example.background[e65c][rb-legacy]
+            100 - com.apple.other
             """
-        XCTAssertEqual(
-            ProbeCoordinator.applicationServiceLabels(domain),
-            [
-                "UIKitApplication:com.example.app[06ff][rb-legacy]",
-                "UIKitApplication:com.apple.mobilecal[e65c][rb-legacy]",
-            ]
-        )
-        XCTAssertEqual(
-            ProbeCoordinator.focalBundleID(
-                """
-                state = running
-                bundle id = com.example.app
-                spawn role = ui focal (1)
-                """),
-            "com.example.app"
-        )
+        XCTAssertEqual(SimulatorForegroundApplication.bundleID(in: listing, processID: 50359), "com.example.app")
+        XCTAssertEqual(SimulatorForegroundApplication.bundleID(in: listing, processID: 4747), "com.example.background")
+        XCTAssertNil(SimulatorForegroundApplication.bundleID(in: listing, processID: 0))
+        XCTAssertNil(SimulatorForegroundApplication.bundleID(in: listing, processID: 100))
+        XCTAssertNil(SimulatorForegroundApplication.bundleID(in: listing, processID: 99))
         XCTAssertNil(
-            ProbeCoordinator.focalBundleID(
-                """
-                bundle id = com.example.background
-                spawn role = background (2)
-                """)
-        )
+            SimulatorForegroundApplication.bundleID(
+                in: listing + "\n50359 - UIKitApplication:com.example.conflict[other]", processID: 50359))
     }
 
     func testFragmentedFrames() throws {

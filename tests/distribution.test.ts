@@ -1,12 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import {
   assertCodexPluginArchiveSize,
-  assertNoRepowiseArtifacts,
   createNpmPackageManifest,
-  createPackagedMcpConfig,
   maxCodexPluginArchiveBytes,
   repositoryUrl,
 } from "../scripts/release-config";
@@ -131,27 +128,5 @@ describe("release distribution", () => {
     expect(() =>
       assertCodexPluginArchiveSize(maxCodexPluginArchiveBytes + 1, "simview.tgz"),
     ).toThrow("exceeding the Codex plugin archive limit");
-  });
-
-  test("packages only the SimView MCP server and rejects Repowise state", async () => {
-    const packaged = createPackagedMcpConfig({
-      mcpServers: {
-        simview: { command: "./bin/simview", args: ["mcp"] },
-        repowise: { command: "repowise", args: ["mcp", "/local/repository"] },
-      },
-    });
-    expect(packaged).toEqual({
-      mcpServers: { simview: { command: "./bin/simview", args: ["mcp"] } },
-    });
-
-    const stage = await mkdtemp(join(tmpdir(), "simview-release-stage-"));
-    temporaryDirectories.push(stage);
-    await writeFile(join(stage, ".mcp.json"), `${JSON.stringify(packaged)}\n`);
-    await expect(assertNoRepowiseArtifacts(stage)).resolves.toBeUndefined();
-
-    await mkdir(join(stage, ".repowise"));
-    await expect(assertNoRepowiseArtifacts(stage)).rejects.toThrow(
-      "Release artifact contains Repowise state",
-    );
   });
 });

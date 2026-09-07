@@ -3616,7 +3616,6 @@ function previewSession(): SimViewSession & { browserOpened: number; relayStarte
   session.client = { connected: true, close: async () => {} } as never;
   session.device = iosDevice("preview-session", "Preview Session");
   session.open = async () => session.state();
-  session.enablePreview = async () => {};
   session.startRelay = () => {
     session.relayStarted += 1;
   };

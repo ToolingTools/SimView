@@ -106,12 +106,23 @@ The process model has two layers:
 - Element inspection first captures the native accessibility snapshot. On iOS,
   session establishment automatically starts an authenticated persistent XCTest
   runner against the existing foreground app process; it becomes the primary
-  snapshot provider and performs point hit-testing against a fresh tree without relaunching the app.
+  snapshot provider and performs point hit-testing against a fresh tree without
+  activating or relaunching the app. The native compatibility boundary resolves
+  the accessibility frontmost process ID to a unique launch-service bundle ID;
+  launch roles alone are not foreground evidence. Each XCTest request selects
+  that app in the existing runner and checks foreground state, while the host
+  checks identity again after capture. App transitions discard stale results
+  without stopping the runner. Shutdown uses the authenticated stop request and
+  a bounded host-process reap; it avoids xcodebuild's SIGTERM cancellation path,
+  which can shut down the user's Simulator.
   Simulator AX is retained as the startup/runtime fallback. Android uses its
   bounded UIAutomator provider. Inspection
   then optionally discovers loopback Metro targets through `metro-bridge`. A
-  target must match the selected device by logical device ID, device name,
-  or be the sole unambiguous target. React Native inspection returns only a
+  target must pass the bridge's app-runtime classifier and match the foreground
+  native app's bundle/package identity. A native device ID takes precedence;
+  opaque Metro connection hashes require a unique compatible device-name match.
+  Contradictory native IDs and ambiguous targets are rejected. Foreground app
+  changes invalidate Fiber and semantic caches, including stale element refs. React Native inspection returns only a
   bounded visual Fiber projection and whitelisted semantic fields; component
   props, route params, raw Fiber objects, external paths, and dependencies are
   not returned. Fiber projection scans renderer roots fairly and selects
@@ -122,13 +133,17 @@ The process model has two layers:
   multi-debugger targets connect directly. Discovery goes through the packaged
   `metro-bridge` using `localhost` (including the bridge's IPv4 fallback), while
   concurrent status probes classify empty discovery without delaying a usable
-  target. Per-device negative results are cached for five seconds. Any discovery,
-  CDP, measurement, or
-  validation failure returns the complete native snapshot instead of a partially
-  merged tree. The absence of a Metro target is normal native context, not a
+  target. Per-device/app negative results are cached for five seconds. Discovery
+  and CDP failures return native accessibility. Fiber results separately report
+  traversal/output truncation and incomplete host measurements through existing
+  quality/reason fields; a valid hidden zero-size host is not a measurement failure. The absence of a Metro target is normal native context, not a
   fallback error. Every CDP evaluation is
   deadline-bounded so a stale Hermes session cannot leave the preview request
-  pending indefinitely. Source paths are reduced relative to an explicit
+  pending indefinitely. Inspection dispatches once and polls an identity-guarded,
+  expiring result mailbox; late settlement cannot recreate deleted state.
+  Optional navigation state is awaited for at most 250 ms before bounded JavaScript
+  fallbacks are tried. No Hermes or app-side SDK is required for
+  native accessibility, input, screenshots, or preview. Source paths are reduced relative to an explicit
   `SIMVIEW_PROJECT_ROOT` or the nearest package root inferred from symbolicated
   app sources; absolute paths and dependency sources are never returned.
 - **Send to Chat** persists the frozen frame and each annotation crop under a
@@ -138,7 +153,11 @@ The process model has two layers:
   directory it creates when its MCP bridge closes.
 - `SimViewClient.acquire({ deviceId, codec })` shares one detached native backend
   per platform-qualified native identifier and compatible
-  protocol/version/binary identity. `udid` remains an iOS compatibility alias.
+  protocol/version/binary/effective-environment/working-directory identity. Omitting the environment
+  and explicitly passing the same inherited environment select the same backend.
+  Relative native tool paths resolve against the requesting connection's working
+  directory before spawning and computing compatibility.
+  `udid` remains an iOS compatibility alias.
   The
   backend record lives under the canonical per-user temporary directory at
   `simview-daemons/<uid>/<instanceId>`;
@@ -180,6 +199,9 @@ Each connection supplies its own absolute project/core/asset paths, native mode,
 resource version, an allowlist of native tool environment settings, and a Claude
 Desktop detection hint. The first launcher's global
 configuration cannot select another connection's project or app assets.
+Native discovery and backend startup use that connection's working directory.
+Discovery has a bounded deadline and is cancelled when its request or owning
+review closes; review shutdown waits for discovery cleanup before completing.
 
 Adapters and the daemon validate owner PIDs and process start identities every
 second, including original GUI application ancestors. EOF, broken output,
@@ -269,3 +291,22 @@ archives, SHA-256 checksums, `release-manifest.json`, and a CycloneDX SBOM.
 Binary publication remains blocked until the licensing, Developer ID signing,
 notarization, and real-target gates in `docs/binary-redistribution.md` and
 `docs/compatibility.md` have been reviewed.
+
+## Screenshot and preview demand
+
+MCP screenshot calls coalesce concurrent callers and attach a temporary,
+authenticated connection to the existing native backend. PNG frames have no
+request IDs; closing that transport prevents timed-out payloads from reaching a
+retry. Metadata has a 20-second deadline for Android's bounded ADB capture, and
+PNG delivery has a five-second deadline after metadata. Cancellation removes
+listeners and closes the temporary connection without closing the primary review.
+
+An iOS screenshot acquires temporary native capture demand and waits at most five
+seconds for a fresh frame. Encoding runs off the capture queue. Completion,
+failure, socket disconnect, and shutdown release that demand; native semantic
+observation resumes if no preview or hybrid client still requires capture.
+
+H.264 browser viewers and embedded packet requests own primary preview demand.
+Packet polling retains a five-second idle lease. MJPEG viewers own only their
+secondary connection, so MJPEG-only reviews do not encode H.264. Opening the
+review does not itself acquire continuous capture demand; its consumers do.

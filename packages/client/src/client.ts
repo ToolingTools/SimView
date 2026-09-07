@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { resolveBinary } from "@simview/core";
 import {
   type Codec,
@@ -25,6 +25,7 @@ type DataHandler = (payload: Uint8Array) => void;
 
 export interface SessionOptions {
   environment?: Record<string, string> | undefined;
+  cwd?: string | undefined;
   deviceId?: string | undefined;
   udid?: string | undefined;
   codec?: Codec | undefined;
@@ -34,6 +35,7 @@ export interface SessionOptions {
 
 export interface AcquireOptions {
   environment?: Record<string, string> | undefined;
+  cwd?: string | undefined;
   backendMode?: "shared" | "ephemeral" | undefined;
   deviceId?: string | undefined;
   udid?: string | undefined;
@@ -44,6 +46,85 @@ export interface AcquireOptions {
 export interface RequestOptions {
   signal?: AbortSignal | undefined;
   timeoutMs?: number | undefined;
+}
+
+export interface ListDevicesOptions {
+  signal?: AbortSignal | undefined;
+  timeoutMs?: number | undefined;
+  cwd?: string | undefined;
+}
+
+const pathEnvironmentKeys = new Set([
+  "DEVELOPER_DIR",
+  "ANDROID_HOME",
+  "ANDROID_SDK_ROOT",
+  "SIMVIEW_ADB_PATH",
+  "SIMVIEW_ANDROID_AGENT_PATH",
+  "SIMVIEW_PROBE_DYLIB",
+  "SIMVIEW_XCTEST_PROVIDER_XCTESTRUN",
+]);
+
+/** Resolve the exact native environment used by a child, including relative overrides. */
+export function resolveNativeEnvironment(
+  environment: Record<string, string> | undefined,
+  cwd = process.cwd(),
+): Record<string, string> {
+  const base = environment ?? process.env;
+  const resolvedCwd = resolve(cwd);
+  return Object.fromEntries(
+    Object.entries(base).flatMap(([key, value]) => {
+      if (value === undefined) return [];
+      if (key === "PATH") {
+        return [
+          [
+            key,
+            value
+              .split(delimiter)
+              .map((entry) => {
+                if (entry === "") return resolvedCwd;
+                return isAbsolute(entry) ? entry : resolve(resolvedCwd, entry);
+              })
+              .join(delimiter),
+          ],
+        ];
+      }
+      return [
+        [
+          key,
+          pathEnvironmentKeys.has(key) && value !== "" && !isAbsolute(value)
+            ? resolve(resolvedCwd, value)
+            : value,
+        ],
+      ];
+    }),
+  );
+}
+
+function signalProcessGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // The process group may have already exited; the direct child is handled below.
+  }
+}
+
+async function terminateProcess(child: Bun.Subprocess): Promise<void> {
+  if (child.exitCode !== null) {
+    signalProcessGroup(child.pid, "SIGTERM");
+    signalProcessGroup(child.pid, "SIGKILL");
+    return;
+  }
+  signalProcessGroup(child.pid, "SIGTERM");
+  if (child.exitCode === null) child.kill();
+  const exited = await Promise.race([
+    child.exited.then(() => true),
+    Bun.sleep(2_000).then(() => false),
+  ]);
+  signalProcessGroup(child.pid, "SIGKILL");
+  if (!exited && child.exitCode === null) {
+    child.kill(9);
+    await child.exited;
+  }
 }
 
 interface PendingRequest {
@@ -78,9 +159,11 @@ export class SimViewClient {
     await chmod(sessionDirectory, 0o700);
     const socketPath = join(sessionDirectory, "core.sock");
     const token = randomBytes(32).toString("hex");
+    const cwd = resolve(options.cwd ?? process.cwd());
+    const binary = resolve(cwd, options.binary ?? resolveBinary());
     const child = Bun.spawn(
       [
-        options.binary ?? resolveBinary(),
+        binary,
         "serve",
         "--socket",
         socketPath,
@@ -97,7 +180,8 @@ export class SimViewClient {
             : []),
       ],
       {
-        env: options.environment ?? process.env,
+        cwd,
+        env: resolveNativeEnvironment(options.environment, cwd),
         stdin: new TextEncoder().encode(token),
         stdout: "inherit",
         stderr: "inherit",
@@ -126,27 +210,61 @@ export class SimViewClient {
   static async listDevices(
     binary = resolveBinary(),
     environment?: Record<string, string>,
+    options: ListDevicesOptions = {},
   ): Promise<DeviceDescription[]> {
-    const child = Bun.spawn([binary, "devices"], {
-      env: environment ?? process.env,
+    if (options.signal?.aborted)
+      throw options.signal.reason ?? new DOMException("Request aborted", "AbortError");
+    const cwd = resolve(options.cwd ?? process.cwd());
+    const child = Bun.spawn([resolve(cwd, binary), "devices"], {
+      cwd,
+      env: resolveNativeEnvironment(environment, cwd),
       stdout: "pipe",
       stderr: "pipe",
+      detached: true,
     });
-    const [stdout, stderr, exitCode] = await Promise.all([
+    const output = Promise.all([
       new Response(child.stdout).text(),
       new Response(child.stderr).text(),
       child.exited,
-    ]);
-    if (exitCode !== 0) throw new Error(stderr.trim() || "Unable to list devices");
-    const payload: unknown = JSON.parse(stdout);
-    if (!Array.isArray(payload)) throw new Error("Device list is not an array");
-    return payload.map(parseDeviceDescription);
+    ] as const);
+    const timeoutMs = options.timeoutMs ?? 10_000;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    let cancel!: () => void;
+    const cancellation = new Promise<never>((_, reject) => {
+      cancel = () =>
+        reject(options.signal?.reason ?? new DOMException("Request aborted", "AbortError"));
+    });
+    const timeoutFailure = new Promise<never>((_, reject) => {
+      timeout = setTimeout(
+        () => reject(new Error(`devices timed out after ${timeoutMs}ms`)),
+        timeoutMs,
+      );
+    });
+    const abort = () => cancel();
+    if (options.signal?.aborted) abort();
+    else options.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      const [stdout, stderr, exitCode] = await Promise.race([output, cancellation, timeoutFailure]);
+      if (exitCode !== 0) throw new Error(stderr.trim() || "Unable to list devices");
+      const payload: unknown = JSON.parse(stdout);
+      if (!Array.isArray(payload)) throw new Error("Device list is not an array");
+      return payload.map(parseDeviceDescription);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      options.signal?.removeEventListener("abort", abort);
+      await terminateProcess(child);
+    }
   }
 
-  static async attach(socketPath: string, token: string, codec: Codec = "h264") {
+  static async attach(
+    socketPath: string,
+    token: string,
+    codec: Codec = "h264",
+    options: RequestOptions = {},
+  ) {
     const client = new SimViewClient(socketPath, token);
     try {
-      await client.connect(codec);
+      await client.connect(codec, options);
       return client;
     } catch (error) {
       await client.close().catch(() => {});
@@ -186,7 +304,7 @@ export class SimViewClient {
     throw new Error("Timed out waiting for simview-core socket");
   }
 
-  async connect(codec: Codec = "h264"): Promise<void> {
+  async connect(codec: Codec = "h264", options: RequestOptions = {}): Promise<void> {
     if (this.#connected) throw new Error("SimView client is already connected");
     const decoder = this.#decoder;
     const socket = await Bun.connect({
@@ -204,11 +322,15 @@ export class SimViewClient {
     this.#socket = socket;
     this.#connected = true;
     try {
-      await this.request("hello", {
-        token: this.token,
-        codecs: [codec, codec === "h264" ? "mjpeg" : "h264"],
-        maxFrameRate: 60,
-      });
+      await this.request(
+        "hello",
+        {
+          token: this.token,
+          codecs: [codec, codec === "h264" ? "mjpeg" : "h264"],
+          maxFrameRate: 60,
+        },
+        options,
+      );
     } catch (error) {
       this.#disconnect(error);
       throw error;

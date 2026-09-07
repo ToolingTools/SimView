@@ -11,7 +11,8 @@ While connected, expect one adapter per host connection, one MCP daemon per
 compatible build, and native backends/helpers for devices in use. Identical
 packaged builds installed in different directories share the MCP daemon.
 Different builds intentionally coexist. Native backends also isolate different
-explicit native tool configurations.
+effective native tool environments. Explicitly passing an unchanged inherited
+environment shares the same backend as leaving it unspecified.
 
 Run `simview mcp status --json` to see daemon PID, build identity, version,
 connection count, and unique owner count. It does not expose credentials or
@@ -23,6 +24,7 @@ the agent's review. Closing the agent connection does: its browser relay and
 native clients close, and another agent's review continues independently.
 The last connection starts MCP shutdown immediately, capped at five seconds.
 Unused native backends stop capture on disconnect and start bounded shutdown immediately. Startup has a separate bounded allowance for the first client.
+When iOS accessibility uses the temporary XCTest provider, terminal backend shutdown also stops and reaps its provider process and removes the generated `.xctestrun` configuration. Preview and capture toggles keep an enabled provider alive.
 
 If a host leaves an orphaned worker after its GUI quits, adapters also watch the
 original GUI ancestor and its process start time. They close their own connection
@@ -49,6 +51,9 @@ The host ultimately controls which display modes it permits.
 **Review disconnected** means the owning session or transport ended. Reconnect
 SimView from the agent to start a new review. **Starting live preview** means the
 device is connected but its first video frame has not arrived yet.
+Browser MJPEG fallback enables preview on its own native connection. Closing
+the final MJPEG viewer releases that connection while the agent review remains
+available.
 
 ## Metro and project selection
 

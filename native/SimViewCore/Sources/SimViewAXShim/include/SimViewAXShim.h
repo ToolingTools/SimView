@@ -21,6 +21,10 @@ FOUNDATION_EXPORT NSString *_Nullable SVAccessibilityStringValue(id _Nullable va
 
 + (BOOL)isAvailable;
 
+/// Returns the current Simulator accessibility application's process ID.
+/// Unavailable or invalid identities return nil; launch roles are not foreground evidence.
++ (nullable NSNumber *)frontmostProcessIDForDevice:(NSObject *)device;
+
 + (nullable NSDictionary<NSString *, id> *)snapshotForDevice:(NSObject *)device
                                                     maxNodes:(NSUInteger)maxNodes
                                                        error:(NSError **)error;

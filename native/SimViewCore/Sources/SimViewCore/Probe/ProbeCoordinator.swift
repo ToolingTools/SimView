@@ -30,56 +30,11 @@ final class ProbeCoordinator: @unchecked Sendable {
     }
 
     func target(udid: String) -> [String: Any] {
-        if let bundleID {
-            return ["schemaVersion": 1, "bundleId": bundleID, "source": "probe"]
+        var result: [String: Any] = ["schemaVersion": 1, "source": "simctl"]
+        if let foreground = SimulatorForegroundApplication.bundleID(udid: udid) {
+            result["bundleId"] = foreground
         }
-        let domain = "user/\(getuid())"
-        let listing = run(
-            "/usr/bin/xcrun",
-            ["simctl", "spawn", udid, "launchctl", "print", domain]
-        )
-        guard listing.status == 0 else {
-            return [
-                "schemaVersion": 1,
-                "source": "simctl",
-                "error": listing.error.nonEmpty ?? "Unable to inspect Simulator applications",
-            ]
-        }
-        for label in Self.applicationServiceLabels(listing.output) {
-            let service = run(
-                "/usr/bin/xcrun",
-                ["simctl", "spawn", udid, "launchctl", "print", "\(domain)/\(label)"]
-            )
-            guard
-                service.status == 0,
-                let bundleID = Self.focalBundleID(service.output),
-                !bundleID.hasPrefix("com.apple.")
-            else {
-                continue
-            }
-            return ["schemaVersion": 1, "bundleId": bundleID, "source": "simctl"]
-        }
-        return ["schemaVersion": 1, "source": "simctl"]
-    }
-
-    static func applicationServiceLabels(_ output: String) -> [String] {
-        var seen = Set<String>()
-        return output.split(whereSeparator: \.isNewline).compactMap { line in
-            guard let start = line.range(of: "UIKitApplication:")?.lowerBound else { return nil }
-            let label = String(line[start...].prefix { !$0.isWhitespace })
-            guard seen.insert(label).inserted else { return nil }
-            return label
-        }
-    }
-
-    static func focalBundleID(_ output: String) -> String? {
-        guard output.contains("spawn role = ui focal") else { return nil }
-        for line in output.split(whereSeparator: \.isNewline) {
-            let value = line.trimmingCharacters(in: .whitespaces)
-            guard value.hasPrefix("bundle id = ") else { continue }
-            return String(value.dropFirst("bundle id = ".count)).nonEmpty
-        }
-        return nil
+        return result
     }
 
     func enable(udid: String, bundleID: String) throws -> [String: Any] {

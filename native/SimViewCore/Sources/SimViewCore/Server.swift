@@ -238,6 +238,15 @@ final class SimViewServer: @unchecked Sendable {
     private var pendingH264Frame: PendingH264Frame?
     private var encodingMJPEGFrame = false
     private var pendingMJPEGFrame: PendingH264Frame?
+    private struct ScreenshotCapture {
+        let connection: ClientConnection
+        let requestID: String
+        let generation: UInt64
+        let timeout: DispatchWorkItem
+        var encoding = false
+    }
+    private var screenshotCaptures: [UUID: ScreenshotCapture] = [:]
+    private let screenshotQueue = DispatchQueue(label: "dev.simview.server.screenshot", qos: .userInitiated)
     private var captureGeneration: UInt64 = 0
     private var observationMode = "hybrid"
 
@@ -351,6 +360,7 @@ final class SimViewServer: @unchecked Sendable {
     func disconnect(_ connection: ClientConnection) {
         let wasAuthenticated = connection.authenticated
         connections.remove(connection)
+        cancelScreenshots(for: connection)
         connection.close()
         if wasAuthenticated, !connections.contains(where: \.authenticated) {
             lastDisconnect = Date()
@@ -449,18 +459,7 @@ final class SimViewServer: @unchecked Sendable {
                     ], requestID: request.id, to: connection)
                 connection.send(WireFrame(kind: .pngScreenshot, payload: png))
             } else {
-                guard let frame = capture.latestFrame else {
-                    throw SimViewError("CAPTURE_NOT_STARTED", "Start capture before requesting a screenshot")
-                }
-                let png = try ImageEncoder.encode(frame, type: "public.png")
-                sendResult(
-                    [
-                        "frameId": frameID,
-                        "width": CVPixelBufferGetWidth(frame),
-                        "height": CVPixelBufferGetHeight(frame),
-                        "byteLength": png.count,
-                    ], requestID: request.id, to: connection)
-                connection.send(WireFrame(kind: .pngScreenshot, payload: png))
+                try beginScreenshot(requestID: request.id, connection: connection)
             }
         case "observation.get":
             if !captureActive, let device = selectedDevice { try startCapture(device) }
@@ -864,8 +863,69 @@ final class SimViewServer: @unchecked Sendable {
         metrics.didReturnObservation()
     }
 
+    // Screenshot demand belongs to the requesting socket, independently of preview codecs.
+    // All registry mutations run on queue; encoding never blocks incoming capture frames.
+    private func beginScreenshot(requestID: String, connection: ClientConnection) throws {
+        guard let device = selectedDevice else {
+            throw SimViewError("CAPTURE_NOT_STARTED", "Select a device before requesting a screenshot")
+        }
+        try startCapture(device)
+        let id = UUID()
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self, let request = self.screenshotCaptures.removeValue(forKey: id) else { return }
+            self.sendError(
+                SimViewError("SCREENSHOT_TIMEOUT", "Timed out waiting for a fresh screenshot frame"),
+                requestID: request.requestID, to: request.connection)
+            if let device = self.selectedDevice { try? self.reconcileCaptureDemand(for: device) }
+        }
+        screenshotCaptures[id] = ScreenshotCapture(
+            connection: connection, requestID: requestID, generation: captureGeneration, timeout: timeout)
+        queue.asyncAfter(deadline: .now() + 5, execute: timeout)
+    }
+
+    private func fulfillScreenshots(with frame: PendingH264Frame) {
+        for (id, request) in screenshotCaptures where !request.encoding && request.generation == frame.generation {
+            screenshotCaptures[id]?.encoding = true
+            request.timeout.cancel()
+            screenshotQueue.async { [weak self] in
+                let result = Result { try ImageEncoder.encode(frame.frame, type: "public.png") }
+                self?.queue.async { [weak self] in
+                    guard let self, let request = self.screenshotCaptures.removeValue(forKey: id) else { return }
+                    guard request.generation == self.captureGeneration else { return }
+                    switch result {
+                    case .success(let png):
+                        self.sendResult(
+                            [
+                                "frameId": frame.frameID,
+                                "width": CVPixelBufferGetWidth(frame.frame),
+                                "height": CVPixelBufferGetHeight(frame.frame),
+                                "byteLength": png.count,
+                            ], requestID: request.requestID, to: request.connection)
+                        request.connection.send(WireFrame(kind: .pngScreenshot, payload: png))
+                    case .failure(let error):
+                        self.sendError(error, requestID: request.requestID, to: request.connection)
+                    }
+                    if let device = self.selectedDevice { try? self.reconcileCaptureDemand(for: device) }
+                }
+            }
+        }
+    }
+
+    private func cancelScreenshots(for connection: ClientConnection? = nil) {
+        for (id, request) in screenshotCaptures where connection == nil || request.connection === connection {
+            request.timeout.cancel()
+            screenshotCaptures.removeValue(forKey: id)
+            if connection == nil {
+                sendError(
+                    SimViewError("SCREENSHOT_CANCELLED", "Capture stopped before the screenshot completed"),
+                    requestID: request.requestID, to: request.connection)
+            }
+        }
+    }
+
     private func startCapture(_ device: DeviceDescription) throws {
         if captureActive, captureDeviceID == device.id { return }
+        cancelScreenshots()
         capture.stop()
         androidCapture?.stop()
         androidAgent?.stop()
@@ -946,7 +1006,8 @@ final class SimViewServer: @unchecked Sendable {
         let previewRequired = connections.contains(where: {
             $0.authenticated && $0.previewEnabled
         })
-        if observationMode == "hybrid" || device.platform == .android || previewRequired {
+        if observationMode == "hybrid" || device.platform == .android || previewRequired || !screenshotCaptures.isEmpty
+        {
             try startCapture(device)
             return
         }
@@ -957,6 +1018,7 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func stopCapture() {
+        cancelScreenshots()
         accessibility.stopObservation(udid: selectedDevice?.nativeIdentifier)
         captureGeneration &+= 1
         capture.stop()
@@ -989,6 +1051,7 @@ final class SimViewServer: @unchecked Sendable {
         guard captureActive, pending.generation == captureGeneration else { return }
         metrics.didCapture()
         frameID = pending.frameID
+        fulfillScreenshots(with: pending)
         if connections.contains(where: { $0.authenticated && $0.previewEnabled && $0.codec == "mjpeg" }) {
             enqueueMJPEG(pending)
         }
@@ -1713,6 +1776,7 @@ final class SimViewServer: @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) { exit(1) }
         probe.close()
         stopCapture()
+        accessibility.shutdown()
         listener?.cancel()
         timer?.cancel()
         for source in signalSources { source.cancel() }

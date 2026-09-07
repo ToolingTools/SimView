@@ -319,7 +319,9 @@ typing path. Callers should inspect the selected device capability before typing
 When a development-mode React Native target is available on a local Metro
 port, SimView uses `metro-bridge` to project its Fiber tree into visual elements
 with component ancestry, test IDs, measured host bounds, focused route, and
-project-relative source locations. When Metro MCP's daemon is already running,
+project-relative source locations. Enrichment requires a matching foreground app
+identity as well as a safe device match. Switching to a native app discards stale
+React Native context even while Metro is still running. When Metro MCP's daemon is already running,
 SimView reuses its loopback CDP multiplexer instead of competing for Hermes'
 debugger connection; Metro MCP itself is not required. SimView never
 starts Metro, serializes component props or navigation params, or attaches an
@@ -334,8 +336,8 @@ the automatically started XCTest provider on iOS or UIAutomator on Android.
 For Android semantic taps, the raw deepest hit and selected actionable hit are
 resolved from that same fresh hierarchy; the tree validates the target, while
 physical input remains native-only.
-XCTest activates but does not relaunch the target app, and the packaged runner
-is reused for warm snapshots during the session. Simulator AX remains available
+XCTest follows the foreground app without activating or relaunching it. The
+packaged runner is reused across app switches and warm snapshots during the session. Simulator AX remains available
 when XCTest cannot start. An optional
 bundled UIKit probe can explicitly relaunch one third-party app to add concrete
 view class, hit-test, controller, window, and scene context on iOS only. Android

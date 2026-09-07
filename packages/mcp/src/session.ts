@@ -44,6 +44,7 @@ import { z } from "zod";
 import { previewScriptResponse, resolveAppRoot } from "./app-assets";
 import { MetroInspector } from "./metro";
 import { packetsFromLatestKeyframe } from "./preview";
+import { captureScreenshot } from "./screenshot";
 import { accessibilityResourceSemanticHash } from "./semantic-state";
 
 export type { SessionState } from "@simview/contracts";
@@ -326,14 +327,27 @@ export class SimViewSession {
   codec: "h264" | "mjpeg" = "h264";
   #h264Configuration: Uint8Array | undefined = undefined;
   #mjpegClientPromise: Promise<SimViewClient> | undefined = undefined;
+  #mjpegGeneration = 0;
+  #mjpegUnsubscribe: (() => void) | undefined = undefined;
+  #mjpegAbortController: AbortController | undefined = undefined;
   #previewSequence = 0;
   #previewPackets: PreviewPacket[] = [];
   #previewWaiters = new Set<() => void>();
   #screenshotOperation: Promise<Screenshot> | undefined = undefined;
+  #screenshotAbortController: AbortController | undefined;
+  #previewDemandTail: Promise<void> = Promise.resolve();
+  #previewDemandAbort = new AbortController();
+  #previewDemandClient: SimViewClient | undefined;
+  #primaryPreviewEnabled = false;
+  #packetRequests = 0;
+  #packetLeaseTimer: ReturnType<typeof setTimeout> | undefined;
+  #packetLeaseActive = false;
   #unsubscribers: Array<() => void> = [];
   #annotationsByDevice = new Map<string, Map<string, Annotation>>();
   #reviewImageDirectories = new Set<string>();
   #closePromise: Promise<void> | undefined = undefined;
+  #deviceDiscoveryControllers = new Set<AbortController>();
+  #deviceDiscoveryPromises = new Set<Promise<DeviceDescription[]>>();
   #connectionGeneration = 0;
   #metroInspector: MetroInspector;
   #closed = false;
@@ -341,10 +355,17 @@ export class SimViewSession {
   readonly appRoot: string;
   readonly resourceVersion: string | undefined;
 
-  constructor(private readonly context?: McpConnectionContext) {
+  constructor(
+    private readonly context?: McpConnectionContext,
+    private readonly dependencies: {
+      attachScreenshotClient?: typeof SimViewClient.attach;
+      metroInspector?: MetroInspector;
+    } = {},
+  ) {
     this.appRoot = context?.appRoot ?? resolveAppRoot();
     this.resourceVersion = context?.resourceVersion;
-    this.#metroInspector = new MetroInspector({ projectRoot: context?.projectRoot });
+    this.#metroInspector =
+      dependencies.metroInspector ?? new MetroInspector({ projectRoot: context?.projectRoot });
   }
 
   #assertOpen(): void {
@@ -370,6 +391,7 @@ export class SimViewSession {
       codec: "h264" as const,
       binary: this.context?.coreBinary,
       environment: this.context?.nativeEnvironment,
+      cwd: this.context?.cwd,
     };
     return this.context?.backendMode === "ephemeral"
       ? SimViewClient.start(options)
@@ -384,6 +406,8 @@ export class SimViewSession {
   #semanticCache = new Map<string, { expiresAt: number; output: ElementTreeOutput }>();
   #semanticRefresh = new Map<string, Promise<ElementTreeOutput>>();
   #semanticGeneration = 0;
+  #foregroundAppId: string | undefined;
+  #foregroundRead: Promise<string | undefined> | undefined;
   #visualObservationTail: Promise<void> = Promise.resolve();
   #iosAccessibility: IOSAccessibilityStatus | undefined;
 
@@ -437,6 +461,8 @@ export class SimViewSession {
       if (this.client) {
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
         this.#unsubscribers = [];
+        this.#resetPreviewDemand();
+        await this.#cancelScreenshot();
         await this.client.close().catch(() => {});
         this.client = undefined;
         this.#connectionGeneration += 1;
@@ -494,8 +520,27 @@ export class SimViewSession {
     return (await this.devices()).filter((device) => device.available);
   }
 
-  devices(): Promise<DeviceDescription[]> {
-    return SimViewClient.listDevices(this.context?.coreBinary, this.context?.nativeEnvironment);
+  async devices(signal?: AbortSignal): Promise<DeviceDescription[]> {
+    this.#assertOpen();
+    const controller = new AbortController();
+    this.#deviceDiscoveryControllers.add(controller);
+    const abort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
+    const promise = SimViewClient.listDevices(
+      this.context?.coreBinary,
+      this.context?.nativeEnvironment,
+      {
+        cwd: this.context?.cwd,
+        signal: controller.signal,
+      },
+    ).finally(() => {
+      signal?.removeEventListener("abort", abort);
+      this.#deviceDiscoveryControllers.delete(controller);
+      this.#deviceDiscoveryPromises.delete(promise);
+    });
+    this.#deviceDiscoveryPromises.add(promise);
+    return promise;
   }
 
   async refreshDevice(): Promise<SessionState> {
@@ -526,11 +571,11 @@ export class SimViewSession {
       });
 
       this.#connectionGeneration += 1;
+      this.#resetPreviewDemand();
+      await this.#cancelScreenshot();
       for (const unsubscribe of this.#unsubscribers) unsubscribe();
       this.#unsubscribers = [];
-      if (this.mjpegClient) await this.mjpegClient.close();
-      this.mjpegClient = undefined;
-      this.#mjpegClientPromise = undefined;
+      await this.#releaseMjpegClient();
       if (this.client) await this.client.close();
       this.#assertOpen();
       this.client = nextClient;
@@ -543,6 +588,7 @@ export class SimViewSession {
       this.#metroInspector.close();
       this.#resetPreviewPackets();
       this.#bindFrames();
+      await this.#reconcilePreviewDemand();
       if ([...this.viewers].some((viewer) => viewer.data.codec === "mjpeg")) {
         void this.#ensureMjpegClient().catch(() => {});
       }
@@ -650,9 +696,58 @@ export class SimViewSession {
     }
   }
 
-  async enablePreview(enabled = true): Promise<void> {
-    await this.requireClient().request("capture.preview", { enabled });
-    if (!enabled) this.#resetPreviewPackets();
+  #renewPacketLease(): void {
+    if (this.#closed) return;
+    clearTimeout(this.#packetLeaseTimer);
+    this.#packetLeaseActive = true;
+    this.#packetLeaseTimer = setTimeout(() => {
+      this.#packetLeaseActive = false;
+      this.#packetLeaseTimer = undefined;
+      void this.#reconcilePreviewDemand().catch(() => {});
+    }, 5_000);
+  }
+
+  #resetPreviewDemand(): void {
+    this.#previewDemandAbort.abort(new Error("Preview connection released"));
+    this.#previewDemandAbort = new AbortController();
+    clearTimeout(this.#packetLeaseTimer);
+    this.#packetLeaseTimer = undefined;
+    this.#packetLeaseActive = false;
+    this.#packetRequests = 0;
+    this.#previewDemandClient = undefined;
+    this.#foregroundRead = undefined;
+    this.#foregroundAppId = undefined;
+    this.#primaryPreviewEnabled = false;
+  }
+
+  #reconcilePreviewDemand(): Promise<void> {
+    const client = this.client;
+    const generation = this.#connectionGeneration;
+    const signal = this.#previewDemandAbort.signal;
+    const operation = this.#previewDemandTail.then(async () => {
+      if (
+        this.#closed ||
+        !client?.connected ||
+        client !== this.client ||
+        generation !== this.#connectionGeneration
+      )
+        return;
+      const enabled =
+        this.#packetRequests > 0 ||
+        this.#packetLeaseActive ||
+        [...this.viewers].some(
+          (viewer) => viewer.data.authenticated && viewer.data.codec === "h264",
+        );
+      if (this.#previewDemandClient === client && this.#primaryPreviewEnabled === enabled) return;
+      await client.request("capture.preview", { enabled }, { signal, timeoutMs: 2_000 });
+      if (client !== this.client || generation !== this.#connectionGeneration || this.#closed)
+        return;
+      this.#previewDemandClient = client;
+      this.#primaryPreviewEnabled = enabled;
+      if (!enabled) this.#resetPreviewPackets();
+    });
+    this.#previewDemandTail = operation.catch(() => {});
+    return operation;
   }
 
   async warmObservation({
@@ -726,6 +821,7 @@ export class SimViewSession {
           };
         })
       : undefined;
+    if (imagePromise) void imagePromise.catch(() => {});
     try {
       const metadata = await client.request("observation.get", {
         visual,
@@ -783,21 +879,29 @@ export class SimViewSession {
       throw new Error("Screenshots are not supported by the selected device");
     }
     const client = this.requireClient();
-    const bytesPromise = new Promise<Uint8Array>((resolve, reject) => {
-      const timeout = setTimeout(() => {
-        unsubscribe();
-        reject(new Error("Timed out waiting for PNG screenshot payload"));
-      }, 5_000);
-      const unsubscribe = client.on(FrameKind.PngScreenshot, (bytes) => {
-        clearTimeout(timeout);
-        unsubscribe();
-        resolve(bytes);
-      });
-    });
-    const metadata = await client.request("capture.screenshot", {});
-    const bytes = await bytesPromise;
-    this.frameId = metadata.frameId;
-    return { bytes, ...metadata };
+    const generation = this.#connectionGeneration;
+    const controller = new AbortController();
+    this.#screenshotAbortController = controller;
+    try {
+      const result = await captureScreenshot(
+        client,
+        controller.signal,
+        this.dependencies.attachScreenshotClient,
+      );
+      if (generation !== this.#connectionGeneration || client !== this.client || this.#closed) {
+        throw new Error("Device changed while capturing screenshot");
+      }
+      this.frameId = result.frameId;
+      return result;
+    } finally {
+      if (this.#screenshotAbortController === controller)
+        this.#screenshotAbortController = undefined;
+    }
+  }
+
+  async #cancelScreenshot(): Promise<void> {
+    this.#screenshotAbortController?.abort(new Error("Screenshot connection released"));
+    await this.#screenshotOperation?.catch(() => {});
   }
 
   async accessibilitySnapshot(
@@ -906,15 +1010,19 @@ export class SimViewSession {
     maxNodes = 1_200,
     existingAccessibility?: AccessibilitySnapshot,
   ): Promise<ElementTreeOutput> {
+    const beforeIdentity = this.#semanticGeneration;
+    const appId = await this.#refreshForegroundIdentity();
     const semanticGeneration = this.#semanticGeneration;
     const accessibility =
-      existingAccessibility ?? (await this.accessibilitySnapshot(scope, maxNodes));
+      (beforeIdentity === semanticGeneration ? existingAccessibility : undefined) ??
+      (await this.accessibilitySnapshot(scope, maxNodes));
+    await this.#refreshForegroundIdentity();
     if (semanticGeneration !== this.#semanticGeneration) {
       throw new Error("Semantic state changed while the element tree was being prepared");
     }
     const accessibilityRevision = this.accessibilityRevision ?? accessibility.snapshotId;
     const semanticHash = this.#semanticHashFor(accessibility);
-    const accessibilityKey = `${scope}:${maxNodes}:${accessibilityRevision}:${semanticHash}`;
+    const accessibilityKey = `${appId ?? "native"}:${scope}:${maxNodes}:${accessibilityRevision}:${semanticHash}`;
     const cached = this.#fiberCache.get(accessibilityKey);
     if (cached && cached.expiresAt > Date.now()) {
       this.lastElements = cached.output.snapshot;
@@ -923,18 +1031,15 @@ export class SimViewSession {
     }
     const device = this.device;
     const frameId = this.frameId ?? "current";
-    const metro = device
-      ? await this.#metroInspector.inspect(device, accessibility, frameId, maxNodes)
-      : undefined;
+    const metro =
+      device && appId
+        ? await this.#metroInspector.inspect(device, accessibility, frameId, maxNodes, appId)
+        : undefined;
+    await this.#refreshForegroundIdentity();
+    if (semanticGeneration !== this.#semanticGeneration) {
+      return this.accessibilityElementSnapshot(scope, maxNodes);
+    }
     if (metro && device) {
-      if (device.platform === "ios" && !metro.screenContext.bundleId) {
-        try {
-          const target = await this.probeTarget();
-          metro.screenContext.bundleId = target.bundleId;
-        } catch {
-          // The Metro target remains useful when simctl cannot identify the focal app.
-        }
-      }
       this.lastElements = metro.snapshot;
       this.lastScreenContext = metro.screenContext;
       const output: ElementTreeOutput = {
@@ -945,12 +1050,13 @@ export class SimViewSession {
       return output;
     }
 
-    const fallbackReason = this.#metroInspector.fallbackReason;
-    const fallbackDetail = this.#metroInspector.fallbackDetail;
+    const fallbackReason = appId ? this.#metroInspector.fallbackReason : "metro-target-unavailable";
+    const fallbackDetail = appId ? this.#metroInspector.fallbackDetail : "metro-target-mismatch";
     return this.#accessibilityElementOutput(accessibility, frameId, fallbackReason, fallbackDetail);
   }
 
   async preparedElementSnapshot(maxNodes = 240): Promise<ElementTreeOutput> {
+    await this.#refreshForegroundIdentity();
     const accessibilityRevision = this.accessibilityRevision ?? "0";
     const semanticHash = this.lastAccessibility
       ? this.#semanticHashFor(this.lastAccessibility)
@@ -985,7 +1091,13 @@ export class SimViewSession {
     scope: "interactive" | "visible" | "full" = "interactive",
     maxNodes = 1_200,
   ): Promise<ElementTreeOutput> {
+    await this.#refreshForegroundIdentity();
+    const semanticGeneration = this.#semanticGeneration;
     const accessibility = await this.accessibilitySnapshot(scope, maxNodes);
+    await this.#refreshForegroundIdentity();
+    if (semanticGeneration !== this.#semanticGeneration) {
+      throw new Error("Foreground application changed while the native tree was being prepared");
+    }
     return this.#accessibilityElementOutput(accessibility, this.frameId ?? "current");
   }
 
@@ -1589,6 +1701,7 @@ export class SimViewSession {
   }
 
   async #semanticTargetSnapshots(ref?: string): Promise<ElementSnapshot[]> {
+    await this.#refreshForegroundIdentity();
     const currentSnapshots = () => {
       const native = this.lastAccessibility;
       const projected = this.lastElements;
@@ -1628,7 +1741,26 @@ export class SimViewSession {
     maxPackets = 12,
     timeoutMs = 1_500,
   ): Promise<PreviewPacketBatch> {
-    await this.enablePreview(true);
+    const generation = this.#connectionGeneration;
+    this.#packetRequests += 1;
+    this.#renewPacketLease();
+    try {
+      await this.#reconcilePreviewDemand();
+      return await this.#readPreviewPackets(afterSequence, maxPackets, timeoutMs);
+    } finally {
+      if (generation === this.#connectionGeneration) {
+        this.#packetRequests -= 1;
+        this.#renewPacketLease();
+        void this.#reconcilePreviewDemand().catch(() => {});
+      }
+    }
+  }
+
+  async #readPreviewPackets(
+    afterSequence: number | undefined,
+    maxPackets: number,
+    timeoutMs: number,
+  ): Promise<PreviewPacketBatch> {
     const packetLimit = Math.min(30, Math.max(1, maxPackets));
     const waitLimit = Math.min(5_000, Math.max(50, timeoutMs));
     const oldestSequence = this.#previewPackets[0]?.sequence;
@@ -1935,7 +2067,7 @@ export class SimViewSession {
           socket.data.authenticated = true;
           clearTimeout(socket.data.authenticationTimer);
           session.viewers.add(socket);
-          void session.enablePreview(true).catch(() => {
+          void session.#reconcilePreviewDemand().catch(() => {
             socket.close(1011, "Unable to enable preview capture");
           });
           if (socket.data.codec === "h264") {
@@ -1956,7 +2088,10 @@ export class SimViewSession {
         close(socket) {
           clearTimeout(socket.data.authenticationTimer);
           session.viewers.delete(socket);
-          if (session.viewers.size === 0) void session.enablePreview(false).catch(() => {});
+          if (socket.data.codec === "mjpeg" && !session.#hasMjpegViewers()) {
+            void session.#releaseMjpegClient();
+          }
+          void session.#reconcilePreviewDemand().catch(() => {});
         },
         drain(socket) {
           socket.data.paused = false;
@@ -2116,6 +2251,11 @@ export class SimViewSession {
 
   async #close(): Promise<void> {
     this.#connectionGeneration += 1;
+    this.#resetPreviewDemand();
+    await this.#cancelScreenshot();
+    for (const controller of this.#deviceDiscoveryControllers) controller.abort();
+    this.#deviceDiscoveryControllers.clear();
+    await Promise.allSettled(this.#deviceDiscoveryPromises);
     for (const unsubscribe of this.#unsubscribers) unsubscribe();
     this.#unsubscribers = [];
     for (const viewer of this.viewers) viewer.close(1001, "SimView review closed");
@@ -2123,9 +2263,7 @@ export class SimViewSession {
     this.relay?.stop(true);
     this.relay = undefined;
     this.#metroInspector.close();
-    if (this.mjpegClient) await this.mjpegClient.close();
-    this.mjpegClient = undefined;
-    this.#mjpegClientPromise = undefined;
+    await this.#releaseMjpegClient();
     if (this.client) await this.client.close();
     this.client = undefined;
     await this.#connectionTail;
@@ -2141,6 +2279,47 @@ export class SimViewSession {
       ),
     );
     this.#reviewImageDirectories.clear();
+  }
+
+  #refreshForegroundIdentity(): Promise<string | undefined> {
+    if (this.#foregroundRead) return this.#foregroundRead;
+    const client = this.client;
+    const device = this.device;
+    const generation = this.#connectionGeneration;
+    const read = (async () => {
+      let appId: string | undefined;
+      try {
+        if (client?.connected && device?.platform === "android") {
+          const context = await client.request("device.context", {}, { timeoutMs: 1_000 });
+          const value = context.packageName ?? context.package;
+          if (typeof value === "string") appId = value;
+        } else if (client?.connected && device?.platform === "ios") {
+          const target = await client.request("probe.target", {}, { timeoutMs: 5_000 });
+          if (target.source === "simctl") appId = target.bundleId;
+          else if (target.source === "probe") {
+            const context = uiContextSchema.shape.context
+              .unwrap()
+              .parse(await client.request("probe.context", {}, { timeoutMs: 1_000 }));
+            if (context.scenes?.some((scene) => scene.activationState === "foregroundActive"))
+              appId = target.bundleId;
+          }
+        }
+      } catch {
+        // Unknown identity is a native-only observation, never permission to attach another app.
+      }
+      if (client !== this.client || generation !== this.#connectionGeneration || this.#closed)
+        return undefined;
+      if (appId !== this.#foregroundAppId) {
+        this.#foregroundAppId = appId;
+        this.#clearSemanticState();
+        this.#metroInspector.close();
+      }
+      return appId;
+    })().finally(() => {
+      if (this.#foregroundRead === read) this.#foregroundRead = undefined;
+    });
+    this.#foregroundRead = read;
+    return read;
   }
 
   async #nativeIOSScreenContext(
@@ -2188,6 +2367,7 @@ export class SimViewSession {
     const base = {
       schemaVersion: 1 as const,
       kind: "native-ios" as const,
+      bundleId: this.#foregroundAppId,
       platform: "ios" as const,
       capturedAt: new Date().toISOString(),
       frameId,
@@ -2202,19 +2382,20 @@ export class SimViewSession {
     };
     try {
       const status = await this.probeStatus();
-      const target = status.connected ? undefined : await this.probeTarget();
-      const context = status.connected
-        ? uiContextSchema.shape.context.unwrap().parse(await this.probeContext())
-        : undefined;
-      const scene =
-        context?.scenes?.find((candidate) => candidate.activationState === "foregroundActive") ??
-        context?.scenes?.[0];
+      const context =
+        status.connected && this.#foregroundAppId && status.bundleId === this.#foregroundAppId
+          ? uiContextSchema.shape.context.unwrap().parse(await this.probeContext())
+          : undefined;
+      const scene = context?.scenes?.find(
+        (candidate) => candidate.activationState === "foregroundActive",
+      );
       const window =
         scene?.windows?.find((candidate) => candidate.key && !candidate.hidden) ??
         scene?.windows?.find((candidate) => !candidate.hidden);
       return {
         ...base,
-        bundleId: target?.bundleId ?? status.bundleId,
+        bundleId: this.#foregroundAppId,
+
         controllerPath: window?.visibleControllerPath,
         windowClass: window?.className,
         sceneDelegate: scene?.delegateClass,
@@ -2231,6 +2412,7 @@ export class SimViewSession {
       client.onDisconnect(() => {
         if (this.client !== client) return;
         this.#connectionGeneration += 1;
+        this.#resetPreviewDemand();
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
         this.#unsubscribers = [];
         this.client = undefined;
@@ -2239,9 +2421,7 @@ export class SimViewSession {
         this.#clearSemanticState();
         this.#metroInspector.close();
         this.#resetPreviewPackets();
-        if (this.mjpegClient) void this.mjpegClient.close().catch(() => {});
-        this.mjpegClient = undefined;
-        this.#mjpegClientPromise = undefined;
+        void this.#releaseMjpegClient();
       }),
     );
     for (const kind of [FrameKind.H264Configuration, FrameKind.H264Frame]) {
@@ -2298,15 +2478,35 @@ export class SimViewSession {
     if (this.#mjpegClientPromise) return this.#mjpegClientPromise;
     const primary = this.requireClient();
     const generation = this.#connectionGeneration;
-    this.#mjpegClientPromise = SimViewClient.attach(primary.socketPath, primary.token, "mjpeg")
+    const mjpegGeneration = this.#mjpegGeneration;
+    const isCurrentConnection = () =>
+      generation === this.#connectionGeneration &&
+      mjpegGeneration === this.#mjpegGeneration &&
+      !this.#closed &&
+      this.client === primary &&
+      this.#hasMjpegViewers();
+    const abortController = new AbortController();
+    this.#mjpegAbortController = abortController;
+    let connectionPromise: Promise<SimViewClient>;
+    connectionPromise = SimViewClient.attach(primary.socketPath, primary.token, "mjpeg", {
+      signal: abortController.signal,
+      timeoutMs: 2_000,
+    })
       .then(async (client) => {
-        if (generation !== this.#connectionGeneration) {
-          await client.close();
-          throw new Error("Simulator changed while the MJPEG fallback was connecting");
-        }
-        this.mjpegClient = client;
-        this.#unsubscribers.push(
-          client.on(FrameKind.JpegFrame, (payload) => {
+        try {
+          if (!isCurrentConnection()) {
+            throw new Error("Simulator changed while the MJPEG fallback was connecting");
+          }
+          await client.request(
+            "capture.preview",
+            { enabled: true },
+            { signal: abortController.signal, timeoutMs: 2_000 },
+          );
+          if (!isCurrentConnection()) {
+            throw new Error("Simulator changed while the MJPEG fallback was connecting");
+          }
+          this.mjpegClient = client;
+          this.#mjpegUnsubscribe = client.on(FrameKind.JpegFrame, (payload) => {
             for (const viewer of this.viewers) {
               if (viewer.data.codec === "mjpeg" && viewer.readyState === WebSocket.OPEN) {
                 if (viewer.data.paused) continue;
@@ -2315,14 +2515,43 @@ export class SimViewSession {
                 }
               }
             }
-          }),
-        );
-        return client;
+          });
+          if (this.#mjpegAbortController === abortController) {
+            this.#mjpegAbortController = undefined;
+          }
+          return client;
+        } catch (error) {
+          await client.close().catch(() => {});
+          throw error;
+        }
       })
       .finally(() => {
-        this.#mjpegClientPromise = undefined;
+        if (this.#mjpegClientPromise === connectionPromise) {
+          this.#mjpegClientPromise = undefined;
+        }
       });
-    return this.#mjpegClientPromise;
+    this.#mjpegClientPromise = connectionPromise;
+    return connectionPromise;
+  }
+
+  #hasMjpegViewers(): boolean {
+    return [...this.viewers].some((viewer) => viewer.data.codec === "mjpeg");
+  }
+
+  async #releaseMjpegClient(): Promise<void> {
+    this.#mjpegGeneration += 1;
+    const pending = this.#mjpegClientPromise;
+    this.#mjpegAbortController?.abort(new Error("MJPEG preview connection released"));
+    this.#mjpegAbortController = undefined;
+    this.#mjpegClientPromise = undefined;
+    this.#mjpegUnsubscribe?.();
+    this.#mjpegUnsubscribe = undefined;
+    const client = this.mjpegClient;
+    this.mjpegClient = undefined;
+    if (client) {
+      await client.close().catch(() => {});
+    }
+    await pending?.catch(() => {});
   }
 
   #sendFrame(viewer: ServerWebSocket<ViewerData>, kind: FrameKind, payload: Uint8Array): number {

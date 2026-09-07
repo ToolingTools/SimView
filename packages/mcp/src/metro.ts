@@ -15,11 +15,11 @@ import type {
 import {
   CDPSession,
   checkMetroStatus,
+  classifyMetroTarget,
   fetchTargets,
   type MetroServerInfo,
   type MetroTarget,
   scanMetroPorts,
-  selectBestTarget,
   supportsMultipleDebuggers,
 } from "metro-bridge";
 
@@ -46,6 +46,7 @@ type RawInspection = {
   root: RawNode;
   nodeCount: number;
   truncated: boolean;
+  reasons?: string[] | undefined;
   screen?: {
     route?: string | undefined;
     navigationPath?: string[] | undefined;
@@ -70,7 +71,6 @@ type MetroInspectorDependencies = {
   projectRoot?: string | undefined;
   now?: (() => number) | undefined;
 };
-type MetroTargetWithAppId = MetroTarget & { appId?: unknown };
 
 const METRO_PROXY_RECORD = `${tmpdir()}/metro-mcp-proxy.json`;
 const METRO_HOST = "localhost";
@@ -101,6 +101,7 @@ export class MetroInspector {
   #targetKey: string | undefined;
   #selected: SelectedTarget | undefined;
   #deviceId: string | undefined;
+  #appId: string | undefined;
   #lastError: string | undefined;
   #fallbackReason: ElementFallbackReason | undefined;
   #fallbackDetail: ElementFallbackDetail | undefined;
@@ -126,6 +127,7 @@ export class MetroInspector {
     accessibility: AccessibilitySnapshot,
     frameId: string,
     maxNodes = 1_200,
+    appId?: string,
   ): Promise<
     | {
         snapshot: ReactNativeElementSnapshot;
@@ -133,6 +135,10 @@ export class MetroInspector {
       }
     | undefined
   > {
+    if (appId !== this.#appId) {
+      this.close();
+      this.#appId = appId;
+    }
     const generation = this.#generation;
     let activeSession: InspectorSession | undefined;
     try {
@@ -140,7 +146,11 @@ export class MetroInspector {
         this.#negativeDiscovery = undefined;
       }
       let selected =
-        this.#session?.isConnected && this.#deviceId === device.id ? this.#selected : undefined;
+        this.#session?.isConnected &&
+        this.#deviceId === device.id &&
+        (!appId || (this.#selected && targetAppId(this.#selected.target) === appId))
+          ? this.#selected
+          : undefined;
       if (!selected) {
         const cached = this.#negativeDiscovery;
         if (cached && cached.deviceId === device.id && cached.expiresAt > this.#now()) {
@@ -152,7 +162,7 @@ export class MetroInspector {
         );
         const servers = await this.#scan(METRO_HOST);
         if (generation !== this.#generation) return undefined;
-        selected = selectMetroTarget(servers, device);
+        selected = selectMetroTarget(servers, device, appId);
         if (!selected) {
           let detail: ElementFallbackDetail;
           if (servers.length > 0) {
@@ -207,9 +217,13 @@ export class MetroInspector {
         stats: {
           nodeCount: raw.nodeCount,
           truncated: raw.truncated,
-          quality: raw.truncated ? "partial" : "complete",
+          quality: raw.truncated || raw.reasons?.length ? "partial" : "complete",
           capturedBudget: maxNodes,
-          ...(raw.truncated ? { reason: "node-budget-exhausted" } : {}),
+          ...(raw.reasons?.length
+            ? { reason: raw.reasons.join(",") }
+            : raw.truncated
+              ? { reason: "node-budget-exhausted" }
+              : {}),
         },
         metro: {
           host: selected.server.host,
@@ -403,35 +417,61 @@ function scaleMetroPointFrames(node: RawNode, scaleX: number, scaleY: number): v
 export function selectMetroTarget(
   servers: MetroServerInfo[],
   device: DeviceDescription,
+  appId?: string,
 ): SelectedTarget | undefined {
-  const candidates = servers.flatMap((server) =>
-    server.targets.map((target) => ({ server, target })),
-  );
-  const debuggable = candidates.filter(({ target }) => Boolean(target.webSocketDebuggerUrl));
   const nativeIdentifiers = new Set(
     [device.id, device.udid, device.serial].filter((value): value is string => Boolean(value)),
   );
-  const exact = debuggable.filter(({ target }) => {
-    const logicalDeviceId = target.reactNative?.logicalDeviceId;
-    return logicalDeviceId !== undefined && nativeIdentifiers.has(logicalDeviceId);
-  });
-  if (exact.length === 1) return exact[0];
-  const normalizedDeviceName = normalizeDeviceName(device.name);
-  const named = debuggable.filter(({ target }) =>
-    normalizeDeviceName(target.deviceName ?? target.title).includes(normalizedDeviceName),
-  );
-  if (named.length === 1) return named[0];
-  const compatible = debuggable.filter(({ target }) => targetSupportsPlatform(target, device));
-  if (compatible.length === 1) return compatible[0];
-
-  for (const server of servers) {
-    const compatibleTargets = server.targets.filter((target) =>
-      targetSupportsPlatform(target, device),
+  const candidates = servers
+    .flatMap((server) => server.targets.map((target) => ({ server, target })))
+    .filter(
+      ({ target }) =>
+        classifyMetroTarget(target).attachable && (!appId || targetAppId(target) === appId),
     );
-    const target = selectBestTarget(compatibleTargets);
-    if (target && servers.length === 1 && compatibleTargets.length === 1) return { server, target };
+  const exact = candidates.filter(({ target }) => {
+    const id = target.reactNative?.logicalDeviceId?.trim();
+    return id && nativeIdentifiers.has(id);
+  });
+  if (exact.length) return exact.length === 1 ? exact[0] : undefined;
+  // Metro often supplies an opaque connection hash, not a Simulator UUID/ADB ID.
+  // Only a recognizable native identifier is contradictory evidence. Opaque IDs
+  // still need a unique device-name match (and the caller's foreground app ID).
+  const compatible = candidates.filter(
+    ({ target }) =>
+      !isNativeDeviceIdentifier(target.reactNative?.logicalDeviceId?.trim()) &&
+      targetSupportsPlatform(target, device),
+  );
+  const names = [normalizeDeviceName(device.name)];
+  // React Native uses Build.MODEL + Android release/API, while ADB prefers
+  // the configured AVD name. Keep the fallback exact and ambiguity-checked.
+  const release = device.runtime.match(/^Android (.+) \(API \d+\)$/)?.[1];
+  const model = device.metadata?.model;
+  const api = device.metadata?.apiLevel;
+  if (device.platform === "android" && model && release && api) {
+    names.push(normalizeDeviceName(`${model} - ${release} - API ${api}`));
   }
-  return undefined;
+  const named = compatible.filter(({ target }) =>
+    names.some((name) => name && targetDeviceNameMatches(target, name)),
+  );
+  if (named.length) return named.length === 1 ? named[0] : undefined;
+  return compatible.length === 1 && !compatible[0]?.target.reactNative?.logicalDeviceId?.trim()
+    ? compatible[0]
+    : undefined;
+}
+
+function isNativeDeviceIdentifier(value: string | undefined): boolean {
+  return Boolean(
+    value &&
+      (/^(?:ios:|android:|emulator-\d+$)/.test(value) ||
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)),
+  );
+}
+
+function targetDeviceNameMatches(target: MetroTarget, expected: string): boolean {
+  const name = normalizeDeviceName(target.deviceName ?? target.title).replace(/ simulator$/, "");
+  return target.deviceName !== undefined
+    ? name === expected
+    : name === expected || name.endsWith(` ${expected}`);
 }
 
 function targetSupportsPlatform(target: MetroTarget, device: DeviceDescription): boolean {
@@ -452,8 +492,32 @@ function normalizeDeviceName(value: string): string {
 }
 
 function targetAppId(target: MetroTarget): string | undefined {
-  const appId = (target as MetroTargetWithAppId).appId;
+  const appId = target.appId;
   return typeof appId === "string" && /^[A-Za-z0-9][A-Za-z0-9.-]+$/.test(appId) ? appId : undefined;
+}
+
+export function selectProxyTarget(
+  targets: MetroTarget[],
+  expected: MetroTarget,
+): MetroTarget | undefined {
+  const expectedId = expected.reactNative?.logicalDeviceId?.trim();
+  const expectedApp = targetAppId(expected);
+  const expectedName = normalizeDeviceName(expected.deviceName ?? expected.title);
+  const matches = targets.filter((target) => {
+    if (!classifyMetroTarget(target).attachable) return false;
+    const id = target.reactNative?.logicalDeviceId?.trim();
+    const app = targetAppId(target);
+    if (expectedId && id && id !== expectedId) return false;
+    if (expectedApp && app && app !== expectedApp) return false;
+    if (expectedId && id === expectedId) return true;
+    const name = normalizeDeviceName(target.deviceName ?? target.title);
+    return Boolean(
+      name &&
+        expectedName &&
+        name.replace(/ simulator$/, "") === expectedName.replace(/ simulator$/, ""),
+    );
+  });
+  return matches.length === 1 ? matches[0] : undefined;
 }
 
 async function existingProxyTarget(selected: SelectedTarget): Promise<MetroTarget | undefined> {
@@ -467,19 +531,31 @@ async function existingProxyTarget(selected: SelectedTarget): Promise<MetroTarge
     if (record.metroPort && record.metroPort !== selected.server.port) return undefined;
     process.kill(record.pid, 0);
     const targets = await fetchTargets("127.0.0.1", record.port);
-    const target = selectBestTarget(targets);
-    if (!target) return undefined;
-    const expectedName = normalizeDeviceName(selected.target.deviceName ?? selected.target.title);
-    const actualName = normalizeDeviceName(target.deviceName ?? target.title);
-    return actualName.includes(expectedName) || expectedName.includes(actualName)
-      ? target
-      : undefined;
+    return selectProxyTarget(targets, selected.target);
   } catch {
     return undefined;
   }
 }
 
-async function evaluateInspection(
+export function inspectionMailboxExpression(key: string, expression: string): string {
+  const literal = JSON.stringify(key);
+  return `(function() {
+    var state = { state: 'pending' };
+    globalThis[${literal}] = state;
+    state.timer = setTimeout(function() {
+      if (globalThis[${literal}] === state) delete globalThis[${literal}];
+    }, 5000);
+    Promise.resolve(${expression}).then(function(value) {
+      if (globalThis[${literal}] !== state) return;
+      state.state = 'fulfilled'; state.value = value;
+    }, function(error) {
+      if (globalThis[${literal}] !== state) return;
+      state.state = 'rejected'; state.error = String(error && error.message || error);
+    });
+  })(); void 0;`;
+}
+
+export async function evaluateInspection(
   session: InspectorSession,
   width: number,
   height: number,
@@ -487,14 +563,14 @@ async function evaluateInspection(
 ): Promise<RawInspection | undefined> {
   const key = `__simviewInspection${randomUUID().replaceAll("-", "")}`;
   const keyLiteral = JSON.stringify(key);
+  const deadline = Date.now() + 4_000;
   try {
     const kickoff = await withTimeout(
       session.send<RuntimeEvaluateResult>("Runtime.evaluate", {
-        expression: `globalThis[${keyLiteral}] = { state: 'pending' };
-Promise.resolve(${fiberInspectionExpression(width, height, maxNodes)}).then(
-  function(value) { globalThis[${keyLiteral}] = { state: 'fulfilled', value: value }; },
-  function(error) { globalThis[${keyLiteral}] = { state: 'rejected', error: String(error && (error.stack || error.message) || error) }; }
-); void 0;`,
+        expression: inspectionMailboxExpression(
+          key,
+          fiberInspectionExpression(width, height, maxNodes),
+        ),
         returnByValue: true,
       }),
       1_000,
@@ -502,27 +578,28 @@ Promise.resolve(${fiberInspectionExpression(width, height, maxNodes)}).then(
     );
     throwForEvaluationException(kickoff);
 
-    const deadline = Date.now() + 3_000;
     while (Date.now() < deadline) {
       const response = await withTimeout(
         session.send<RuntimeEvaluateResult>("Runtime.evaluate", {
-          expression: `globalThis[${keyLiteral}]`,
+          expression: `(function() { var s = globalThis[${keyLiteral}]; return s && { state: s.state, value: s.value, error: s.error }; })()`,
           returnByValue: true,
         }),
-        750,
+        Math.min(750, Math.max(1, deadline - Date.now())),
         "reading React Native Fiber inspection",
       );
       throwForEvaluationException(response);
       const envelope = response.result?.value as InspectionEnvelope | undefined;
       if (envelope?.state === "fulfilled") return envelope.value;
       if (envelope?.state === "rejected") throw new Error(envelope.error);
-      await new Promise((resolve) => setTimeout(resolve, 20));
+      await new Promise((resolve) =>
+        setTimeout(resolve, Math.min(20, Math.max(0, deadline - Date.now()))),
+      );
     }
     throw new Error("Timed out waiting for React Native Fiber inspection");
   } finally {
     await withTimeout(
       session.send("Runtime.evaluate", {
-        expression: `delete globalThis[${keyLiteral}]`,
+        expression: `var state = globalThis[${keyLiteral}]; if (state) clearTimeout(state.timer); delete globalThis[${keyLiteral}];`,
         returnByValue: true,
       }),
       250,
@@ -584,6 +661,12 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
     var INTERNAL = new Set(${JSON.stringify([...INTERNAL_NAMES])});
     var count = 0;
     var truncated = false;
+    var visitTruncated = false;
+    var outputTruncated = false;
+    var measurementIncomplete = false;
+    function reasons() {
+      return [visitTruncated && 'fiber-visit-budget-exhausted', outputTruncated && 'node-budget-exhausted', measurementIncomplete && 'host-measurement-incomplete'].filter(Boolean);
+    }
     var measureJobs = [];
 
     function nameOf(fiber) {
@@ -631,13 +714,17 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       var instance = candidates.find(function(candidate) {
         return candidate && (typeof candidate.getBoundingClientRect === 'function' || typeof candidate.measure === 'function');
       });
-      if (!instance) return;
+      if (!instance) { measurementIncomplete = true; return; }
       measureJobs.push(new Promise(function(resolve) {
         var settled = false;
         var finish = function(rect) {
           if (settled) return;
           settled = true;
-          if (rect && rect.width > 0 && rect.height > 0) {
+          if (!rect || !Number.isFinite(Number(rect.width)) || !Number.isFinite(Number(rect.height)) ||
+              Number(rect.width) < 0 || Number(rect.height) < 0 ||
+              !Number.isFinite(Number(rect.x || 0)) || !Number.isFinite(Number(rect.y || 0))) {
+            measurementIncomplete = true;
+          } else if (rect.width > 0 && rect.height > 0) {
             var x = Number(rect.x || 0); var y = Number(rect.y || 0);
             var w = Number(rect.width); var h = Number(rect.height);
             node.frame = {
@@ -665,7 +752,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         } catch (_) { done(null); }
       }));
     }
-    var focus = focused(navState());
+    var focus = focused(await navState());
     function priorityOf(props) {
       var candidateRole = props.accessibilityRole || props.role;
       var candidateLabel = props.accessibilityLabel || props['aria-label'];
@@ -706,7 +793,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         while (child) { queue.push(child); child = child.sibling; }
       }
     }
-    if (queues.some(function(queue) { return queue.length > 0; })) truncated = true;
+    if (queues.some(function(queue) { return queue.length > 0; })) { truncated = true; visitTruncated = true; }
     function takeFair(pool, limit) {
       var groups = rootEntries.map(function(_, rootIndex) {
         return pool.filter(function(entry) { return entry.rootIndex === rootIndex; }).sort(function(left, right) {
@@ -727,7 +814,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
     var selectedFibers = new Set(selected.map(function(entry) { return entry.fiber; }));
     var contextualEntries = entries.filter(function(entry) { return !selectedFibers.has(entry.fiber); });
     selected = selected.concat(takeFair(contextualEntries, Math.max(0, MAX_NODES - selected.length)));
-    if (selected.length < entries.length) truncated = true;
+    if (selected.length < entries.length) { truncated = true; outputTruncated = true; }
     var nodesByFiber = new Map();
     var prioritiesByNode = new Map();
     selected.sort(function(left, right) { return left.order - right.order; }).forEach(function(entry) {
@@ -820,22 +907,49 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       frame: { points: { x: 0, y: 0, width: WIDTH, height: HEIGHT }, normalized: { x: 0, y: 0, width: 1, height: 1 } },
       kind: 'component', children: projected
     };
-    function navState() {
-      try {
+    async function navState() {
+      var deadline = Date.now() + 250;
+      async function read(reader) {
+        var timer;
+        try {
+          var value = reader();
+          if (value && typeof value.then === 'function') {
+            value = await Promise.race([Promise.resolve(value), new Promise(function(resolve) {
+              timer = setTimeout(function() { resolve(null); }, Math.max(0, deadline - Date.now()));
+            })]);
+          }
+          return value && Array.isArray(value.routes) && value.routes.length ? value : null;
+        } catch (_) { return null; } finally { clearTimeout(timer); }
+      }
+      var state = await read(function() {
         var bridge = globalThis.__METRO_BRIDGE__ || globalThis.__METRO_MCP__;
-        if (bridge && bridge.navigation && bridge.navigation.getState) return bridge.navigation.getState();
+        return bridge && bridge.navigation && bridge.navigation.getState ? bridge.navigation.getState() : null;
+      });
+      if (state) return state;
+      state = await read(function() {
+        var ref = globalThis.__METRO_MCP_NAV_REF__;
+        if (ref && ref.getRootState) return ref.getRootState();
+        var route = ref && ref.getCurrentRoute && ref.getCurrentRoute();
+        return route ? { index: 0, routes: [route] } : null;
+      });
+      if (state) return state;
+      state = await read(function() {
         var expo = globalThis.__EXPO_ROUTER_STATE__;
-        if (typeof expo === 'function') expo = expo();
-        if (expo && expo.routes) return expo;
-      } catch (_) {}
+        return typeof expo === 'function' ? expo() : expo;
+      });
+      if (state) return state;
+      var visited = new Set();
       var found = null;
       for (var rootIndex = 0; rootIndex < rootEntries.length && !found; rootIndex++) {
         var stack = [rootEntries[rootIndex].fiber];
-        while (stack.length && !found) {
-          var fiber = stack.pop(); if (!fiber) continue;
+        while (stack.length && !found && visited.size < VISIT_LIMIT) {
+          var fiber = stack.pop(); if (!fiber || visited.has(fiber)) continue;
+          visited.add(fiber);
           var n = nameOf(fiber); var state = fiber.memoizedState;
           if (n === 'NavigationContainer' || n === 'NavigationContainerInner' || n === 'BaseNavigationContainer') {
-            while (state && !found) {
+            var states = new Set();
+            while (state && !found && !states.has(state) && states.size < VISIT_LIMIT) {
+              states.add(state);
               if (state.memoizedState && state.memoizedState.routes) found = state.memoizedState;
               else if (state.queue && state.queue.lastRenderedState && state.queue.lastRenderedState.routes) found = state.queue.lastRenderedState;
               state = state.next;
@@ -849,7 +963,9 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
     }
     function focused(state) {
       var path = []; var routeKeys = []; var current = state; var route = null;
-      while (current && Array.isArray(current.routes) && current.routes.length) {
+      var visited = new Set();
+      while (current && !visited.has(current) && visited.size < 100 && Array.isArray(current.routes) && current.routes.length) {
+        visited.add(current);
         var index = typeof current.index === 'number' ? current.index : current.routes.length - 1;
         route = current.routes[index]; if (!route) break;
         if (typeof route.name === 'string') path.push(route.name);
@@ -865,8 +981,10 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
     }
     var match = null; var matchDepth = -1; var fallbackMatch = null; var fallbackDepth = -1;
     var fibers = rootEntries.map(function(entry) { return { fiber: entry.fiber, depth: 0 }; });
-    while (fibers.length) {
-      var entry = fibers.pop(); var f = entry && entry.fiber; if (!f) continue;
+    var focusVisited = new Set();
+    while (fibers.length && focusVisited.size < VISIT_LIMIT) {
+      var entry = fibers.pop(); var f = entry && entry.fiber; if (!f || focusVisited.has(f)) continue;
+      focusVisited.add(f);
       var depth = entry.depth; var p = f.memoizedProps || {}; var r = p.route;
       if (focus.route && r && ((focus.route.key && r.key === focus.route.key) || (focus.route.name && r.name === focus.route.name))) {
         if (depth >= fallbackDepth) { fallbackMatch = f; fallbackDepth = depth; }
@@ -915,13 +1033,13 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       }
       var inferred = best(root, 0); if (inferred) {
         confidence = 'inferred';
-        return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated,
+        return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated, reasons: reasons(),
           screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: inferred.node.component,
             componentPath: inferred.node.componentPath, testID: inferred.node.testID, sourceLocation: inferred.node.sourceLocation, confidence: confidence } };
       }
     }
     var screenProps = screen && screen.memoizedProps || {};
-    return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated,
+    return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated, reasons: reasons(),
       screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: screen && nameOf(screen),
         componentPath: screen && componentPath(screen), testID: typeof screenProps.testID === 'string' ? screenProps.testID : undefined,
         sourceLocation: screen && sourceOf(screen), confidence: confidence } };

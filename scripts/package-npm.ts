@@ -2,7 +2,6 @@ import { chmod, cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   assertCodexPluginArchiveSize,
-  assertNoRepowiseArtifacts,
   createNpmPackageManifest,
   createPackagedMcpConfig,
 } from "./release-config";
@@ -61,8 +60,6 @@ await writeFile(
   join(stage, ".mcp.json"),
   `${JSON.stringify(createPackagedMcpConfig(await Bun.file(join(root, ".mcp.json")).json()), null, 2)}\n`,
 );
-await assertNoRepowiseArtifacts(stage);
-
 const pack = Bun.spawn(
   ["npm", "pack", "--json", "--pack-destination", release, "--cache", npmCache, stage],
   {

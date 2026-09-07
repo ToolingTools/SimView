@@ -14,10 +14,14 @@ Android Emulator, or authorized Android device connected through ADB.
    response omits shutdown and unavailable inventory; request additional pages
    with `availableOnly: false` only when diagnosing device discovery. Prefer an
    explicitly supplied device ID. If multiple available devices are returned
-   and no device ID was supplied, present them as a numbered list (including
-   each device's name, platform, and ID) and prompt the user to select one;
-   do not silently choose the first device. When exactly one available device
-   remains, connect to it automatically. Once the user selects a device,
+   and no device ID was supplied, ask the user to select one using the
+   harness's structured multiple-choice question tool when available (for
+   example, `request_user_input_async` in Codex). Include each device's name,
+   platform, and ID in its option so devices with identical names remain
+   distinguishable. If the tool is unavailable in the current mode or cannot
+   accommodate the options, fall back to a numbered text list. Wait for the
+   user's selection; do not silently choose the first device. When exactly one
+   available device remains, connect to it automatically. Once the user selects a device,
    use its ID for the connection. Always call `connect_device`
    first and continue only after it succeeds. If the user asked to view the
    interactive preview, then call `open_simview` with the same device ID; its
@@ -26,8 +30,8 @@ Android Emulator, or authorized Android device connected through ADB.
    semantic-only: use `observationMode: "semantic"` and do not call
    `open_simview` merely because the user says to use SimView.
    On iOS, connection automatically starts a temporary XCTest runner and uses
-   it as the primary accessibility provider. This activates the foreground app
-   without relaunching it. If startup is unavailable, SimView reports the AX
+   it as the primary accessibility provider. The retained runner follows foreground app switches
+   without activating or relaunching apps. If startup is unavailable, SimView reports the AX
    fallback in `iosAccessibility`; do not ask the user for approval.
 2. Call `observe_screen` with `mode: "semantic"` to read compact prepared
    semantics without waiting for or returning an image.

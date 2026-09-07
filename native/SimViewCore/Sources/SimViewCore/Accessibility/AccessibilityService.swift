@@ -246,23 +246,39 @@ final class AccessibilityService: @unchecked Sendable {
     private var xctestProviders: [String: any XCTestAccessibilityProviding] = [:]
     private var xctestBundleIDs: [String: String] = [:]
     private let xctestProviderFactory: (String, String) throws -> any XCTestAccessibilityProviding
+    private let foregroundBundleID: (String) -> String?
     private let observation: AccessibilityObservationCoordinator
     private var observedUDID: String?
     private(set) var observationStrategy = "snapshot-diff"
 
     init(
         observation: AccessibilityObservationCoordinator = AccessibilityObservationCoordinator(),
+        foregroundBundleID: @escaping (String) -> String? = SimulatorForegroundApplication.bundleID,
         xctestProviderFactory: @escaping (String, String) throws -> any XCTestAccessibilityProviding = {
             udid, bundleID in
             try XCTestAccessibilityProviderSession.start(udid: udid, targetBundleID: bundleID)
         }
     ) {
+        self.foregroundBundleID = foregroundBundleID
         self.observation = observation
         self.xctestProviderFactory = xctestProviderFactory
     }
 
-    deinit {
-        for provider in xctestProviders.values { provider.stop() }
+    deinit { shutdown() }
+
+    /// Stops retained XCTest providers when the native server is exiting.
+    ///
+    /// Capture can be toggled while a provider remains enabled, so provider
+    /// lifetime is deliberately separate from observation and capture
+    /// lifetime. Clearing the dictionaries before stopping makes this safe to
+    /// call more than once and prevents a provider callback from being used
+    /// after terminal shutdown has started.
+    func shutdown() {
+        stopObservation()
+        let providers = Array(xctestProviders.values)
+        xctestProviders.removeAll()
+        xctestBundleIDs.removeAll()
+        for provider in providers { provider.stop() }
     }
 
     var available: Bool {
@@ -321,20 +337,15 @@ final class AccessibilityService: @unchecked Sendable {
     }
 
     func enableXCTestProvider(udid: String, bundleID: String) throws -> [String: Any] {
-        if xctestBundleIDs[udid] != bundleID {
-            stopXCTestProvider(udid: udid)
-        }
         if xctestProviders[udid] == nil {
             xctestProviders[udid] = try xctestProviderFactory(udid, bundleID)
-            xctestBundleIDs[udid] = bundleID
         }
+        xctestBundleIDs[udid] = bundleID
         // XCTest snapshots do not emit AXP revision events. Keeping the legacy
         // observer active makes every wait take the bounded AXP fallback path
         // and can also inject unrelated revisions into the XCTest session.
         stopObservation(udid: udid)
-        var status = providerStatus(udid: udid, assessLegacy: false)
-        status["bundleId"] = bundleID
-        return status
+        return providerStatus(udid: udid, assessLegacy: false)
     }
 
     func disableXCTestProvider(udid: String) -> [String: Any] {
@@ -387,9 +398,15 @@ final class AccessibilityService: @unchecked Sendable {
             let captured: [String: Any]
             if let provider = xctestProviders[udid] {
                 do {
-                    captured = try provider.snapshot(maxNodes: maxNodes, timeout: 5)
+                    let bundleID = try requireForegroundBundleID(udid: udid)
+                    let snapshot = try provider.snapshot(bundleID: bundleID, maxNodes: maxNodes, timeout: 5)
+                    guard foregroundBundleID(udid) == bundleID else {
+                        throw SimViewError("XCTEST_TARGET_CHANGED", "The foreground application changed during capture")
+                    }
+                    xctestBundleIDs[udid] = bundleID
+                    captured = snapshot
                 } catch {
-                    stopXCTestProvider(udid: udid)
+                    if !isForegroundTransition(error) { stopXCTestProvider(udid: udid) }
                     captured = try captureLegacySnapshot(udid: udid, maxNodes: maxNodes)
                 }
             } else {
@@ -417,9 +434,15 @@ final class AccessibilityService: @unchecked Sendable {
     func elementAtPoint(udid: String, x: Double, y: Double) throws -> [String: Any] {
         if let provider = xctestProviders[udid] {
             do {
-                return try provider.elementAtPoint(x: x, y: y, timeout: 5)
+                let bundleID = try requireForegroundBundleID(udid: udid)
+                let element = try provider.elementAtPoint(bundleID: bundleID, x: x, y: y, timeout: 5)
+                guard foregroundBundleID(udid) == bundleID else {
+                    throw SimViewError("XCTEST_TARGET_CHANGED", "The foreground application changed during capture")
+                }
+                xctestBundleIDs[udid] = bundleID
+                return element
             } catch {
-                stopXCTestProvider(udid: udid)
+                if !isForegroundTransition(error) { stopXCTestProvider(udid: udid) }
             }
         }
         guard let device = Xcode.object(udid: udid) else {
@@ -452,6 +475,17 @@ final class AccessibilityService: @unchecked Sendable {
         } catch {
             throw SimViewError("ACCESSIBILITY_UNAVAILABLE", error.localizedDescription)
         }
+    }
+
+    private func requireForegroundBundleID(udid: String) throws -> String {
+        guard let bundleID = foregroundBundleID(udid) else {
+            throw SimViewError("XCTEST_TARGET_CHANGED", "The foreground application could not be identified")
+        }
+        return bundleID
+    }
+
+    private func isForegroundTransition(_ error: Error) -> Bool {
+        (error as? SimViewError)?.code == "XCTEST_TARGET_CHANGED"
     }
 
     private func captureLegacySnapshot(udid: String, maxNodes: Int) throws -> [String: Any] {

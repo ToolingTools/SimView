@@ -16,7 +16,7 @@ struct IOSAccessibilityProviderStatus: Sendable {
 }
 
 protocol XCTestAccessibilityProviding: AnyObject {
-    func snapshot(maxNodes: Int, timeout: TimeInterval) throws -> [String: Any]
-    func elementAtPoint(x: Double, y: Double, timeout: TimeInterval) throws -> [String: Any]
+    func snapshot(bundleID: String, maxNodes: Int, timeout: TimeInterval) throws -> [String: Any]
+    func elementAtPoint(bundleID: String, x: Double, y: Double, timeout: TimeInterval) throws -> [String: Any]
     func stop()
 }
