@@ -1,8 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   daemonRecordSchema,
@@ -191,6 +191,37 @@ describe("shared backend registry contracts", () => {
     }
   });
 
+  test.each([
+    ["empty", ""],
+    ["malformed", "incomplete startup metadata"],
+    ["reused PID", JSON.stringify({ pid: process.pid, startedAt: "previous process lifetime" })],
+  ])("recovers a stale %s startup lock", async (_label, contents) => {
+    if (contents === undefined) throw new Error("Missing startup-lock fixture");
+    const fixture = await abandonedStartup(contents);
+    let client: SimViewClient | undefined;
+    try {
+      client = await SimViewClient.acquire(fixture.options);
+      expect(client.socketPath).toBe(join(fixture.directory, "core.sock"));
+      expect((await client.request("health.get", {})).clients).toBe(1);
+    } finally {
+      await client?.close();
+      await fixture.cleanup();
+    }
+  });
+
+  test("preserves a stale legacy lock owned by a live process", async () => {
+    const contents = `${process.pid}\n${Date.now()}\nlive-starter\n`;
+    const fixture = await abandonedStartup(contents);
+    try {
+      await expect(SimViewClient.acquire(fixture.options)).rejects.toThrow(
+        "Timed out waiting for another SimView backend starter",
+      );
+      expect(await readFile(join(fixture.directory, "startup.lock"), "utf8")).toBe(contents);
+    } finally {
+      await fixture.cleanup();
+    }
+  }, 15_000);
+
   test("isolates shared backends by requester cwd", async () => {
     const binary = fileURLToPath(new URL("fixtures/fake-simview-core.ts", import.meta.url));
     await chmod(binary, 0o755);
@@ -239,4 +270,31 @@ async function waitForSocket(socketPath: string): Promise<void> {
 
 async function waitForProcessExit(child: Bun.Subprocess): Promise<number | undefined> {
   return Promise.race([child.exited, Bun.sleep(2_000).then(() => undefined)]);
+}
+
+async function abandonedStartup(contents: string) {
+  const binary = fileURLToPath(new URL("fixtures/fake-simview-core.ts", import.meta.url));
+  await chmod(binary, 0o755);
+  const options = { udid: randomUUID().toUpperCase(), binary };
+  const client = await SimViewClient.acquire(options);
+  const directory = dirname(client.socketPath);
+  await client.close();
+  await stopDaemons(SimViewClient, { udid: options.udid }).catch(() => {});
+  await waitForDaemonExit(options.udid);
+  await pruneDaemons(options.udid);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const lock = join(directory, "startup.lock");
+  await writeFile(lock, contents, { mode: 0o600 });
+  const staleTime = new Date(Date.now() - 60_000);
+  await utimes(lock, staleTime, staleTime);
+  return {
+    options,
+    directory,
+    async cleanup() {
+      await stopDaemons(SimViewClient, { udid: options.udid }).catch(() => {});
+      await waitForDaemonExit(options.udid);
+      await pruneDaemons(options.udid);
+      await rm(directory, { recursive: true, force: true });
+    },
+  };
 }

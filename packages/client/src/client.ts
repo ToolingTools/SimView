@@ -80,13 +80,10 @@ export function resolveNativeEnvironment(
             key,
             value
               .split(delimiter)
-              .map((entry) =>
-                entry === ""
-                  ? resolvedCwd
-                  : !isAbsolute(entry)
-                    ? resolve(resolvedCwd, entry)
-                    : entry,
-              )
+              .map((entry) => {
+                if (entry === "") return resolvedCwd;
+                return isAbsolute(entry) ? entry : resolve(resolvedCwd, entry);
+              })
               .join(delimiter),
           ],
         ];

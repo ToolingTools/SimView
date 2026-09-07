@@ -6,10 +6,10 @@ import {
   mkdir,
   open,
   readdir,
-  rmdir,
   readFile,
   rename,
   rm,
+  rmdir,
   unlink,
   utimes,
   writeFile,
@@ -18,7 +18,7 @@ import { basename, join, resolve, sep } from "node:path";
 import { type Codec, PROTOCOL_VERSION, SIMVIEW_VERSION } from "@simview/contracts";
 import { resolveBinary } from "@simview/core";
 import { z } from "zod";
-import { resolveNativeEnvironment, type AcquireOptions, type SimViewClient } from "./client";
+import { type AcquireOptions, resolveNativeEnvironment, type SimViewClient } from "./client";
 import { processSnapshot } from "./process-owner";
 import { userTemporaryDirectory } from "./runtime-directory";
 
@@ -173,6 +173,32 @@ async function removeDeadInstance(
   return true;
 }
 
+async function startupLockOwnerAlive(contents: string): Promise<boolean> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents);
+  } catch {
+    const legacyPID = Number(contents.split("\n", 1)[0]);
+    return Number.isSafeInteger(legacyPID) && legacyPID > 0 && isAlive(legacyPID);
+  }
+  if (
+    !parsed ||
+    typeof parsed !== "object" ||
+    !Number.isSafeInteger((parsed as { pid?: unknown }).pid) ||
+    typeof (parsed as { startedAt?: unknown }).startedAt !== "string"
+  ) {
+    return false;
+  }
+  const owner = parsed as { pid: number; startedAt: string };
+  try {
+    const snapshot = await processSnapshot([owner.pid]);
+    return snapshot.get(owner.pid)?.startedAt === owner.startedAt;
+  } catch {
+    // Failure to inspect ownership is not evidence that a starter has exited.
+    return true;
+  }
+}
+
 async function removeAbandonedInstance(instanceDirectory: string): Promise<boolean> {
   // A startup can briefly have a directory and lock without a published record.
   // Only reclaim an old, ownerless directory, and never remove an unknown socket.
@@ -186,32 +212,7 @@ async function removeAbandonedInstance(instanceDirectory: string): Promise<boole
   if (lockDetails?.isSymbolicLink()) throw new Error(`Unsafe SimView startup lock: ${lockPath}`);
   if (lockDetails) {
     const contents = await readFile(lockPath, "utf8").catch(() => "");
-    let owner: { pid: number; startedAt: string } | undefined;
-    let legacyOwnerAlive = false;
-    try {
-      const parsed: unknown = JSON.parse(contents);
-      if (
-        parsed &&
-        typeof parsed === "object" &&
-        Number.isSafeInteger((parsed as { pid?: unknown }).pid) &&
-        typeof (parsed as { startedAt?: unknown }).startedAt === "string"
-      ) {
-        owner = parsed as { pid: number; startedAt: string };
-      }
-    } catch {
-      const legacyPID = Number(contents.split("\n", 1)[0]);
-      legacyOwnerAlive = Number.isSafeInteger(legacyPID) && legacyPID > 0 && isAlive(legacyPID);
-    }
-    if (legacyOwnerAlive) return false;
-    if (owner) {
-      let snapshot;
-      try {
-        snapshot = await processSnapshot([owner.pid]);
-      } catch {
-        return false;
-      }
-      if (snapshot.get(owner.pid)?.startedAt === owner.startedAt) return false;
-    }
+    if (await startupLockOwnerAlive(contents)) return false;
     if ((await readFile(lockPath, "utf8").catch(() => "")) !== contents) return false;
     await unlink(lockPath).catch(() => {});
   }
@@ -271,31 +272,7 @@ async function acquireLock(instanceDirectory: string): Promise<() => Promise<voi
       if (details?.isSymbolicLink()) throw new Error(`Unsafe SimView startup lock: ${lockPath}`);
       if (details && Date.now() - details.mtimeMs > LOCK_STALE_MS) {
         const existing = await readFile(lockPath, "utf8").catch(() => "");
-        let owner: { pid: number; startedAt: string } | undefined;
-        let legacyOwnerAlive = false;
-        try {
-          const parsed: unknown = JSON.parse(existing);
-          if (
-            parsed &&
-            typeof parsed === "object" &&
-            Number.isSafeInteger((parsed as { pid?: unknown }).pid) &&
-            typeof (parsed as { startedAt?: unknown }).startedAt === "string"
-          ) {
-            owner = parsed as { pid: number; startedAt: string };
-          }
-        } catch {
-          const legacyPID = Number(existing.split("\n", 1)[0]);
-          legacyOwnerAlive = Number.isSafeInteger(legacyPID) && legacyPID > 0 && isAlive(legacyPID);
-        }
-        let ownerAlive = legacyOwnerAlive;
-        if (owner) {
-          try {
-            const snapshot = await processSnapshot([owner.pid]);
-            ownerAlive = snapshot.get(owner.pid)?.startedAt === owner.startedAt;
-          } catch {
-            ownerAlive = true;
-          }
-        }
+        const ownerAlive = await startupLockOwnerAlive(existing);
         if (!ownerAlive && (await readFile(lockPath, "utf8").catch(() => "")) === existing) {
           await unlink(lockPath).catch(() => {});
           continue;

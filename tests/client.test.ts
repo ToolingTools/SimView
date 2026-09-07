@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { realpath } from "node:fs/promises";
 import {
   encodeFrame,
   FrameDecoder,
@@ -70,57 +69,63 @@ describe("SimViewClient", () => {
     );
   });
 
-  test("cancels and reaps a hanging device discovery child", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "simview-discovery-test-"));
-    const binary = join(directory, "hang.ts");
-    const pidPath = join(directory, "child.pid");
-    const descendantPath = join(directory, "descendant.pid");
-    await writeFile(
-      binary,
-      `#!/usr/bin/env bun\nconst descendant = Bun.spawn([process.execPath, '-e', ${JSON.stringify(`await Bun.write(${JSON.stringify(descendantPath)}, String(process.pid)); await Bun.sleep(60_000);`)}], { stdout: 'inherit', stderr: 'inherit' });\nawait Bun.write(${JSON.stringify(pidPath)}, String(process.pid));\nawait Bun.sleep(60_000);\n`,
-      { mode: 0o700 },
-    );
-    await chmod(binary, 0o700);
-    const controller = new AbortController();
-    const discovery = SimViewClient.listDevices(binary, undefined, {
-      signal: controller.signal,
-      timeoutMs: 10_000,
-    });
-    let pid: number | undefined;
-    let descendantPID: number | undefined;
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      const value = await readFile(pidPath, "utf8").catch(() => "");
-      const descendantValue = await readFile(descendantPath, "utf8").catch(() => "");
-      if (value && descendantValue) {
-        pid = Number(value);
-        descendantPID = Number(descendantValue);
-        break;
-      }
-      await Bun.sleep(10);
-    }
-    expect(pid).toBeGreaterThan(0);
-    expect(descendantPID).toBeGreaterThan(0);
-    controller.abort(new Error("review closed"));
-    await expect(discovery).rejects.toThrow("review closed");
-    for (let attempt = 0; attempt < 100; attempt += 1) {
+  test.each([false, true])(
+    "reaps discovery and its TERM-ignoring descendant (leader ignores TERM: %s)",
+    async (ignoreLeaderTerm) => {
+      const directory = await mkdtemp(join(tmpdir(), "simview-discovery-test-"));
+      const binary = join(directory, "hang.ts");
+      const pidPath = join(directory, "child.pid");
+      const descendantPath = join(directory, "descendant.pid");
+      const descendantSource = `process.on('SIGTERM', () => {}); await Bun.write(${JSON.stringify(descendantPath)}, String(process.pid)); await Bun.sleep(60_000);`;
+      await writeFile(
+        binary,
+        `#!/usr/bin/env bun\n${ignoreLeaderTerm ? "process.on('SIGTERM', () => {});" : ""}\nBun.spawn([process.execPath, '-e', ${JSON.stringify(descendantSource)}], { stdout: 'inherit', stderr: 'inherit' });\nawait Bun.write(${JSON.stringify(pidPath)}, String(process.pid));\nawait Bun.sleep(60_000);\n`,
+        { mode: 0o700 },
+      );
+      const controller = new AbortController();
+      const discovery = SimViewClient.listDevices(binary, undefined, {
+        signal: controller.signal,
+        timeoutMs: 10_000,
+      });
+      const outcome = discovery.catch((error: unknown) => error);
+      let pid: number | undefined;
+      let descendantPID: number | undefined;
       try {
-        process.kill(pid as number, 0);
-        process.kill(descendantPID as number, 0);
-      } catch {
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+          const value = await readFile(pidPath, "utf8").catch(() => "");
+          const descendantValue = await readFile(descendantPath, "utf8").catch(() => "");
+          if (value && descendantValue) {
+            pid = Number(value);
+            descendantPID = Number(descendantValue);
+            break;
+          }
+          await Bun.sleep(10);
+        }
+        expect(pid).toBeGreaterThan(0);
+        expect(descendantPID).toBeGreaterThan(0);
+        if (pid === undefined || descendantPID === undefined) {
+          throw new Error("Discovery processes did not report their identities");
+        }
+        controller.abort(new Error("review closed"));
+        expect(String(await outcome)).toContain("review closed");
+        const pids = [pid, descendantPID];
+        for (let attempt = 0; attempt < 100 && pids.some(processAlive); attempt += 1) {
+          await Bun.sleep(10);
+        }
+        expect(pids.map(processAlive)).toEqual([false, false]);
+      } finally {
+        controller.abort();
+        await outcome;
+        for (const ownedPID of [pid, descendantPID]) {
+          if (!ownedPID || !processAlive(ownedPID)) continue;
+          try {
+            process.kill(ownedPID, "SIGKILL");
+          } catch {}
+        }
         await rm(directory, { recursive: true, force: true });
-        return;
       }
-      await Bun.sleep(10);
-    }
-    try {
-      process.kill(pid as number, "SIGKILL");
-      process.kill(descendantPID as number, "SIGKILL");
-    } catch {
-      // The child exited between the final probe and cleanup.
-    }
-    await rm(directory, { recursive: true, force: true });
-    throw new Error("Cancelled discovery child was not reaped");
-  });
+    },
+  );
 
   test("runs device discovery in its requester cwd", async () => {
     const directory = await mkdtemp(join(tmpdir(), "simview-discovery-cwd-test-"));
@@ -207,4 +212,13 @@ function helloResult() {
       probe: false,
     },
   };
+}
+
+function processAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
 }

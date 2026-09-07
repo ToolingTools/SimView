@@ -881,10 +881,7 @@ export function createServer(
   {
     browserFallbackDelayMs = BROWSER_FALLBACK_DELAY_MS,
     environment = process.env,
-    deviceProvider = (signal?: AbortSignal) =>
-      import("@simview/client").then(({ SimViewClient }) =>
-        SimViewClient.listDevices(undefined, undefined, { signal }),
-      ),
+    deviceProvider = (signal?: AbortSignal) => session.devices(signal),
     deviceInventorySnapshotTTLMS = DEVICE_INVENTORY_SNAPSHOT_TTL_MS,
     now = Date.now,
   }: {

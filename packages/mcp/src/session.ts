@@ -2335,6 +2335,12 @@ export class SimViewSession {
     const primary = this.requireClient();
     const generation = this.#connectionGeneration;
     const mjpegGeneration = this.#mjpegGeneration;
+    const isCurrentConnection = () =>
+      generation === this.#connectionGeneration &&
+      mjpegGeneration === this.#mjpegGeneration &&
+      !this.#closed &&
+      this.client === primary &&
+      this.#hasMjpegViewers();
     const abortController = new AbortController();
     this.#mjpegAbortController = abortController;
     let connectionPromise: Promise<SimViewClient>;
@@ -2343,15 +2349,8 @@ export class SimViewSession {
       timeoutMs: 2_000,
     })
       .then(async (client) => {
-        let ownsClient = false;
         try {
-          if (
-            generation !== this.#connectionGeneration ||
-            mjpegGeneration !== this.#mjpegGeneration ||
-            this.#closed ||
-            this.client !== primary ||
-            !this.#hasMjpegViewers()
-          ) {
+          if (!isCurrentConnection()) {
             throw new Error("Simulator changed while the MJPEG fallback was connecting");
           }
           await client.request(
@@ -2359,13 +2358,7 @@ export class SimViewSession {
             { enabled: true },
             { signal: abortController.signal, timeoutMs: 2_000 },
           );
-          if (
-            generation !== this.#connectionGeneration ||
-            mjpegGeneration !== this.#mjpegGeneration ||
-            this.#closed ||
-            this.client !== primary ||
-            !this.#hasMjpegViewers()
-          ) {
+          if (!isCurrentConnection()) {
             throw new Error("Simulator changed while the MJPEG fallback was connecting");
           }
           this.mjpegClient = client;
@@ -2379,15 +2372,12 @@ export class SimViewSession {
               }
             }
           });
-          ownsClient = true;
           if (this.#mjpegAbortController === abortController) {
             this.#mjpegAbortController = undefined;
           }
           return client;
         } catch (error) {
-          if (!ownsClient) {
-            await client.close().catch(() => {});
-          }
+          await client.close().catch(() => {});
           throw error;
         }
       })

@@ -138,7 +138,7 @@ The process model has two layers:
   directory it creates when its MCP bridge closes.
 - `SimViewClient.acquire({ deviceId, codec })` shares one detached native backend
   per platform-qualified native identifier and compatible
-  protocol/version/binary/effective-environment identity. Omitting the environment
+  protocol/version/binary/effective-environment/working-directory identity. Omitting the environment
   and explicitly passing the same inherited environment select the same backend.
   Relative native tool paths resolve against the requesting connection's working
   directory before spawning and computing compatibility.
