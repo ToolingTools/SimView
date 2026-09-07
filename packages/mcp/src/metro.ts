@@ -71,7 +71,6 @@ type MetroInspectorDependencies = {
   projectRoot?: string | undefined;
   now?: (() => number) | undefined;
 };
-type MetroTargetWithAppId = MetroTarget & { appId?: unknown };
 
 const METRO_PROXY_RECORD = `${tmpdir()}/metro-mcp-proxy.json`;
 const METRO_HOST = "localhost";
@@ -442,10 +441,18 @@ export function selectMetroTarget(
       !isNativeDeviceIdentifier(target.reactNative?.logicalDeviceId?.trim()) &&
       targetSupportsPlatform(target, device),
   );
-  const name = normalizeDeviceName(device.name);
-  const named = name
-    ? compatible.filter(({ target }) => targetDeviceNameMatches(target, name))
-    : [];
+  const names = [normalizeDeviceName(device.name)];
+  // React Native uses Build.MODEL + Android release/API, while ADB prefers
+  // the configured AVD name. Keep the fallback exact and ambiguity-checked.
+  const release = device.runtime.match(/^Android (.+) \(API \d+\)$/)?.[1];
+  const model = device.metadata?.model;
+  const api = device.metadata?.apiLevel;
+  if (device.platform === "android" && model && release && api) {
+    names.push(normalizeDeviceName(`${model} - ${release} - API ${api}`));
+  }
+  const named = compatible.filter(({ target }) =>
+    names.some((name) => name && targetDeviceNameMatches(target, name)),
+  );
   if (named.length) return named.length === 1 ? named[0] : undefined;
   return compatible.length === 1 && !compatible[0]?.target.reactNative?.logicalDeviceId?.trim()
     ? compatible[0]
@@ -485,7 +492,7 @@ function normalizeDeviceName(value: string): string {
 }
 
 function targetAppId(target: MetroTarget): string | undefined {
-  const appId = (target as MetroTargetWithAppId).appId;
+  const appId = target.appId;
   return typeof appId === "string" && /^[A-Za-z0-9][A-Za-z0-9.-]+$/.test(appId) ? appId : undefined;
 }
 

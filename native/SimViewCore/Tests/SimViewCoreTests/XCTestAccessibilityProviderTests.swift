@@ -67,6 +67,21 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
         XCTAssertEqual(provider.targets.last, "dev.example.second")
     }
 
+    func testEnablingExistingProviderKeepsStatusConsistent() throws {
+        let provider = CountingProvider()
+        var starts = 0
+        let service = AccessibilityService(foregroundBundleID: { _ in "dev.example.second" }) { _, _ in
+            starts += 1
+            return provider
+        }
+        _ = try service.enableXCTestProvider(udid: "test", bundleID: "dev.example.first")
+        let enabled = try service.enableXCTestProvider(udid: "test", bundleID: "dev.example.second")
+        let status = service.providerStatus(udid: "test", assessLegacy: false)
+        XCTAssertEqual(enabled["bundleId"] as? String, "dev.example.second")
+        XCTAssertEqual(status["bundleId"] as? String, enabled["bundleId"] as? String)
+        XCTAssertEqual(starts, 1)
+    }
+
     func testForegroundChangeDuringSnapshotDiscardsResultAndKeepsProvider() throws {
         let provider = CountingProvider()
         var foreground = "dev.example.first"

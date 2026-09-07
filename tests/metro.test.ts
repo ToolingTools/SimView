@@ -953,6 +953,27 @@ describe("Metro identity boundaries", () => {
     ).toBeUndefined();
   });
 
+  test("matches Android runtime names without confusing apps, APIs, or duplicate devices", () => {
+    const android = androidDevice();
+    android.metadata = { ...android.metadata, model: "sdk_gphone64_arm64", apiLevel: "36" };
+    const match = target({
+      appId: "com.example.mkm",
+      deviceName: "sdk_gphone64_arm64 - 16 - API 36",
+      reactNative: { logicalDeviceId: "opaque-android-hash" },
+    });
+    expect(selectMetroTarget([server(match)], android, "com.example.mkm")?.target).toBe(match);
+    expect(selectMetroTarget([server(match)], android, "com.example.other")).toBeUndefined();
+    for (const other of [
+      { ...match, deviceName: "sdk_gphone64_arm64 - 15 - API 35" },
+      { ...match, reactNative: { logicalDeviceId: "emulator-5560" } },
+    ]) {
+      expect(selectMetroTarget([server(other)], android, "com.example.mkm")).toBeUndefined();
+    }
+    expect(
+      selectMetroTarget([server(match, { ...match, id: "duplicate" })], android, "com.example.mkm"),
+    ).toBeUndefined();
+  });
+
   test("does not confuse Pro and Pro Max device names for opaque IDs", () => {
     const other = target({
       deviceName: `${device.name} Max`,

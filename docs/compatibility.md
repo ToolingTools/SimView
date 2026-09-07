@@ -109,10 +109,20 @@ policy flag is no longer used as foreground evidence. Private selectors remain
 inside the native compatibility boundary. Background or unidentified UIKit
 probe context is not merged into another app's native context.
 
-Android live acceptance remains outstanding: two API 35 emulators were
-available, but no device selection was supplied. The broader input,
-orientation, latency, soak, signing, and notarization matrix below remains
-outside this follow-up's observed coverage.
+A subsequent local PR review used the explicitly selected Pixel 9 Pro XL AVD
+(`emulator-5554`, Android 16 / API 36) with MKM Test
+(`com.mkm.ecommerce.test`). Native semantic search and navigation selected the
+Shop tab. After connecting the installed development client to its existing
+Metro server, the current source returned 629 Fiber nodes, 365 measured nodes,
+149 project-relative source locations, and route context for the Android app;
+incomplete host measurements reported partial quality. Exact PNG capture passed
+at 1344×2992. React Native's model/release/API device name is matched against ADB
+metadata, with app identity and ambiguity checks retained. Initial observations
+discarded changing semantic state; the settled observation passed. No UI trees
+or screenshots were saved. The local review follow-up passed `bun run check`: 254
+Bun tests, 72 Swift tests (one opt-in skip), formatting, typechecking, and fresh
+fixture builds. The full input, orientation, latency, soak, signing,
+and notarization matrix below remains outside this follow-up's observed coverage.
 
 ### Android matrix
 

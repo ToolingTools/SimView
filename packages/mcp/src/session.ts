@@ -2412,6 +2412,7 @@ export class SimViewSession {
       client.onDisconnect(() => {
         if (this.client !== client) return;
         this.#connectionGeneration += 1;
+        this.#resetPreviewDemand();
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
         this.#unsubscribers = [];
         this.client = undefined;

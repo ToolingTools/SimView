@@ -339,15 +339,13 @@ final class AccessibilityService: @unchecked Sendable {
     func enableXCTestProvider(udid: String, bundleID: String) throws -> [String: Any] {
         if xctestProviders[udid] == nil {
             xctestProviders[udid] = try xctestProviderFactory(udid, bundleID)
-            xctestBundleIDs[udid] = bundleID
         }
+        xctestBundleIDs[udid] = bundleID
         // XCTest snapshots do not emit AXP revision events. Keeping the legacy
         // observer active makes every wait take the bounded AXP fallback path
         // and can also inject unrelated revisions into the XCTest session.
         stopObservation(udid: udid)
-        var status = providerStatus(udid: udid, assessLegacy: false)
-        status["bundleId"] = bundleID
-        return status
+        return providerStatus(udid: udid, assessLegacy: false)
     }
 
     func disableXCTestProvider(udid: String) -> [String: Any] {
