@@ -59,10 +59,15 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
         process.arguments = ["-c", "trap '' TERM; while true; do :; done"]
         try process.run()
+        defer {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+            process.waitUntilExit()
+        }
 
         let configurationURL = FileManager.default.temporaryDirectory.appendingPathComponent(
-            "simview-xctest-test-(UUID().uuidString).xctestrun"
+            "simview-xctest-test-\(UUID().uuidString).xctestrun"
         )
+        defer { try? FileManager.default.removeItem(at: configurationURL) }
         try Data("test".utf8).write(to: configurationURL)
         let session = XCTestAccessibilityProviderSession(
             connection: sockets[0],

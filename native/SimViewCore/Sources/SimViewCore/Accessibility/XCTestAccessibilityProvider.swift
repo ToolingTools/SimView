@@ -248,9 +248,8 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
                 Thread.sleep(forTimeInterval: 0.01)
             }
         }
-        // Reap the child even when it exits after the graceful request. The
-        // force-kill path is bounded above; SIGKILL makes waitUntilExit
-        // deterministic for a process that ignored SIGTERM.
+        // Reap the child after either the graceful request or SIGKILL. The
+        // server's terminal shutdown watchdog also covers this final wait.
         process.waitUntilExit()
     }
 
