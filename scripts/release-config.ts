@@ -1,6 +1,3 @@
-import { readdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
-
 export const repositoryUrl = "https://github.com/ToolingTools/SimView";
 export const maxCodexPluginArchiveBytes = 50 * 1024 * 1024;
 
@@ -82,25 +79,4 @@ export function createPackagedMcpConfig(config: unknown): Record<string, unknown
     throw new Error("The project MCP configuration has no SimView server");
   }
   return { mcpServers: { simview } };
-}
-
-export async function assertNoRepowiseArtifacts(root: string): Promise<void> {
-  const visit = async (directory: string): Promise<void> => {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      if (entry.name.toLowerCase().includes("repowise")) {
-        throw new Error(`Release artifact contains Repowise state: ${join(directory, entry.name)}`);
-      }
-      if (entry.isDirectory()) await visit(join(directory, entry.name));
-    }
-  };
-  await visit(root);
-
-  const mcpPath = join(root, ".mcp.json");
-  const mcp = await readFile(mcpPath, "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return undefined;
-    throw error;
-  });
-  if (mcp?.toLowerCase().includes("repowise")) {
-    throw new Error(`Release artifact contains Repowise MCP configuration: ${mcpPath}`);
-  }
 }
