@@ -17,17 +17,16 @@ final class XCTestSnapshotProbe: XCTestCase {
         )
 
         let application = XCUIApplication(bundleIdentifier: targetBundleIdentifier)
+        if environment["SIMVIEW_XCTEST_MODE"] == "persistent" {
+            try serve()
+            return
+        }
         application.activate()
         XCTAssertEqual(
             application.state,
             .runningForeground,
             "The target application did not reach the foreground"
         )
-
-        if environment["SIMVIEW_XCTEST_MODE"] == "persistent" {
-            try serve(application: application)
-            return
-        }
 
         var captures: [[String: Any]] = []
         for sequence in 0..<captureCount {
@@ -52,7 +51,7 @@ final class XCTestSnapshotProbe: XCTestCase {
         print(outputMarker + data.base64EncodedString())
     }
 
-    private func serve(application: XCUIApplication) throws {
+    private func serve() throws {
         guard
             let portText = environment["SIMVIEW_XCTEST_PORT"],
             let port = UInt16(portText),
@@ -72,8 +71,24 @@ final class XCTestSnapshotProbe: XCTestCase {
 
         while let request = try readJSON(from: socket) {
             let identifier = request["id"] as? String ?? ""
+            // Constructing a handle does not launch or activate the target.
+            let bundleID = request["bundleId"] as? String ?? ""
+            let application = XCUIApplication(bundleIdentifier: bundleID.isEmpty ? targetBundleIdentifier : bundleID)
+            if ["snapshotForeground", "elementAtPointForeground"].contains(request["method"] as? String ?? ""),
+                bundleID.isEmpty || application.state != .runningForeground
+            {
+                try writeJSON(
+                    [
+                        "id": identifier,
+                        "error": [
+                            "code": "XCTEST_TARGET_CHANGED",
+                            "message": "The requested application is not in the foreground",
+                        ],
+                    ], to: socket)
+                continue
+            }
             switch request["method"] as? String {
-            case "snapshot":
+            case "snapshotForeground":
                 let requestedBudget = (request["maxNodes"] as? NSNumber)?.intValue ?? 1_200
                 let budget = max(1, min(requestedBudget, 5_000))
                 do {
@@ -84,14 +99,15 @@ final class XCTestSnapshotProbe: XCTestCase {
                         [
                             "id": identifier,
                             "error": [
-                                "code": "XCTEST_SNAPSHOT_FAILED",
+                                "code": (error as NSError).domain == "SimViewForeground"
+                                    ? "XCTEST_TARGET_CHANGED" : "XCTEST_SNAPSHOT_FAILED",
                                 "message": error.localizedDescription,
                             ],
                         ],
                         to: socket
                     )
                 }
-            case "elementAtPoint":
+            case "elementAtPointForeground":
                 do {
                     let snapshot = try contractSnapshot(application: application, maxNodes: 5_000)
                     guard
@@ -114,7 +130,8 @@ final class XCTestSnapshotProbe: XCTestCase {
                         [
                             "id": identifier,
                             "error": [
-                                "code": "XCTEST_ELEMENT_NOT_FOUND",
+                                "code": (error as NSError).domain == "SimViewForeground"
+                                    ? "XCTEST_TARGET_CHANGED" : "XCTEST_ELEMENT_NOT_FOUND",
                                 "message": "No retained XCTest element contains the point",
                             ],
                         ],
@@ -190,6 +207,13 @@ final class XCTestSnapshotProbe: XCTestCase {
         maxNodes: Int
     ) throws -> [String: Any] {
         let snapshot = try application.snapshot()
+        guard application.state == .runningForeground else {
+            throw NSError(
+                domain: "SimViewForeground", code: 1,
+                userInfo: [
+                    NSLocalizedDescriptionKey: "The foreground application changed during capture"
+                ])
+        }
         let screenFrame = snapshot.frame
         let snapshotID = UUID().uuidString
         var remaining = maxNodes

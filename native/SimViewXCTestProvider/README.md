@@ -4,7 +4,13 @@ This is an evidence gate for the proposed `core-simulator-xctest` provider. It
 uses a real UI-testing session and `XCUIApplication(bundleIdentifier:)` to
 capture `XCUIElementSnapshot.dictionaryRepresentation` for an arbitrary app.
 It does not change `ApplicationAccessibilityEnabled` and activates an existing
-app instead of terminating it.
+app instead of terminating it in the standalone diagnostic mode.
+The packaged persistent mode never activates or relaunches the app: each
+snapshot/point request supplies the currently verified foreground bundle ID,
+and the same runner follows app switches. Background targets are rejected.
+The private runner methods use distinct foreground-aware names, so a stale
+fixed-app runner rejects them and the host falls back to Simulator AX. Public
+native methods, framing, response schemas, and protocol versions are unchanged.
 
 Run it against a booted Simulator and an installed application:
 

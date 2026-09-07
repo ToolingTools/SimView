@@ -25,6 +25,7 @@ static NSTimeInterval const SVAccessibilitySnapshotRetryDelay = 0.025;
 
 @interface SVAXTranslationObject : NSObject
 @property(nonatomic, copy) NSString *bridgeDelegateToken;
+@property(nonatomic, readonly) int pid;
 @end
 
 @interface SVAXPlatformElement : NSAccessibilityElement
@@ -439,6 +440,24 @@ static NSDictionary *SVResolve(NSObject *device, CGPoint *point, NSRect serializ
 }
 
 @implementation SVAccessibilityBridge
+
++ (NSNumber *)frontmostProcessIDForDevice:(NSObject *)device {
+  @try {
+    SVAXTranslator *translator = SVTranslator();
+    if (!translator || ![device respondsToSelector:@selector
+                                (sendAccessibilityRequestAsync:completionQueue:completionHandler:)])
+      return nil;
+    SVAXTranslationObject *application =
+        [translator frontmostApplicationWithDisplayId:0
+                                  bridgeDelegateToken:[SVDispatcher() tokenForDevice:device]];
+    if (![application respondsToSelector:@selector(pid)])
+      return nil;
+    int pid = application.pid;
+    return pid > 0 ? @(pid) : nil;
+  } @catch (NSException *exception) {
+    return nil;
+  }
+}
 
 + (BOOL)isAvailable {
   return SVTranslator() != nil;

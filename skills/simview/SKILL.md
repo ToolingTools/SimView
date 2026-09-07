@@ -30,8 +30,8 @@ Android Emulator, or authorized Android device connected through ADB.
    semantic-only: use `observationMode: "semantic"` and do not call
    `open_simview` merely because the user says to use SimView.
    On iOS, connection automatically starts a temporary XCTest runner and uses
-   it as the primary accessibility provider. This activates the foreground app
-   without relaunching it. If startup is unavailable, SimView reports the AX
+   it as the primary accessibility provider. The retained runner follows foreground app switches
+   without activating or relaunching apps. If startup is unavailable, SimView reports the AX
    fallback in `iosAccessibility`; do not ask the user for approval.
 2. Call `observe_screen` with `mode: "semantic"` to read compact prepared
    semantics without waiting for or returning an image.

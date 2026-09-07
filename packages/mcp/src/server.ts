@@ -1550,7 +1550,6 @@ export function createServer(
         throw new Error("open_simview cannot switch devices; call connect_device first");
       }
       const state = session.state();
-      await session.enablePreview(true);
       if (appCapable) observeEmbeddedApp();
       else scheduleBrowserFallback();
       return toolResult(`SimView is connected to ${state.device?.name}.`, state);

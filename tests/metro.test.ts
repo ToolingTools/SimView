@@ -10,11 +10,13 @@ import {
 } from "@simview/contracts";
 import {
   fiberInspectionExpression,
+  inspectionMailboxExpression,
   METRO_DISCOVERY_PORTS,
   MetroInspector,
   metroMeasurementViewport,
   normalizeProjectSource,
   selectMetroTarget,
+  selectProxyTarget,
 } from "../packages/mcp/src/metro";
 
 type MetroServerInfo = Parameters<typeof selectMetroTarget>[0][number];
@@ -31,7 +33,7 @@ function target(overrides: Partial<MetroTarget> = {}): MetroTarget {
   return {
     id: "target-1",
     title: "Hermes React Native",
-    description: "",
+    description: "React Native application",
     type: "node",
     webSocketDebuggerUrl: "ws://127.0.0.1:8081/inspector/device?page=1",
     vm: "Hermes",
@@ -72,7 +74,7 @@ describe("Metro React Native target selection", () => {
   });
 
   test("prefers an exact logical Simulator identifier", () => {
-    const other = target({ id: "other", reactNative: { logicalDeviceId: "OTHER" } });
+    const other = target({ id: "other", reactNative: { logicalDeviceId: "ios:OTHER" } });
     const exact = target({ id: "exact", reactNative: { logicalDeviceId: "SIM-123" } });
 
     expect(selectMetroTarget([server(other, exact)], device)?.target.id).toBe("exact");
@@ -787,6 +789,7 @@ type InspectionResult = {
   screen: Record<string, unknown>;
   nodeCount: number;
   truncated: boolean;
+  reasons: string[];
 };
 
 async function inspectFiber(
@@ -905,3 +908,211 @@ class HangingInspectorSession {
     this.isConnected = false;
   }
 }
+
+describe("Metro identity boundaries", () => {
+  test("rejects a contradictory ID even with a matching name or sole target", () => {
+    const wrong = target({
+      deviceName: device.name,
+      reactNative: { logicalDeviceId: "ios:OTHER" },
+    });
+    expect(selectMetroTarget([server(wrong)], device)).toBeUndefined();
+  });
+
+  test("does not break duplicate exact matches with name or server ordering", () => {
+    const first = target({
+      id: "one",
+      deviceName: device.name,
+      reactNative: { logicalDeviceId: "SIM-123" },
+    });
+    const second = target({ id: "two", reactNative: { logicalDeviceId: "SIM-123" } });
+    expect(selectMetroTarget([server(first, second)], device)).toBeUndefined();
+    expect(selectMetroTarget([server(second), server(first)], device)).toBeUndefined();
+  });
+
+  test("excludes auxiliary and synthetic targets before exact-ID selection", () => {
+    const exact = { reactNative: { logicalDeviceId: "SIM-123" } };
+    expect(
+      selectMetroTarget([server(target({ ...exact, title: "Reanimated UI runtime" }))], device),
+    ).toBeUndefined();
+    expect(selectMetroTarget([server(target({ ...exact, id: "-1" }))], device)).toBeUndefined();
+  });
+
+  test("matches opaque Metro hashes by unique device name and foreground app", () => {
+    const opaque = target({
+      deviceName: device.name,
+      appId: "com.example.mkm",
+      reactNative: { logicalDeviceId: "7cd3f0108fa103e4e7ce174958ecf0bd3a220065" },
+    });
+    expect(selectMetroTarget([server(opaque)], device, "com.example.mkm")?.target).toBe(opaque);
+    expect(
+      selectMetroTarget(
+        [server({ ...opaque, deviceName: "Other Simulator" })],
+        device,
+        "com.example.mkm",
+      ),
+    ).toBeUndefined();
+  });
+
+  test("does not confuse Pro and Pro Max device names for opaque IDs", () => {
+    const other = target({
+      deviceName: `${device.name} Max`,
+      appId: "com.example.mkm",
+      reactNative: { logicalDeviceId: "opaque" },
+    });
+    expect(selectMetroTarget([server(other)], device, "com.example.mkm")).toBeUndefined();
+  });
+
+  test("requires the foreground app when identity is supplied", () => {
+    const mkm = target({ appId: "com.example.mkm" });
+    expect(selectMetroTarget([server(mkm)], device, "com.example.spenny")).toBeUndefined();
+    expect(selectMetroTarget([server(target())], device, "com.example.mkm")).toBeUndefined();
+    expect(selectMetroTarget([server(mkm)], device, "com.example.mkm")?.target).toBe(mkm);
+  });
+
+  test("proxy reuse rejects conflicting app/device identities and ambiguity", () => {
+    const expected = target({
+      appId: "com.example.mkm",
+      reactNative: { logicalDeviceId: "SIM-123" },
+    });
+    expect(selectProxyTarget([target({ appId: "com.example.spenny" })], expected)).toBeUndefined();
+    expect(
+      selectProxyTarget([target({ reactNative: { logicalDeviceId: "ios:OTHER" } })], expected),
+    ).toBeUndefined();
+    expect(selectProxyTarget([expected, expected], expected)).toBeUndefined();
+    expect(selectProxyTarget([expected], expected)).toBe(expected);
+  });
+});
+
+describe("optional async navigation", () => {
+  const state = {
+    index: 0,
+    routes: [{ name: "Inbox", key: "inbox", params: { secret: "must-not-leak" } }],
+  };
+
+  test("awaits SDK navigation once and omits private route parameters", async () => {
+    let reads = 0;
+    const result = await inspectFiber(fiber("Root", {}), {
+      __METRO_BRIDGE__: {
+        navigation: {
+          getState() {
+            reads++;
+            return Promise.resolve(state);
+          },
+        },
+      },
+    });
+    expect(reads).toBe(1);
+    expect(result.screen.route).toBe("Inbox");
+    expect(JSON.stringify(result)).not.toContain("must-not-leak");
+  });
+
+  test.each(["null", "async-null", "rejected"])(
+    "falls back from empty or rejected SDK state to a navigation ref",
+    async (sdkState) => {
+      const result = await inspectFiber(fiber("Root", {}), {
+        __METRO_BRIDGE__: {
+          navigation: {
+            getState: () =>
+              sdkState === "null"
+                ? null
+                : sdkState === "async-null"
+                  ? Promise.resolve(null)
+                  : Promise.reject(new Error("SDK unavailable")),
+          },
+        },
+        __METRO_MCP_NAV_REF__: { getRootState: () => state },
+      });
+      expect(result.screen.route).toBe("Inbox");
+    },
+  );
+
+  test("bounds a never-settling SDK and still reads synchronous Expo state", async () => {
+    const started = performance.now();
+    const result = await inspectFiber(fiber("Root", {}), {
+      __METRO_BRIDGE__: { navigation: { getState: () => new Promise(() => {}) } },
+      __EXPO_ROUTER_STATE__: state,
+    });
+    expect(result.screen.route).toBe("Inbox");
+    expect(performance.now() - started).toBeLessThan(750);
+  });
+
+  test("bounds cyclic nested navigation state", async () => {
+    const route = { name: "Inbox", state: undefined as unknown };
+    const cyclic = { routes: [route] };
+    route.state = cyclic;
+    const result = await inspectFiber(fiber("Root", {}), { __EXPO_ROUTER_STATE__: cyclic });
+    expect(result.screen.navigationPath).toEqual(["Inbox"]);
+  });
+});
+
+describe("Fiber completeness", () => {
+  test.each(["missing", "throws", "rejects", "times-out"])(
+    "reports %s host measurement as incomplete",
+    async (mode) => {
+      const host = fiber("View", { accessibilityLabel: "Button" });
+      host.type = "View";
+      if (mode === "throws")
+        host.stateNode = {
+          getBoundingClientRect() {
+            throw new Error("unavailable");
+          },
+        };
+      if (mode === "rejects")
+        host.stateNode = { getBoundingClientRect: () => Promise.reject(new Error("unavailable")) };
+      if (mode === "times-out") host.stateNode = { measure() {} };
+      const result = await inspectFiber(host);
+      expect(result.truncated).toBe(false);
+      expect(result.reasons).toEqual(["host-measurement-incomplete"]);
+    },
+  );
+
+  test("valid zero-sized hosts do not imply incomplete measurement", async () => {
+    const host = fiber("View", { accessibilityLabel: "Hidden" });
+    host.type = "View";
+    host.stateNode = { getBoundingClientRect: () => ({ x: 0, y: 0, width: 0, height: 0 }) };
+    expect((await inspectFiber(host)).reasons).toEqual([]);
+  });
+
+  test("distinguishes output and traversal budgets", async () => {
+    const root = fiber("Root", {});
+    let parent = root;
+    for (let i = 0; i < 30; i++) {
+      const child = fiber("Row", { testID: `row-${i}` });
+      link(parent, child);
+      parent = child;
+    }
+    const output = await inspectFibers([root], 3);
+    expect(output.reasons).toEqual(["node-budget-exhausted"]);
+    const traversal = await inspectFibers([root], 2);
+    expect(traversal.reasons).toContain("fiber-visit-budget-exhausted");
+  });
+});
+
+describe("inspection mailbox ownership", () => {
+  test.each(["cleanup", "expiry", "replacement"])(
+    "late completion cannot overwrite state after %s",
+    async (action) => {
+      let settle!: (value: unknown) => void;
+      const pending = new Promise((resolve) => {
+        settle = resolve;
+      });
+      let expire!: () => void;
+      const context: Record<string, unknown> = {
+        pending,
+        setTimeout(callback: () => void) {
+          expire = callback;
+          return 1;
+        },
+      };
+      runInNewContext(inspectionMailboxExpression("mailbox", "pending"), context);
+      const replacement = { state: "pending" };
+      if (action === "expiry") expire();
+      else if (action === "cleanup") delete context.mailbox;
+      else context.mailbox = replacement;
+      settle({ privateTree: true });
+      await pending;
+      await Promise.resolve();
+      expect(context.mailbox).toBe(action === "replacement" ? replacement : undefined);
+    },
+  );
+});

@@ -9,7 +9,15 @@ import { SimViewSession } from "../packages/mcp/src/session";
 const cleanups: Array<() => void | Promise<void>> = [];
 
 afterEach(async () => {
-  await Promise.all(cleanups.splice(0).map((cleanup) => cleanup()));
+  const errors: unknown[] = [];
+  for (const cleanup of cleanups.splice(0).reverse()) {
+    try {
+      await cleanup();
+    } catch (error) {
+      errors.push(error);
+    }
+  }
+  if (errors.length) throw new AggregateError(errors, "Preview fixture cleanup failed");
 });
 
 describe("browser preview ownership", () => {
@@ -18,11 +26,8 @@ describe("browser preview ownership", () => {
     const primary = await SimViewClient.attach(core.socketPath, core.token, "h264");
     const session = new SimViewSession();
     session.client = primary;
+    cleanups.push(() => session.close());
     session.startRelay(await availablePort());
-    cleanups.push(
-      () => session.close(),
-      () => core.close(),
-    );
 
     const origin = relayOrigin(session).replace(/^http/, "ws");
     const h264 = await authenticatedSocket(`${origin}/stream?codec=h264`, session.relayToken);
@@ -56,11 +61,8 @@ describe("browser preview ownership", () => {
     const primary = await SimViewClient.attach(core.socketPath, core.token, "h264");
     const session = new SimViewSession();
     session.client = primary;
+    cleanups.push(() => session.close());
     session.startRelay(await availablePort());
-    cleanups.push(
-      () => session.close(),
-      () => core.close(),
-    );
 
     const origin = relayOrigin(session).replace(/^http/, "ws");
     const h264 = await authenticatedSocket(`${origin}/stream?codec=h264`, session.relayToken);
@@ -92,11 +94,8 @@ describe("browser preview ownership", () => {
     const session = new SimViewSession();
     const primary = await SimViewClient.attach(core.socketPath, core.token, "h264");
     session.client = primary;
+    cleanups.push(() => session.close());
     session.startRelay(await availablePort());
-    cleanups.push(
-      () => session.close(),
-      () => core.close(),
-    );
 
     const origin = relayOrigin(session).replace(/^http/, "ws");
     const mjpeg = await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
@@ -114,11 +113,8 @@ describe("browser preview ownership", () => {
     const session = new SimViewSession();
     const primary = await SimViewClient.attach(core.socketPath, core.token, "h264");
     session.client = primary;
+    cleanups.push(() => session.close());
     session.startRelay(await availablePort());
-    cleanups.push(
-      () => session.close(),
-      () => core.close(),
-    );
 
     const origin = relayOrigin(session).replace(/^http/, "ws");
     const mjpeg = await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
@@ -134,6 +130,57 @@ describe("browser preview ownership", () => {
     await waitFor(() => core.connections.every((connection) => connection.closed));
     mjpeg.close();
   });
+  test("keeps primary encoding off for MJPEG-only viewers", async () => {
+    const { core, session, origin } = await previewFixture();
+    await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
+    await waitFor(() => core.connections.some((c) => c.codec === "mjpeg" && c.previewEnabled));
+    expect(core.connections.find((c) => c.codec === "h264")?.previewEnabled).toBe(false);
+  });
+
+  test("releases H.264 when its last viewer leaves an MJPEG viewer", async () => {
+    const { core, session, origin } = await previewFixture();
+    const h264 = await authenticatedSocket(`${origin}/stream?codec=h264`, session.relayToken);
+    await waitFor(() => core.connections.some((c) => c.codec === "h264" && c.previewEnabled));
+    await authenticatedSocket(`${origin}/stream?codec=mjpeg`, session.relayToken);
+    await waitFor(() => core.connections.some((c) => c.codec === "mjpeg" && c.previewEnabled));
+    h264.close();
+    await waitFor(() => core.connections.find((c) => c.codec === "h264")?.previewEnabled === false);
+    expect(core.connections.find((c) => c.codec === "mjpeg")?.previewEnabled).toBe(true);
+  });
+
+  test("keeps embedded polling demand after browser closure, then expires it", async () => {
+    const { core, session, origin } = await previewFixture();
+    const h264 = await authenticatedSocket(`${origin}/stream?codec=h264`, session.relayToken);
+    await session.previewPackets(undefined, 1, 50);
+    h264.close();
+    await waitFor(() => session.viewers.size === 0);
+    expect(core.connections.find((c) => c.codec === "h264")?.previewEnabled).toBe(true);
+    await Bun.sleep(5_050);
+    await waitFor(() => core.connections.find((c) => c.codec === "h264")?.previewEnabled === false);
+  }, 7_000);
+
+  test("closes promptly with a pending primary preview update", async () => {
+    const core = await previewCore({ hangH264Preview: true });
+    const session = new SimViewSession();
+    cleanups.push(() => session.close());
+    session.client = await SimViewClient.attach(core.socketPath, core.token, "h264");
+    session.startRelay(await availablePort());
+    await authenticatedSocket(
+      `${relayOrigin(session).replace(/^http/, "ws")}/stream?codec=h264`,
+      session.relayToken,
+    );
+    await waitFor(() => core.connections.some((c) => c.previewRequested));
+    const started = performance.now();
+    await session.close();
+    expect(performance.now() - started).toBeLessThan(1000);
+    await waitFor(() => core.connections.every((c) => c.closed));
+  });
+
+  test("fixture close is safe for concurrent and repeated callers", async () => {
+    const core = await previewCore();
+    await Promise.all([core.close(), core.close()]);
+    await core.close();
+  });
 });
 
 type PreviewConnection = {
@@ -148,6 +195,7 @@ async function previewCore(
     failFirstMjpegPreview?: boolean;
     hangMjpegHello?: boolean;
     hangMjpegPreview?: boolean;
+    hangH264Preview?: boolean;
   } = {},
 ) {
   const directory = await mkdtemp(join(tmpdir(), "simview-preview-test-"));
@@ -197,6 +245,7 @@ async function previewCore(
           } else if (request.method === "capture.preview") {
             state.previewRequested = params.enabled === true;
             if (state.codec === "mjpeg" && options.hangMjpegPreview) continue;
+            if (state.codec === "h264" && options.hangH264Preview) continue;
             if (state.codec === "mjpeg" && params.enabled === true && failFirstMjpegPreview) {
               failFirstMjpegPreview = false;
               socket.write(
@@ -233,23 +282,30 @@ async function previewCore(
       },
     },
   });
-  cleanups.push(async () => {
-    listener.stop(true);
-    await rm(directory, { recursive: true, force: true });
-  });
+  let closing: Promise<void> | undefined;
+  const close = () => {
+    closing ??= (async () => {
+      listener.stop(true);
+      await waitFor(() => connections.every((connection) => connection.closed));
+      await rm(directory, { recursive: true, force: true });
+    })();
+    return closing;
+  };
+  cleanups.push(close);
   return {
     socketPath,
     token,
     connections,
-    async close() {
-      listener.stop(true);
-      await rm(directory, { recursive: true, force: true });
-    },
+    close,
   };
 }
 
 async function authenticatedSocket(url: string, token: string): Promise<WebSocket> {
   const socket = new WebSocket(url);
+  cleanups.push(async () => {
+    socket.close();
+    await waitFor(() => socket.readyState === WebSocket.CLOSED);
+  });
   await new Promise<void>((resolve, reject) => {
     socket.addEventListener("open", () => {
       socket.send(JSON.stringify({ type: "authenticate", token }));
@@ -282,4 +338,13 @@ async function availablePort(): Promise<number> {
 function relayOrigin(session: SimViewSession): string {
   if (!session.relay) throw new Error("Relay did not start");
   return `http://${session.relay.hostname}:${session.relay.port}`;
+}
+
+async function previewFixture() {
+  const core = await previewCore();
+  const session = new SimViewSession();
+  cleanups.push(() => session.close());
+  session.client = await SimViewClient.attach(core.socketPath, core.token, "h264");
+  session.startRelay(await availablePort());
+  return { core, session, origin: relayOrigin(session).replace(/^http/, "ws") };
 }

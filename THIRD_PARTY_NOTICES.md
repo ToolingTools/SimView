@@ -45,6 +45,14 @@ The adapted bridge is isolated in
 `native/SimViewCore/Sources/SimViewAXShim`. SimView's injected UIKit probe is an
 independent implementation and contains no proprietary code.
 
+### Metro MCP
+
+The optional navigation fallback and expiring, identity-guarded inspection
+mailbox in `packages/mcp/src/metro.ts` adapt techniques from
+[Metro MCP 0.15.0](https://github.com/steve228uk/metro-mcp/tree/v0.15.0),
+copyright (c) 2026 Stephen Radford, licensed under the MIT License. Metro MCP
+itself is not a runtime dependency.
+
 ## Release records
 
 Every binary release must include this file, the Apache-2.0 `LICENSE`, a

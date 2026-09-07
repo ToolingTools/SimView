@@ -3,7 +3,7 @@ import Foundation
 
 private let xctestProviderProtocolVersion = 1
 private let xctestProviderMaximumFrameBytes = 16 * 1_024 * 1_024
-private let xctestProviderGracefulShutdownTimeout: TimeInterval = 0.25
+private let xctestProviderGracefulShutdownTimeout: TimeInterval = 2
 private let xctestProviderForcedShutdownTimeout: TimeInterval = 1
 
 struct XCTestProviderArtifacts: Sendable {
@@ -194,18 +194,20 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
 
     deinit { stop() }
 
-    func snapshot(maxNodes: Int, timeout: TimeInterval) throws -> [String: Any] {
+    // Distinct private runner methods make older fixed-app artifacts fail closed
+    // instead of silently ignoring bundleId. The public native protocol is unchanged.
+    func snapshot(bundleID: String, maxNodes: Int, timeout: TimeInterval) throws -> [String: Any] {
         try request(
-            method: "snapshot",
-            parameters: ["maxNodes": max(1, min(maxNodes, 5_000))],
+            method: "snapshotForeground",
+            parameters: ["bundleId": bundleID, "maxNodes": max(1, min(maxNodes, 5_000))],
             timeout: timeout
         )
     }
 
-    func elementAtPoint(x: Double, y: Double, timeout: TimeInterval) throws -> [String: Any] {
+    func elementAtPoint(bundleID: String, x: Double, y: Double, timeout: TimeInterval) throws -> [String: Any] {
         try request(
-            method: "elementAtPoint",
-            parameters: ["x": x, "y": y],
+            method: "elementAtPointForeground",
+            parameters: ["bundleId": bundleID, "x": x, "y": y],
             timeout: timeout
         )
     }
@@ -241,7 +243,9 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
             return
         }
 
-        process.terminate()
+        // The authenticated shutdown message lets the test finish normally.
+        // SIGTERM asks xcodebuild to cancel testing and can shut down the user's
+        // booted Simulator. After a bounded grace period, reap only our host child.
         let gracefulDeadline = Date().addingTimeInterval(xctestProviderGracefulShutdownTimeout)
         while process.isRunning, Date() < gracefulDeadline {
             Thread.sleep(forTimeInterval: 0.01)
