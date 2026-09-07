@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmod,
+  link,
   lstat,
   mkdir,
   open,
@@ -15,7 +16,8 @@ import { basename, join, resolve, sep } from "node:path";
 import { type Codec, PROTOCOL_VERSION, SIMVIEW_VERSION } from "@simview/contracts";
 import { resolveBinary } from "@simview/core";
 import { z } from "zod";
-import type { AcquireOptions, SimViewClient } from "./client";
+import { resolveNativeEnvironment, type AcquireOptions, type SimViewClient } from "./client";
+import { processSnapshot } from "./process-owner";
 import { userTemporaryDirectory } from "./runtime-directory";
 
 const RECORD_SCHEMA_VERSION = 1;
@@ -83,15 +85,11 @@ async function binarySha256(binary: string): Promise<string> {
 function instanceIdFor(
   deviceId: string,
   binaryHash: string,
-  environment?: Record<string, string>,
+  environment: Record<string, string>,
 ): string {
   return createHash("sha256")
     .update(`${deviceId}\0${PROTOCOL_VERSION}\0${SIMVIEW_VERSION}\0${binaryHash}`)
-    .update(
-      environment
-        ? JSON.stringify(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b)))
-        : "",
-    )
+    .update(JSON.stringify(Object.entries(environment).sort(([a], [b]) => a.localeCompare(b))))
     .digest("hex")
     .slice(0, 20);
 }
@@ -170,6 +168,42 @@ async function removeDeadInstance(
   return true;
 }
 
+async function removeAbandonedInstance(instanceDirectory: string): Promise<boolean> {
+  // A startup can briefly have a directory and lock without a published record.
+  // Only reclaim an old, ownerless directory, and never remove an unknown socket.
+  if (await readRecord(instanceDirectory)) return false;
+  const details = await lstat(instanceDirectory).catch(() => undefined);
+  if (!details || Date.now() - details.mtimeMs <= LOCK_STALE_MS) return false;
+  if (await lstat(join(instanceDirectory, "core.sock")).catch(() => undefined)) return false;
+
+  const lockPath = join(instanceDirectory, "startup.lock");
+  const lockDetails = await lstat(lockPath).catch(() => undefined);
+  if (lockDetails?.isSymbolicLink()) throw new Error(`Unsafe SimView startup lock: ${lockPath}`);
+  if (lockDetails) {
+    const contents = await readFile(lockPath, "utf8").catch(() => "");
+    let owner: { pid: number; startedAt: string } | undefined;
+    try {
+      const parsed: unknown = JSON.parse(contents);
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        Number.isSafeInteger((parsed as { pid?: unknown }).pid) &&
+        typeof (parsed as { startedAt?: unknown }).startedAt === "string"
+      ) {
+        owner = parsed as { pid: number; startedAt: string };
+      }
+    } catch {
+      // Legacy empty/malformed locks are safe to remove after the stale window.
+    }
+    const snapshot = owner ? await processSnapshot([owner.pid]).catch(() => new Map()) : new Map();
+    if (owner && snapshot.get(owner.pid)?.startedAt === owner.startedAt) return false;
+    if ((await readFile(lockPath, "utf8").catch(() => "")) !== contents) return false;
+    await unlink(lockPath).catch(() => {});
+  }
+  await rm(instanceDirectory, { recursive: true, force: true });
+  return true;
+}
+
 async function publishRecord(instanceDirectory: string, record: DaemonRecord): Promise<void> {
   const temporary = join(
     instanceDirectory,
@@ -182,33 +216,59 @@ async function publishRecord(instanceDirectory: string, record: DaemonRecord): P
 
 async function acquireLock(instanceDirectory: string): Promise<() => Promise<void>> {
   const lockPath = join(instanceDirectory, "startup.lock");
-  const contents = `${process.pid}\n${Date.now()}\n${randomBytes(16).toString("hex")}\n`;
+  const startedAt = (await processSnapshot([process.pid])).get(process.pid)?.startedAt;
+  if (!startedAt) throw new Error("Unable to identify the SimView backend starter");
+  const contents = `${JSON.stringify({
+    pid: process.pid,
+    startedAt,
+    claimedAt: new Date().toISOString(),
+    nonce: randomBytes(16).toString("hex"),
+  })}\n`;
   const deadline = Date.now() + STARTUP_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    const temporary = join(
+      instanceDirectory,
+      `startup.${process.pid}.${randomBytes(6).toString("hex")}.tmp`,
+    );
     try {
-      const handle = await open(lockPath, "wx", 0o600);
+      const handle = await open(temporary, "wx", 0o600);
       try {
         await handle.writeFile(contents);
       } finally {
         await handle.close();
       }
+      await link(temporary, lockPath);
+      await unlink(temporary).catch(() => {});
       return async () => {
         if ((await readFile(lockPath, "utf8").catch(() => "")) === contents)
           await unlink(lockPath).catch(() => {});
       };
     } catch (error) {
+      await unlink(temporary).catch(() => {});
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       const details = await lstat(lockPath).catch(() => undefined);
       if (details?.isSymbolicLink()) throw new Error(`Unsafe SimView startup lock: ${lockPath}`);
       if (details && Date.now() - details.mtimeMs > LOCK_STALE_MS) {
         const existing = await readFile(lockPath, "utf8").catch(() => "");
-        const ownerPID = Number(existing.split("\n", 1)[0]);
-        if (
-          Number.isSafeInteger(ownerPID) &&
-          ownerPID > 0 &&
-          !isAlive(ownerPID) &&
-          (await readFile(lockPath, "utf8").catch(() => "")) === existing
-        ) {
+        let owner: { pid: number; startedAt: string } | undefined;
+        try {
+          const parsed: unknown = JSON.parse(existing);
+          if (
+            parsed &&
+            typeof parsed === "object" &&
+            Number.isSafeInteger((parsed as { pid?: unknown }).pid) &&
+            typeof (parsed as { startedAt?: unknown }).startedAt === "string"
+          ) {
+            owner = parsed as { pid: number; startedAt: string };
+          }
+        } catch {
+          // Empty and malformed legacy locks are reclaimable once stale.
+        }
+        const snapshot = owner
+          ? await processSnapshot([owner.pid]).catch(() => new Map())
+          : new Map();
+        const ownerAlive = owner && snapshot.get(owner.pid)?.startedAt === owner.startedAt;
+        if (!ownerAlive && (await readFile(lockPath, "utf8").catch(() => "")) === existing) {
           await unlink(lockPath).catch(() => {});
           continue;
         }
@@ -326,10 +386,12 @@ async function acquireDaemonAttempt(
   options: AcquireOptions,
   adapter: DaemonRegistryAdapter,
 ): Promise<SimViewClient> {
-  const binary = resolve(options.binary ?? resolveBinary());
+  const cwd = resolve(options.cwd ?? process.cwd());
+  const binary = resolve(cwd, options.binary ?? resolveBinary());
   const hash = await binarySha256(binary);
   const identity = resolveDeviceIdentity(options);
-  const instanceId = instanceIdFor(identity.deviceId, hash, options.environment);
+  const environment = resolveNativeEnvironment(options.environment, cwd);
+  const instanceId = instanceIdFor(identity.deviceId, hash, environment);
   const root = registryRoot();
   const instanceDirectory = join(root, instanceId);
   await ensurePrivateDirectory(registryBase());
@@ -369,7 +431,8 @@ async function acquireDaemonAttempt(
         instanceId,
       ],
       {
-        env: options.environment ?? process.env,
+        cwd,
+        env: environment,
         stdin: new TextEncoder().encode(token),
         stdout: "ignore",
         stderr: "ignore",
@@ -524,7 +587,11 @@ export async function pruneDaemons(deviceIdOrUdid?: string): Promise<number> {
         : `ios:${deviceIdOrUdid}`
       : undefined;
     if (targetId && record && recordDeviceId(record) !== targetId) continue;
-    if (record && (await removeDeadInstance(directory, record))) pruned += 1;
+    if (record) {
+      if (await removeDeadInstance(directory, record)) pruned += 1;
+    } else if (!deviceIdOrUdid && (await removeAbandonedInstance(directory))) {
+      pruned += 1;
+    }
   }
   return pruned;
 }
