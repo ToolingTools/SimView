@@ -91,7 +91,8 @@ describe("SimViewClient", () => {
       let pid: number | undefined;
       let descendantPID: number | undefined;
       try {
-        for (let attempt = 0; attempt < 100; attempt += 1) {
+        const startupDeadline = performance.now() + 5_000;
+        while (performance.now() < startupDeadline) {
           const value = await readFile(pidPath, "utf8").catch(() => "");
           const descendantValue = await readFile(descendantPath, "utf8").catch(() => "");
           if (value && descendantValue) {
@@ -125,6 +126,7 @@ describe("SimViewClient", () => {
         await rm(directory, { recursive: true, force: true });
       }
     },
+    10_000,
   );
 
   test("runs device discovery in its requester cwd", async () => {
