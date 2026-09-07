@@ -138,7 +138,11 @@ The process model has two layers:
   directory it creates when its MCP bridge closes.
 - `SimViewClient.acquire({ deviceId, codec })` shares one detached native backend
   per platform-qualified native identifier and compatible
-  protocol/version/binary identity. `udid` remains an iOS compatibility alias.
+  protocol/version/binary/effective-environment identity. Omitting the environment
+  and explicitly passing the same inherited environment select the same backend.
+  Relative native tool paths resolve against the requesting connection's working
+  directory before spawning and computing compatibility.
+  `udid` remains an iOS compatibility alias.
   The
   backend record lives under the canonical per-user temporary directory at
   `simview-daemons/<uid>/<instanceId>`;
@@ -180,6 +184,9 @@ Each connection supplies its own absolute project/core/asset paths, native mode,
 resource version, an allowlist of native tool environment settings, and a Claude
 Desktop detection hint. The first launcher's global
 configuration cannot select another connection's project or app assets.
+Native discovery and backend startup use that connection's working directory.
+Discovery has a bounded deadline and is cancelled when its request or owning
+review closes; review shutdown waits for discovery cleanup before completing.
 
 Adapters and the daemon validate owner PIDs and process start identities every
 second, including original GUI application ancestors. EOF, broken output,

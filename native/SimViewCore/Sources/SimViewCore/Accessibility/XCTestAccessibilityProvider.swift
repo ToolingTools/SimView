@@ -159,6 +159,10 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
             try process.run()
             processStarted = true
             let connection = try listener.accept(timeout: startupTimeout)
+            var transferredConnection = false
+            defer {
+                if !transferredConnection { Darwin.close(connection) }
+            }
             let hello = try XCTestProviderMessageCodec.read(from: connection, timeout: startupTimeout)
             guard
                 hello["type"] as? String == "hello",
@@ -166,14 +170,15 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
                 let receivedToken = hello["token"] as? String,
                 constantTimeEqual(receivedToken, token)
             else {
-                Darwin.close(connection)
                 throw providerError("XCTEST_AUTHENTICATION_FAILED", "Invalid XCTest provider hello")
             }
-            return XCTestAccessibilityProviderSession(
+            let session = XCTestAccessibilityProviderSession(
                 connection: connection,
                 process: process,
                 configuredXCTestRunURL: temporaryURL
             )
+            transferredConnection = true
+            return session
         } catch {
             if processStarted { Self.terminateAndReap(process) }
             try? FileManager.default.removeItem(at: temporaryURL)
