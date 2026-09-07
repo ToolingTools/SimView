@@ -22,7 +22,63 @@ private final class FailingPointProvider: XCTestAccessibilityProviding {
     }
 }
 
+private final class CountingProvider: XCTestAccessibilityProviding {
+    private(set) var stopCount = 0
+
+    func snapshot(maxNodes _: Int, timeout _: TimeInterval) throws -> [String: Any] { [:] }
+
+    func elementAtPoint(x _: Double, y _: Double, timeout _: TimeInterval) throws -> [String: Any] {
+        [:]
+    }
+
+    func stop() { stopCount += 1 }
+}
+
 final class XCTestAccessibilityProviderTests: XCTestCase {
+    func testShutdownStopsAllProvidersIdempotently() throws {
+        let provider = CountingProvider()
+        let service = AccessibilityService { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "test-simulator", bundleID: "dev.example.app")
+
+        service.shutdown()
+        service.shutdown()
+
+        XCTAssertEqual(provider.stopCount, 1)
+        XCTAssertEqual(
+            service.providerStatus(udid: "test-simulator", assessLegacy: false)["status"] as? String,
+            "native-ready"
+        )
+    }
+
+    func testStopTerminatesReapsProcessAndRemovesConfiguration() throws {
+        var sockets: [Int32] = [0, 0]
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets), 0)
+        defer { Darwin.close(sockets[1]) }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/sh")
+        process.arguments = ["-c", "trap '' TERM; while true; do :; done"]
+        try process.run()
+
+        let configurationURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "simview-xctest-test-(UUID().uuidString).xctestrun"
+        )
+        try Data("test".utf8).write(to: configurationURL)
+        let session = XCTestAccessibilityProviderSession(
+            connection: sockets[0],
+            process: process,
+            configuredXCTestRunURL: configurationURL
+        )
+
+        let startedAt = Date()
+        session.stop()
+        session.stop()
+
+        XCTAssertFalse(process.isRunning)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configurationURL.path))
+        XCTAssertLessThan(Date().timeIntervalSince(startedAt), 3)
+    }
+
     func testPointFailureStopsAndEvictsProviderBeforeLegacyFallback() throws {
         let provider = FailingPointProvider()
         let service = AccessibilityService { _, _ in provider }

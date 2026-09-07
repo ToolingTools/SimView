@@ -261,8 +261,21 @@ final class AccessibilityService: @unchecked Sendable {
         self.xctestProviderFactory = xctestProviderFactory
     }
 
-    deinit {
-        for provider in xctestProviders.values { provider.stop() }
+    deinit { shutdown() }
+
+    /// Stops retained XCTest providers when the native server is exiting.
+    ///
+    /// Capture can be toggled while a provider remains enabled, so provider
+    /// lifetime is deliberately separate from observation and capture
+    /// lifetime. Clearing the dictionaries before stopping makes this safe to
+    /// call more than once and prevents a provider callback from being used
+    /// after terminal shutdown has started.
+    func shutdown() {
+        stopObservation()
+        let providers = Array(xctestProviders.values)
+        xctestProviders.removeAll()
+        xctestBundleIDs.removeAll()
+        for provider in providers { provider.stop() }
     }
 
     var available: Bool {

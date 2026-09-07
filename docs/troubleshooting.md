@@ -23,6 +23,7 @@ the agent's review. Closing the agent connection does: its browser relay and
 native clients close, and another agent's review continues independently.
 The last connection starts MCP shutdown immediately, capped at five seconds.
 Unused native backends stop capture on disconnect and start bounded shutdown immediately. Startup has a separate bounded allowance for the first client.
+When iOS accessibility uses the temporary XCTest provider, terminal backend shutdown also stops and reaps its provider process and removes the generated `.xctestrun` configuration. Preview and capture toggles keep an enabled provider alive.
 
 If a host leaves an orphaned worker after its GUI quits, adapters also watch the
 original GUI ancestor and its process start time. They close their own connection

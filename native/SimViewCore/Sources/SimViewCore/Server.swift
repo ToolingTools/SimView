@@ -1713,6 +1713,7 @@ final class SimViewServer: @unchecked Sendable {
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) { exit(1) }
         probe.close()
         stopCapture()
+        accessibility.shutdown()
         listener?.cancel()
         timer?.cancel()
         for source in signalSources { source.cancel() }

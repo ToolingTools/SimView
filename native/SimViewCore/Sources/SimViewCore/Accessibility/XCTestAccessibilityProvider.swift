@@ -3,6 +3,8 @@ import Foundation
 
 private let xctestProviderProtocolVersion = 1
 private let xctestProviderMaximumFrameBytes = 16 * 1_024 * 1_024
+private let xctestProviderGracefulShutdownTimeout: TimeInterval = 0.25
+private let xctestProviderForcedShutdownTimeout: TimeInterval = 1
 
 struct XCTestProviderArtifacts: Sendable {
     let xctestrunURL: URL
@@ -152,8 +154,10 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
         ]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        var processStarted = false
         do {
             try process.run()
+            processStarted = true
             let connection = try listener.accept(timeout: startupTimeout)
             let hello = try XCTestProviderMessageCodec.read(from: connection, timeout: startupTimeout)
             guard
@@ -171,13 +175,13 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
                 configuredXCTestRunURL: temporaryURL
             )
         } catch {
-            if process.isRunning { process.terminate() }
+            if processStarted { Self.terminateAndReap(process) }
             try? FileManager.default.removeItem(at: temporaryURL)
             throw error
         }
     }
 
-    private init(connection: Int32, process: Process, configuredXCTestRunURL: URL) {
+    init(connection: Int32, process: Process, configuredXCTestRunURL: URL) {
         self.connection = connection
         self.process = process
         self.configuredXCTestRunURL = configuredXCTestRunURL
@@ -211,8 +215,43 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
         }
         Darwin.shutdown(connection, SHUT_RDWR)
         Darwin.close(connection)
-        if process.isRunning { process.terminate() }
-        try? FileManager.default.removeItem(at: configuredXCTestRunURL)
+        Self.terminateAndReap(process)
+        removeConfiguredXCTestRun()
+    }
+
+    private func removeConfiguredXCTestRun() {
+        do {
+            try FileManager.default.removeItem(at: configuredXCTestRunURL)
+        } catch CocoaError.fileNoSuchFile {
+            // Cleanup is idempotent when a failed startup already removed it.
+        } catch {
+            // The child has already been reaped. Keep shutdown best-effort so
+            // a filesystem error cannot leave the provider running.
+        }
+    }
+
+    private static func terminateAndReap(_ process: Process) {
+        guard process.isRunning else {
+            process.waitUntilExit()
+            return
+        }
+
+        process.terminate()
+        let gracefulDeadline = Date().addingTimeInterval(xctestProviderGracefulShutdownTimeout)
+        while process.isRunning, Date() < gracefulDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            let forcedDeadline = Date().addingTimeInterval(xctestProviderForcedShutdownTimeout)
+            while process.isRunning, Date() < forcedDeadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+        // Reap the child even when it exits after the graceful request. The
+        // force-kill path is bounded above; SIGKILL makes waitUntilExit
+        // deterministic for a process that ignored SIGTERM.
+        process.waitUntilExit()
     }
 
     private func request(
