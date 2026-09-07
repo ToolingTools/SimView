@@ -31,6 +31,33 @@ record a passing real-device-set run here.
 | previous stable minor | — | arm64 | — | — | — | not tested |
 | second previous minor | — | arm64 | — | — | — | not tested |
 
+### 0.4.3 lifecycle regression run
+
+The 7 September 2026 local run used Xcode 26.5 (17F42), macOS 26.6.2,
+arm64, and an iPhone 17 Pro Simulator on iOS 26.5.
+
+- The fresh release build passed 214 Bun tests and 69 Swift tests with no
+  failures; one application-specific, opt-in Swift test was skipped.
+- The generated npm package passed isolated `npm exec` and `bunx` doctor
+  checks. All release archive checksums passed.
+- Two packaged MCP adapters shared one MCP daemon and one compatible native
+  backend, with distinct review resources. Semantic observation returned 14
+  nodes. Closing one review preserved the other; the final close stopped both
+  daemons in 111 ms.
+- A compiled MCP daemon closed during discovery reaped both the discovery
+  process and its SIGTERM-ignoring descendant and removed its registry record.
+- An ordinary MJPEG browser connection delivered 97 frames during the sample.
+  Closing its final viewer released the fallback connection while its primary
+  native client remained usable.
+- On a warmed Simulator, the XCTest provider reached `enhanced-ready`;
+  terminal native shutdown reaped its child and removed its generated private
+  `.xctestrun` file. Initial provider activation attempts timed out during
+  Simulator preparation.
+
+This run covers the 0.4.3 lifecycle and preview regressions. The full input,
+orientation, latency, soak, signing, and notarization release gates below still
+apply.
+
 ### Android matrix
 
 Android support requires the official SDK Platform Tools and Android API 26 or
