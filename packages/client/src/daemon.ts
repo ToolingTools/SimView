@@ -11,6 +11,7 @@ import {
   rename,
   rm,
   unlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { basename, join, resolve, sep } from "node:path";
@@ -424,6 +425,9 @@ async function acquireDaemonAttempt(
   await ensurePrivateDirectory(registryBase());
   await ensurePrivateDirectory(root);
   await ensurePrivateDirectory(instanceDirectory);
+  // Mark a contender before inspecting or claiming a lock so prune cannot
+  // mistake a just-resumed starter for abandoned state.
+  await utimes(instanceDirectory, new Date(), new Date());
   const expected = { deviceId: identity.deviceId, binarySha256: hash, instanceId };
   const existing = await validatedRecord(instanceDirectory, expected);
   if (existing) return attachAndVerify(adapter, existing, options.codec ?? "h264");
