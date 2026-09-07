@@ -1,6 +1,6 @@
 {
   "name": "simview",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Control and review local iOS Simulators and Android ADB devices.",
   "author": {
     "name": "SimView contributors",
