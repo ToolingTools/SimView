@@ -326,6 +326,8 @@ export class SimViewSession {
   codec: "h264" | "mjpeg" = "h264";
   #h264Configuration: Uint8Array | undefined = undefined;
   #mjpegClientPromise: Promise<SimViewClient> | undefined = undefined;
+  #mjpegGeneration = 0;
+  #mjpegUnsubscribe: (() => void) | undefined = undefined;
   #previewSequence = 0;
   #previewPackets: PreviewPacket[] = [];
   #previewWaiters = new Set<() => void>();
@@ -528,9 +530,7 @@ export class SimViewSession {
       this.#connectionGeneration += 1;
       for (const unsubscribe of this.#unsubscribers) unsubscribe();
       this.#unsubscribers = [];
-      if (this.mjpegClient) await this.mjpegClient.close();
-      this.mjpegClient = undefined;
-      this.#mjpegClientPromise = undefined;
+      await this.#releaseMjpegClient();
       if (this.client) await this.client.close();
       this.#assertOpen();
       this.client = nextClient;
@@ -1956,6 +1956,9 @@ export class SimViewSession {
         close(socket) {
           clearTimeout(socket.data.authenticationTimer);
           session.viewers.delete(socket);
+          if (socket.data.codec === "mjpeg" && !session.#hasMjpegViewers()) {
+            void session.#releaseMjpegClient();
+          }
           if (session.viewers.size === 0) void session.enablePreview(false).catch(() => {});
         },
         drain(socket) {
@@ -2123,9 +2126,7 @@ export class SimViewSession {
     this.relay?.stop(true);
     this.relay = undefined;
     this.#metroInspector.close();
-    if (this.mjpegClient) await this.mjpegClient.close();
-    this.mjpegClient = undefined;
-    this.#mjpegClientPromise = undefined;
+    await this.#releaseMjpegClient();
     if (this.client) await this.client.close();
     this.client = undefined;
     await this.#connectionTail;
@@ -2239,9 +2240,7 @@ export class SimViewSession {
         this.#clearSemanticState();
         this.#metroInspector.close();
         this.#resetPreviewPackets();
-        if (this.mjpegClient) void this.mjpegClient.close().catch(() => {});
-        this.mjpegClient = undefined;
-        this.#mjpegClientPromise = undefined;
+        void this.#releaseMjpegClient();
       }),
     );
     for (const kind of [FrameKind.H264Configuration, FrameKind.H264Frame]) {
@@ -2298,15 +2297,33 @@ export class SimViewSession {
     if (this.#mjpegClientPromise) return this.#mjpegClientPromise;
     const primary = this.requireClient();
     const generation = this.#connectionGeneration;
-    this.#mjpegClientPromise = SimViewClient.attach(primary.socketPath, primary.token, "mjpeg")
+    const mjpegGeneration = this.#mjpegGeneration;
+    let connectionPromise: Promise<SimViewClient>;
+    connectionPromise = SimViewClient.attach(primary.socketPath, primary.token, "mjpeg")
       .then(async (client) => {
-        if (generation !== this.#connectionGeneration) {
-          await client.close();
-          throw new Error("Simulator changed while the MJPEG fallback was connecting");
-        }
-        this.mjpegClient = client;
-        this.#unsubscribers.push(
-          client.on(FrameKind.JpegFrame, (payload) => {
+        let ownsClient = false;
+        try {
+          if (
+            generation !== this.#connectionGeneration ||
+            mjpegGeneration !== this.#mjpegGeneration ||
+            this.#closed ||
+            this.client !== primary ||
+            !this.#hasMjpegViewers()
+          ) {
+            throw new Error("Simulator changed while the MJPEG fallback was connecting");
+          }
+          await client.request("capture.preview", { enabled: true });
+          if (
+            generation !== this.#connectionGeneration ||
+            mjpegGeneration !== this.#mjpegGeneration ||
+            this.#closed ||
+            this.client !== primary ||
+            !this.#hasMjpegViewers()
+          ) {
+            throw new Error("Simulator changed while the MJPEG fallback was connecting");
+          }
+          this.mjpegClient = client;
+          this.#mjpegUnsubscribe = client.on(FrameKind.JpegFrame, (payload) => {
             for (const viewer of this.viewers) {
               if (viewer.data.codec === "mjpeg" && viewer.readyState === WebSocket.OPEN) {
                 if (viewer.data.paused) continue;
@@ -2315,14 +2332,43 @@ export class SimViewSession {
                 }
               }
             }
-          }),
-        );
-        return client;
+          });
+          ownsClient = true;
+          return client;
+        } catch (error) {
+          if (!ownsClient) {
+            await client.request("capture.preview", { enabled: false }).catch(() => {});
+            await client.close().catch(() => {});
+          }
+          throw error;
+        }
       })
       .finally(() => {
-        this.#mjpegClientPromise = undefined;
+        if (this.#mjpegClientPromise === connectionPromise) {
+          this.#mjpegClientPromise = undefined;
+        }
       });
-    return this.#mjpegClientPromise;
+    this.#mjpegClientPromise = connectionPromise;
+    return connectionPromise;
+  }
+
+  #hasMjpegViewers(): boolean {
+    return [...this.viewers].some((viewer) => viewer.data.codec === "mjpeg");
+  }
+
+  async #releaseMjpegClient(): Promise<void> {
+    this.#mjpegGeneration += 1;
+    const pending = this.#mjpegClientPromise;
+    this.#mjpegClientPromise = undefined;
+    this.#mjpegUnsubscribe?.();
+    this.#mjpegUnsubscribe = undefined;
+    const client = this.mjpegClient;
+    this.mjpegClient = undefined;
+    if (client) {
+      await client.request("capture.preview", { enabled: false }).catch(() => {});
+      await client.close().catch(() => {});
+    }
+    await pending?.catch(() => {});
   }
 
   #sendFrame(viewer: ServerWebSocket<ViewerData>, kind: FrameKind, payload: Uint8Array): number {
