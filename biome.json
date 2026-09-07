@@ -5,8 +5,6 @@
       "**",
       "!!**/.claude",
       "!!**/.codex",
-      "!!**/.repowise",
-      "!!**/.repowise-workspace",
       "!!**/.simview",
       "!!**/.vscode/extensions.json",
       "!!**/.vscode/mcp.json",

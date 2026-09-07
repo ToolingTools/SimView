@@ -1,7 +1,7 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
-import { assertNoRepowiseArtifacts, createPackagedMcpConfig } from "./release-config";
+import { createPackagedMcpConfig } from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
 const stage = join(root, "artifacts", "plugin", "simview");
@@ -93,7 +93,6 @@ await $`bun ${join(root, "scripts", "smoke-semantic-mcp.ts")} --binary=${join(st
 for (const path of new Bun.Glob("**/.DS_Store").scanSync({ cwd: stage, absolute: true })) {
   await rm(path, { force: true });
 }
-await assertNoRepowiseArtifacts(stage);
 await rm(output, { force: true });
 await $`ditto -c -k --norsrc --keepParent ${stage} ${output}`;
 console.log(output);
