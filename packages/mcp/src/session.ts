@@ -336,6 +336,7 @@ export class SimViewSession {
   #annotationsByDevice = new Map<string, Map<string, Annotation>>();
   #reviewImageDirectories = new Set<string>();
   #closePromise: Promise<void> | undefined = undefined;
+  #deviceDiscoveryControllers = new Set<AbortController>();
   #connectionGeneration = 0;
   #metroInspector: MetroInspector;
   #closed = false;
@@ -372,6 +373,7 @@ export class SimViewSession {
       codec: "h264" as const,
       binary: this.context?.coreBinary,
       environment: this.context?.nativeEnvironment,
+      cwd: this.context?.cwd,
     };
     return this.context?.backendMode === "ephemeral"
       ? SimViewClient.start(options)
@@ -497,7 +499,12 @@ export class SimViewSession {
   }
 
   devices(): Promise<DeviceDescription[]> {
-    return SimViewClient.listDevices(this.context?.coreBinary, this.context?.nativeEnvironment);
+    const controller = new AbortController();
+    this.#deviceDiscoveryControllers.add(controller);
+    return SimViewClient.listDevices(this.context?.coreBinary, this.context?.nativeEnvironment, {
+      cwd: this.context?.cwd,
+      signal: controller.signal,
+    }).finally(() => this.#deviceDiscoveryControllers.delete(controller));
   }
 
   async refreshDevice(): Promise<SessionState> {
@@ -2130,6 +2137,8 @@ export class SimViewSession {
 
   async #close(): Promise<void> {
     this.#connectionGeneration += 1;
+    for (const controller of this.#deviceDiscoveryControllers) controller.abort();
+    this.#deviceDiscoveryControllers.clear();
     for (const unsubscribe of this.#unsubscribers) unsubscribe();
     this.#unsubscribers = [];
     for (const viewer of this.viewers) viewer.close(1001, "SimView review closed");
