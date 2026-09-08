@@ -72,6 +72,37 @@ fault injection is not evidence of an application-safe recovery path.
 These checks do not establish the cause of the native kills or complete
 all release gates. No new iOS 26.5 navigation acceptance was performed.
 
+### 0.4.4 preview reconnect regression
+
+The 9 September 2026 synthetic-motion check on the iOS 26.1 Simulator
+reproduced delivery falling to 2.4–2.8 fps after the last H.264 viewer left
+and rejoined. Native health counters showed capture itself slowing down;
+encoding continued to keep up. Surface-change callbacks were unregistering
+and recreating the display subscription, including forced captures during
+registration. The candidate now reads the existing descriptor's current
+surface without rebuilding its subscription.
+
+With this change, the same initial subscription and two reconnects delivered
+36.8, 37.6, and 37.8 fps. A second run of the checked-in smoke test delivered
+38.2, 37.8, and 38.2 fps. The Swift suite passed 76 tests (one opt-in test
+skipped), and TypeScript and targeted formatting checks passed. These are
+encoded delivery rates; distinct browser frames and end-to-end latency were not measured.
+The separate SIGKILL release blocker above remains unresolved.
+
+Run against a freshly built core and a dedicated Simulator displaying a
+continuously animated synthetic fixture:
+
+```sh
+SIMVIEW_DEVICE_ID=ios:<udid> SIMVIEW_BACKEND_MODE=ephemeral \
+  SIMVIEW_CORE_BINARY="$PWD/native/SimViewCore/.build/arm64-apple-macosx/release/simview-core" \
+  bun scripts/smoke-preview-reconnect.ts
+```
+
+The smoke check asserts at least 30 captured and delivered frames per second
+across five-second samples, before and after each reconnect. It retains no
+screen contents and keeps relay credentials private. Orientation and other
+Xcode/runtime combinations remain separate acceptance checks.
+
 ### 0.4.3 lifecycle regression run
 
 The 7 September 2026 local run used Xcode 26.5 (17F42), macOS 26.6.2,
