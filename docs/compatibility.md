@@ -60,7 +60,12 @@ arm64, and an iPhone 17 Pro Simulator on iOS 26.1.
 
 The patched browser-attached navigation run lost its backend after about six
 minutes; the Simulator remained booted and MCP remained responsive. The SIGKILL
-sender or OS reason is still unknown, so the release remains blocked. An MKM
+sender or OS reason is still unknown, so the release remains blocked. A
+read-only follow-up also ended with SIGKILL after ten successful observations.
+The kernel event had neither memory-exit nor code-signing-exit flags; sampled
+RSS peaked at about 570 MiB and returned near 300 MiB before termination. A
+temporary diagnostic build confirmed unlimited CPU limits inside the helper.
+An MKM
 crash report also coincided with the earlier deliberate runner-stop test; that
 fault injection is not evidence of an application-safe recovery path.
 
