@@ -32,6 +32,41 @@ record a passing real-device-set run here.
 | previous stable minor | — | arm64 | — | — | — | not tested |
 | second previous minor | — | arm64 | — | — | — | not tested |
 
+### 0.4.4 candidate lifecycle investigation
+
+The 8 September 2026 checks used Xcode 26.5 (17F42), macOS 26.6.2,
+arm64, and an iPhone 17 Pro Simulator on iOS 26.1.
+
+- The candidate release build passed 269 Bun tests and 76 Swift tests with
+  no failures; one opt-in Simulator test was skipped. The generated npm
+  package passed isolated npm and bunx smoke checks.
+- Earlier semantic-only navigation lost its native connection after about
+  5.5 minutes while the Simulator remained booted and MCP stayed responsive.
+  The native helper had exited, but its exit status was not captured.
+- A subsequent browser-attached baseline completed 15 minutes, 25 fresh
+  observations, and 12 navigation taps with both connections intact.
+- Terminating only SimView's temporary XCTest runner produced a usable native
+  AX fallback in both the baseline and patched candidate. A kernel process
+  monitor confirmed exit code zero when the baseline was intentionally closed.
+- An isolated subprocess reproduced SIGPIPE termination in the XCTest socket
+  writer. The candidate suppresses that signal per send and returns a write
+  error instead. A regression runs with default SIGPIPE handling so inherited
+  signal settings cannot hide the defect. This has not been established as
+  the cause of the earlier live exits. A later patched run was terminated by
+  SIGKILL (signal 9), confirmed by a kernel process-event monitor.
+- Restarting XCTest exceeded the tool's ten-second request deadline, then
+  completed successfully; a later fresh observation confirmed XCTest output.
+  This startup deadline mismatch remains a separate limitation.
+
+The patched browser-attached navigation run lost its backend after about six
+minutes; the Simulator remained booted and MCP remained responsive. The SIGKILL
+sender or OS reason is still unknown, so the release remains blocked. An MKM
+crash report also coincided with the earlier deliberate runner-stop test; that
+fault injection is not evidence of an application-safe recovery path.
+
+These checks do not establish the cause of the native kills or complete
+all release gates. No new iOS 26.5 navigation acceptance was performed.
+
 ### 0.4.3 lifecycle regression run
 
 The 7 September 2026 local run used Xcode 26.5 (17F42), macOS 26.6.2,

@@ -246,6 +246,41 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
         )
     }
 
+    func testMessageCodecHandlesBrokenPipeWithoutTerminatingProcess() throws {
+        let childMarker = "SIMVIEW_TEST_CLOSED_XCTEST_PEER"
+        if ProcessInfo.processInfo.environment[childMarker] == "1" {
+            Darwin.signal(SIGPIPE, SIG_DFL)
+            var sockets: [Int32] = [0, 0]
+            guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else { _exit(70) }
+            Darwin.shutdown(sockets[0], SHUT_WR)
+            do {
+                try XCTestProviderMessageCodec.write(["method": "shutdown"], to: sockets[0], timeout: 1)
+                _exit(71)
+            } catch {
+                _exit((error as? SimViewError)?.code == "XCTEST_PROVIDER_WRITE_FAILED" ? 42 : 72)
+            }
+        }
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        child.arguments = [
+            "xctest", "-XCTest",
+            "SimViewCoreTests.XCTestAccessibilityProviderTests/testMessageCodecHandlesBrokenPipeWithoutTerminatingProcess",
+            Bundle(for: XCTestAccessibilityProviderTests.self).bundleURL.path,
+        ]
+        var environment = ProcessInfo.processInfo.environment
+        environment[childMarker] = "1"
+        child.environment = environment
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        try child.run()
+        let deadline = Date().addingTimeInterval(10)
+        while child.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationReason, .exit)
+        XCTAssertEqual(child.terminationStatus, 42, "Broken-pipe writes must throw instead of receiving SIGPIPE")
+    }
+
     func testMessageCodecRoundTripsPartialSocketWrites() throws {
         var sockets: [Int32] = [0, 0]
         XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets), 0)

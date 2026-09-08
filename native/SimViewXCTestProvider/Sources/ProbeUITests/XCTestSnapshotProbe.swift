@@ -425,10 +425,10 @@ final class XCTestSnapshotProbe: XCTestCase {
             guard var pointer = rawBuffer.baseAddress else { return }
             var remaining = rawBuffer.count
             while remaining > 0 {
-                let count = Darwin.write(socket, pointer, remaining)
-                if count < 0 {
-                    if errno == EINTR { continue }
-                    throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+                let count = Darwin.send(socket, pointer, remaining, MSG_NOSIGNAL)
+                if count <= 0 {
+                    if count < 0, errno == EINTR { continue }
+                    throw POSIXError(count == 0 ? .EPIPE : POSIXErrorCode(rawValue: errno) ?? .EIO)
                 }
                 remaining -= count
                 pointer = pointer.advanced(by: count)

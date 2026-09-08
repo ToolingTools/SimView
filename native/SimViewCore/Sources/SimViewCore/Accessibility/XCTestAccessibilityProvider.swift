@@ -340,10 +340,11 @@ enum XCTestProviderMessageCodec {
             guard var pointer = rawBuffer.baseAddress else { return }
             var remaining = rawBuffer.count
             while remaining > 0 {
-                let count = Darwin.write(descriptor, pointer, remaining)
-                if count < 0 {
-                    if errno == EINTR { continue }
-                    throw providerError("XCTEST_PROVIDER_WRITE_FAILED", String(cString: strerror(errno)))
+                // A disconnected XCTest runner must produce an error, not terminate the host.
+                let count = Darwin.send(descriptor, pointer, remaining, MSG_NOSIGNAL)
+                if count <= 0 {
+                    if count < 0, errno == EINTR { continue }
+                    throw providerError("XCTEST_PROVIDER_WRITE_FAILED", "XCTest provider socket write failed")
                 }
                 remaining -= count
                 pointer = pointer.advanced(by: count)
