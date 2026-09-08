@@ -315,7 +315,12 @@ export class SimViewClient {
             this.#handle(frame.kind, frame.payload);
         },
         error: (_socket, error) => this.#disconnect(error),
-        close: () => this.#disconnect(new Error("simview-core connection closed")),
+        close: () =>
+          this.#disconnect(
+            Object.assign(new Error("simview-core connection closed"), {
+              code: "SIMVIEW_CONNECTION_CLOSED",
+            }),
+          ),
         drain: () => this.#flushWrites(),
       },
     });
@@ -450,7 +455,11 @@ export class SimViewClient {
       });
     });
     if (this.#writeQueue.length >= 1_024) {
-      this.#disconnect(new Error("simview-core request queue exceeded 1024 frames"));
+      this.#disconnect(
+        Object.assign(new Error("simview-core request queue exceeded 1024 frames"), {
+          code: "SIMVIEW_REQUEST_QUEUE_EXCEEDED",
+        }),
+      );
       return promise;
     }
     this.#writeQueue.push(encodeFrame(FrameKind.Request, payload));
@@ -466,7 +475,11 @@ export class SimViewClient {
       if (!frame) return;
       const written = socket.write(frame, this.#writeOffset, frame.byteLength - this.#writeOffset);
       if (written < 0) {
-        this.#disconnect(new Error("simview-core connection closed while writing"));
+        this.#disconnect(
+          Object.assign(new Error("simview-core connection closed while writing"), {
+            code: "SIMVIEW_CONNECTION_CLOSED",
+          }),
+        );
         return;
       }
       if (written === 0) return;
@@ -505,7 +518,9 @@ export class SimViewClient {
       }
     }
 
-    this.#disconnect(new Error("SimView client closed"));
+    this.#disconnect(
+      Object.assign(new Error("SimView client closed"), { code: "SIMVIEW_CLIENT_CLOSED" }),
+    );
     if (this.#sessionDirectory) await rm(this.#sessionDirectory, { recursive: true, force: true });
   }
 }

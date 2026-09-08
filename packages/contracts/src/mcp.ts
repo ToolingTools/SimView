@@ -8,6 +8,36 @@ import {
   probeTargetSchema,
 } from "./protocol";
 
+export const nativeTargetFailureReasonSchema = z.enum([
+  "missing_action_semantics",
+  "invalid_geometry",
+  "native_corroboration_failed",
+]);
+export type NativeTargetFailureReason = z.output<typeof nativeTargetFailureReasonSchema>;
+
+export const nativeActionEvidenceSchema = z.object({
+  source: z.literal("native-point-hit"),
+  action: z.literal("AXPress"),
+});
+export type NativeActionEvidence = z.output<typeof nativeActionEvidenceSchema>;
+
+export const nativeDisconnectReasonSchema = z.enum([
+  "connection_closed",
+  "connection_error",
+  "permission_denied",
+  "timeout",
+  "request_queue_exceeded",
+  "client_closed",
+  "unknown",
+]);
+export type NativeDisconnectReason = z.output<typeof nativeDisconnectReasonSchema>;
+export const nativeDisconnectSchema = z.object({
+  reason: nativeDisconnectReasonSchema,
+  occurredAt: z.string().datetime(),
+  recoveryAction: z.literal("reconnect_then_observe"),
+});
+export type NativeDisconnect = z.output<typeof nativeDisconnectSchema>;
+
 export const sessionStateSchema = z.object({
   reviewId: z.string().uuid(),
   device: deviceDescriptionSchema.optional(),
@@ -23,6 +53,7 @@ export const sessionStateSchema = z.object({
   annotations: z.array(annotationSchema),
   codec: z.enum(["h264", "mjpeg"]),
   connected: z.boolean(),
+  lastNativeDisconnect: nativeDisconnectSchema.optional(),
   iosAccessibility: iosAccessibilityStatusSchema.optional(),
 });
 
@@ -73,6 +104,8 @@ export const inputReceiptSchema = z
       ),
     recoveryAllowed: z.boolean(),
     recoveryAction: inputRecoveryActionSchema.optional(),
+    lastNativeDisconnect: nativeDisconnectSchema.optional(),
+    failureReason: nativeTargetFailureReasonSchema.optional(),
     code: z.string().min(1),
     message: z.string().min(1).optional(),
   })

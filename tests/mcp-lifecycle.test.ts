@@ -12,6 +12,9 @@ describe("MCP process lifecycle", () => {
     const exitCode = await Promise.race([child.exited, Bun.sleep(2_000).then(() => undefined)]);
     if (exitCode === undefined) child.kill();
     expect(exitCode).toBe(0);
+    const diagnostic = JSON.parse((await new Response(child.stderr).text()).trim());
+    expect(diagnostic.component).toBe("adapter");
+    expect(["stdin_end", "stdin_close"]).toContain(diagnostic.reason);
   });
 
   test("shuts down cleanly on termination signals", async () => {

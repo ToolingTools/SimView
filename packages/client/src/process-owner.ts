@@ -73,24 +73,83 @@ export function ownersAlive(
   );
 }
 
-export function watchProcessOwners(owners: ProcessOwner[], onExit: () => void): () => void {
+export type OwnerExitReason = "owner_exited" | "owner_identity_changed";
+export type OwnerInspectionEvent = "owner_inspection_failed" | "owner_inspection_recovered";
+
+function scheduleOwnerCheck(check: () => Promise<void>): () => void {
+  const timer = setInterval(() => void check(), 1_000);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+export function watchProcessOwners(
+  owners: ProcessOwner[],
+  onExit: (reason: OwnerExitReason) => void,
+  {
+    snapshot = processSnapshot,
+    probe = (pid: number) => {
+      process.kill(pid, 0);
+    },
+    schedule = scheduleOwnerCheck,
+    onDiagnostic,
+  }: {
+    snapshot?: typeof processSnapshot;
+    probe?: (pid: number) => void;
+    schedule?: (check: () => Promise<void>) => () => void;
+    onDiagnostic?: (event: OwnerInspectionEvent, error?: unknown) => void;
+  } = {},
+): () => void {
   let stopped = false;
   let checking = false;
-  const timer = setInterval(async () => {
+  let inspectionFailed = false;
+  const stop = () => {
+    if (stopped) return;
+    stopped = true;
+    cancel();
+  };
+  const exit = (reason: OwnerExitReason) => {
+    if (stopped) return;
+    stop();
+    onExit(reason);
+  };
+  const cancel = schedule(async () => {
     if (checking || stopped) return;
     checking = true;
     try {
-      const snapshot = await processSnapshot(owners.map((owner) => owner.pid));
-      if (!stopped && !ownersAlive(owners, snapshot)) onExit();
-    } catch {
-      if (!stopped) onExit();
+      let current: Map<number, ProcessIdentity>;
+      try {
+        current = await snapshot(owners.map((owner) => owner.pid));
+      } catch (error) {
+        if (stopped) return;
+        if (!inspectionFailed) onDiagnostic?.("owner_inspection_failed", error);
+        inspectionFailed = true;
+        // An unavailable ps result is not evidence of owner death. EPERM and
+        // other probe failures are also inconclusive; only ESRCH proves exit.
+        for (const owner of owners) {
+          try {
+            probe(owner.pid);
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException)?.code === "ESRCH") {
+              exit("owner_exited");
+              return;
+            }
+          }
+        }
+        return;
+      }
+      if (stopped) return;
+      if (inspectionFailed) onDiagnostic?.("owner_inspection_recovered");
+      inspectionFailed = false;
+      if (!ownersAlive(owners, current)) {
+        exit(
+          owners.some((owner) => !current.has(owner.pid)) || owners.length === 0
+            ? "owner_exited"
+            : "owner_identity_changed",
+        );
+      }
     } finally {
       checking = false;
     }
-  }, 1_000);
-  timer.unref();
-  return () => {
-    stopped = true;
-    clearInterval(timer);
-  };
+  });
+  return stop;
 }

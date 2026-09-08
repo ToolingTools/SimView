@@ -433,8 +433,8 @@ final class AccessibilityService: @unchecked Sendable {
 
     func elementAtPoint(udid: String, x: Double, y: Double) throws -> [String: Any] {
         if let provider = xctestProviders[udid] {
+            let bundleID = try requireForegroundBundleID(udid: udid)
             do {
-                let bundleID = try requireForegroundBundleID(udid: udid)
                 let element = try provider.elementAtPoint(bundleID: bundleID, x: x, y: y, timeout: 5)
                 guard foregroundBundleID(udid) == bundleID else {
                     throw SimViewError("XCTEST_TARGET_CHANGED", "The foreground application changed during capture")
@@ -442,7 +442,15 @@ final class AccessibilityService: @unchecked Sendable {
                 xctestBundleIDs[udid] = bundleID
                 return element
             } catch {
-                if !isForegroundTransition(error) { stopXCTestProvider(udid: udid) }
+                if isForegroundTransition(error) { throw error }
+                guard foregroundBundleID(udid) == bundleID else {
+                    throw SimViewError("XCTEST_TARGET_CHANGED", "The foreground application changed during capture")
+                }
+                // A healthy XCTest provider can lack activation semantics for a
+                // node. Keep it alive while consulting the native AX point hit.
+                if (error as? SimViewError)?.code != "XCTEST_ELEMENT_NOT_FOUND" {
+                    stopXCTestProvider(udid: udid)
+                }
             }
         }
         guard let device = Xcode.object(udid: udid) else {

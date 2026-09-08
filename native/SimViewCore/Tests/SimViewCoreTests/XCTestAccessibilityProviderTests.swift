@@ -5,6 +5,8 @@ import XCTest
 @testable import SimViewCore
 
 private final class FailingPointProvider: XCTestAccessibilityProviding {
+    var errorCode = "XCTEST_PROVIDER_DISCONNECTED"
+    var beforePointFailure: (() -> Void)?
     private(set) var pointRequestCount = 0
     private(set) var stopCount = 0
 
@@ -14,7 +16,8 @@ private final class FailingPointProvider: XCTestAccessibilityProviding {
 
     func elementAtPoint(bundleID _: String, x _: Double, y _: Double, timeout _: TimeInterval) throws -> [String: Any] {
         pointRequestCount += 1
-        throw SimViewError("XCTEST_PROVIDER_DISCONNECTED", "Provider disconnected")
+        beforePointFailure?()
+        throw SimViewError(errorCode, "Point unavailable")
     }
 
     func stop() {
@@ -155,6 +158,44 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
         XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
         XCTAssertEqual(provider.pointRequestCount, 1)
         XCTAssertEqual(provider.stopCount, 1)
+    }
+
+    func testMissingPointKeepsHealthyProviderForSubsequentSnapshots() throws {
+        let provider = FailingPointProvider()
+        provider.errorCode = "XCTEST_ELEMENT_NOT_FOUND"
+        let service = AccessibilityService(foregroundBundleID: { _ in "dev.example.app" }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "missing-simulator", bundleID: "dev.example.app")
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
+        XCTAssertEqual(provider.pointRequestCount, 2)
+        XCTAssertEqual(provider.stopCount, 0)
+        XCTAssertEqual(
+            service.providerStatus(udid: "missing-simulator", assessLegacy: false)["activeProvider"] as? String,
+            "core-simulator-xctest")
+    }
+
+    func testMissingPointRejectsForegroundChangeBeforeLegacyFallback() throws {
+        let provider = FailingPointProvider()
+        provider.errorCode = "XCTEST_ELEMENT_NOT_FOUND"
+        var foreground = "dev.example.first"
+        provider.beforePointFailure = { foreground = "dev.example.second" }
+        let service = AccessibilityService(foregroundBundleID: { _ in foreground }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "missing-simulator", bundleID: foreground)
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5)) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "XCTEST_TARGET_CHANGED")
+        }
+        XCTAssertEqual(provider.stopCount, 0)
+    }
+
+    func testForegroundPointChangeFailsWithoutEvictingProviderOrUsingFallback() throws {
+        let provider = FailingPointProvider()
+        provider.errorCode = "XCTEST_TARGET_CHANGED"
+        let service = AccessibilityService(foregroundBundleID: { _ in "dev.example.app" }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "missing-simulator", bundleID: "dev.example.app")
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5)) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "XCTEST_TARGET_CHANGED")
+        }
+        XCTAssertEqual(provider.stopCount, 0)
     }
 
     func testRuntimeConfigurationAddsPrivateSessionValuesAndAbsolutePaths() throws {

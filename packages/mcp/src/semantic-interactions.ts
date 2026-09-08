@@ -5,7 +5,7 @@ import {
   accessibilitySelectorSchema,
   flattenAccessibilityTree,
 } from "@simview/contracts";
-import { nativeTapRecovery, type SimViewSession } from "./session";
+import { nativeTapRecovery, nativeTargetFailureMessage, type SimViewSession } from "./session";
 
 export type SemanticTextAction = { type: "clear_text" } | { type: "replace_text"; text: string };
 
@@ -188,6 +188,7 @@ export async function dispatchSemanticTextAction(
       accepted: false,
       safeToContinue: false,
       inputDispatched: false,
+      message: nativeTargetFailureMessage(resolution),
       ...nativeTapRecovery(resolution),
       interaction: resolution,
     };

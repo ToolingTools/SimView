@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { randomBytes } from "node:crypto";
-import { writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -194,6 +194,17 @@ describe("shared MCP service", () => {
         }),
       ]);
       expect((await client.listTools()).tools.length).toBeGreaterThan(0);
+      const diagnostics = await readFile(
+        `${mcpDaemonPaths(configuration.identity).record}.diagnostics.log`,
+        "utf8",
+      );
+      expect(
+        diagnostics
+          .split("\n")
+          .filter(Boolean)
+          .map((line) => JSON.parse(line).reason),
+      ).toContain("owner_exited");
+      expect(diagnostics).not.toContain(record.token);
     } finally {
       socket?.destroy();
       if (owner.exitCode === null) owner.kill(9);

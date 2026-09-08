@@ -1034,15 +1034,15 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       var inferred = best(root, 0); if (inferred) {
         confidence = 'inferred';
         return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated, reasons: reasons(),
-          screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: inferred.node.component,
+          screen: { route: focus.route ? focus.route.name : undefined, navigationPath: focus.path, component: inferred.node.component,
             componentPath: inferred.node.componentPath, testID: inferred.node.testID, sourceLocation: inferred.node.sourceLocation, confidence: confidence } };
       }
     }
     var screenProps = screen && screen.memoizedProps || {};
     return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated, reasons: reasons(),
-      screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: screen && nameOf(screen),
-        componentPath: screen && componentPath(screen), testID: typeof screenProps.testID === 'string' ? screenProps.testID : undefined,
-        sourceLocation: screen && sourceOf(screen), confidence: confidence } };
+      screen: { route: focus.route ? focus.route.name : undefined, navigationPath: focus.path, component: screen ? nameOf(screen) : undefined,
+        componentPath: screen ? componentPath(screen) : undefined, testID: typeof screenProps.testID === 'string' ? screenProps.testID : undefined,
+        sourceLocation: screen ? sourceOf(screen) : undefined, confidence: confidence } };
   })()`;
 }
 

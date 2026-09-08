@@ -233,3 +233,37 @@ capture backend per platform and native device identifier, while each task
 keeps an isolated review resource, relay, and annotation set. Closing one task does not stop the
 stream for other authenticated tasks; the backend stops capture after the last
 client leaves and exits after its idle window.
+
+### Native target failures and disconnected devices
+
+`native_target_unconfirmed` includes `failureReason`: `missing_action_semantics`,
+`invalid_geometry`, or `native_corroboration_failed`. These rejections send no input.
+A visible, enabled `AXUnknown` node may be discoverable without exposing native
+activation semantics. For `missing_action_semantics`, repeated searches cannot
+repair that metadata; do not infer tappability from a label, test ID, React Native
+press handler, or screen coordinates. The app or accessibility provider must
+supply reliable native action evidence. Other failures retain their specific
+search, observation, scroll, or bounded hit-test recovery guidance.
+
+MCP availability does not prove the native device connection is alive.
+`get_simview_state.connected` reports native connectivity. The optional
+`lastNativeDisconnect` records the most recent loss with a sanitised reason and
+timestamp, retained as history after reconnecting. Native disconnect diagnostic
+reasons have a `native_` prefix, distinct from MCP adapter/daemon shutdown events.
+`connection_closed` means the native socket closed; it does not establish why the
+backend closed it. `unknown` means the cause is not yet classified.
+Call `connect_device`, then obtain a fresh `observe_screen` before continuing.
+Never replay input that may already have been dispatched, and never reuse refs
+from before the disconnect. Diagnostic logs contain no Simulator UI content.
+
+For an unknown-role XCTest target, SimView can consult a fresh native point hit.
+If native observation exposes such a candidate, obtain its ref with
+`find_elements` or `search_elements(actionableOnly: false)` and let `tap_element`
+verify it; discovery alone does not establish tappability.
+It accepts activation only when that hit exposes `AXPress`, agrees with the
+unique target's identifier/name and other identity fields, and matches its frame
+within one screen point. Scrolling actions alone do not qualify. Successful
+receipts preserve the original XCTest role and report `actionabilityEvidence`
+with `source: native-point-hit`; hit diagnostics retain the native action list.
+A missing XCTest point does not disable a healthy XCTest provider. Foreground
+changes fail closed. The agent must not reproduce this check with guessed input.

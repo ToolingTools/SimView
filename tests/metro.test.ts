@@ -7,6 +7,7 @@ import {
   type AccessibilitySnapshot,
   type DeviceDescription,
   parseDeviceDescription,
+  reactNativeScreenContextSchema,
 } from "@simview/contracts";
 import {
   fiberInspectionExpression,
@@ -779,7 +780,21 @@ describe("React Native Fiber projection", () => {
       route: "Invoices",
       confidence: "none",
     });
-    expect(result.screen.component).toBeNull();
+    expect(result.screen.component).toBeUndefined();
+    expect(result.screen.componentPath).toBeUndefined();
+    const serialized = JSON.parse(JSON.stringify(result.screen));
+    expect(
+      reactNativeScreenContextSchema.safeParse({
+        schemaVersion: 1,
+        kind: "react-native",
+        renderer: "fabric",
+        target: "fixture",
+        capturedAt: "2026-09-08T00:00:00Z",
+        frameId: "1",
+        ...serialized,
+        screenComponent: serialized.component,
+      }).success,
+    ).toBe(true);
   });
 });
 

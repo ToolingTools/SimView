@@ -230,3 +230,79 @@ describe("input dispatch lifecycle", () => {
     }
   });
 });
+
+test("retains sanitised native loss, clears stale state, and ignores old disconnect callbacks", async () => {
+  const diagnostics: string[] = [];
+  const session = new SimViewSession(undefined, {
+    onDiagnostic: (reason) => {
+      diagnostics.push(reason);
+    },
+  });
+  const device = parseDeviceDescription({
+    udid: "disconnect-reasons",
+    name: "Fixture",
+    state: "Booted",
+    runtime: "iOS",
+  });
+  session.devices = async () => [device];
+  const callbacks: Array<(error: Error) => void> = [];
+  let inputCount = 0;
+  const makeClient = () =>
+    ({
+      connected: true,
+      onDisconnect(callback: (error: Error) => void) {
+        callbacks.push(callback);
+        return () => {};
+      },
+      on: () => () => {},
+      close: async () => {},
+      request: async (method: string) => {
+        if (method.startsWith("input.")) inputCount++;
+        if (method === "capture.start") return { device };
+        if (method === "accessibility.providerStatus")
+          return { schemaVersion: 1, status: "native-ready", activeProvider: "core-simulator-ax" };
+        throw new Error("Unsupported fixture request");
+      },
+    }) as unknown as SimViewClient;
+  const acquire = spyOn(SimViewClient, "acquire").mockImplementation(async () => makeClient());
+  try {
+    await session.open(device.id);
+    session.frameId = "old-frame";
+    session.lastAccessibility = { snapshotId: "stale" } as never;
+    session.lastElements = { snapshotId: "stale-elements" } as never;
+    callbacks[0]?.(Object.assign(new Error("secret capability and UI"), { code: "ECONNRESET" }));
+    expect(session.state()).toMatchObject({
+      connected: false,
+      lastNativeDisconnect: {
+        reason: "connection_error",
+        recoveryAction: "reconnect_then_observe",
+      },
+    });
+    expect(session.frameId).toBeUndefined();
+    expect(session.lastAccessibility).toBeUndefined();
+    expect(session.lastElements).toBeUndefined();
+    expect(() => session.requireClient()).toThrow("connection_error");
+    const receipt = await session.dispatchInputReceipt({
+      method: "input.tap",
+      params: { x: 0.5, y: 0.5 },
+    });
+    expect(receipt).toMatchObject({
+      inputDispatched: false,
+      retryInput: false,
+      recoveryAction: "reconnect_then_observe",
+      lastNativeDisconnect: { reason: "connection_error" },
+    });
+    expect(JSON.stringify(receipt)).not.toContain("secret");
+    expect(diagnostics).toEqual(["native_connection_error"]);
+    await session.open(device.id);
+    expect(session.state().connected).toBe(true);
+    callbacks[0]?.(Object.assign(new Error("old client"), { code: "EPIPE" }));
+    expect(session.state().connected).toBe(true);
+    expect(diagnostics).toHaveLength(1);
+    expect(inputCount).toBe(0);
+    expect(acquire).toHaveBeenCalledTimes(2);
+  } finally {
+    acquire.mockRestore();
+    await session.close();
+  }
+});

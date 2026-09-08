@@ -16,6 +16,7 @@ import {
 } from "@simview/contracts";
 import { resolveBinary } from "@simview/core";
 import { resolveAppRoot } from "./app-assets";
+import { adapterDiagnostic, type DiagnosticReason } from "./diagnostics";
 
 async function sourceFiles(directory: string): Promise<string[]> {
   const files: string[] = [];
@@ -78,9 +79,10 @@ export async function runAdapter(): Promise<void> {
   const done = new Promise<void>((resolveDonePromise) => {
     resolveDone = resolveDonePromise;
   });
-  const finish = () => {
+  const finish = (reason: DiagnosticReason, error?: unknown) => {
     if (finished) return;
     finished = true;
+    adapterDiagnostic(reason, error);
     controller.abort();
     unwatch();
     process.stdin.unpipe(socket);
@@ -90,21 +92,28 @@ export async function runAdapter(): Promise<void> {
     resolveDone();
   };
   // Install these before filesystem work or process discovery: an unused server may get EOF immediately.
-  for (const event of ["end", "close", "error"] as const) process.stdin.once(event, finish);
-  process.stdout.once("error", finish);
-  process.stdout.once("close", finish);
-  for (const signal of ["SIGINT", "SIGTERM", "disconnect"] as const) process.once(signal, finish);
+  const listeners = [
+    [process.stdin, "end", () => finish("stdin_end")],
+    [process.stdin, "close", () => finish("stdin_close")],
+    [process.stdin, "error", (error: unknown) => finish("stdin_error", error)],
+    [process.stdout, "close", () => finish("stdout_close")],
+    [process.stdout, "error", (error: unknown) => finish("stdout_error", error)],
+    [process, "SIGINT", () => finish("sigint")],
+    [process, "SIGTERM", () => finish("sigterm")],
+    [process, "disconnect", () => finish("disconnect")],
+  ] as const;
+  for (const [emitter, event, listener] of listeners) emitter.once(event, listener);
   // Reading one byte detects EOF without consuming/buffering an unbounded MCP stream during startup.
   process.stdin.read(0);
   try {
     const snapshot = await processSnapshot();
     const owners = selectProcessOwners(snapshot, process.ppid);
     if (!owners.length) {
-      finish();
+      finish("owner_exited");
       return;
     }
     if (finished) return;
-    unwatch = watchProcessOwners(owners, finish);
+    unwatch = watchProcessOwners(owners, finish, { onDiagnostic: adapterDiagnostic });
     const configuration = await adapterConfiguration();
     if (finished) return;
     socket = await acquireMcpDaemon({ ...configuration, owners, signal: controller.signal });
@@ -112,20 +121,20 @@ export async function runAdapter(): Promise<void> {
       socket.destroy();
       return;
     }
-    socket.once("error", finish);
-    socket.once("close", finish);
-    socket.once("end", finish);
+    socket.once("error", (error) => finish("socket_error", error));
+    socket.once("close", () => finish("socket_close"));
+    socket.once("end", () => finish("socket_end"));
     socket.pipe(process.stdout, { end: false });
     process.stdin.pipe(socket);
     await done;
   } catch (error) {
-    if (!finished) throw error;
+    if (!finished) {
+      finish("adapter_error", error);
+      throw new Error("MCP adapter failed; see shutdown diagnostic reason and category");
+    }
   } finally {
-    finish();
-    for (const event of ["end", "close", "error"] as const) process.stdin.off(event, finish);
-    process.stdout.off("error", finish);
-    process.stdout.off("close", finish);
-    for (const signal of ["SIGINT", "SIGTERM", "disconnect"] as const) process.off(signal, finish);
+    finish("adapter_finished");
+    for (const [emitter, event, listener] of listeners) emitter.off(event, listener);
   }
 }
 

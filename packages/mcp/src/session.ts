@@ -28,6 +28,9 @@ import {
   type IOSAccessibilityStatus,
   inputReceiptSchema,
   type McpConnectionContext,
+  type NativeActionEvidence,
+  type NativeDisconnect,
+  type NativeTargetFailureReason,
   normalizedPointSchema,
   normalizeSemanticSearchText,
   relayAuthenticationSchema,
@@ -42,6 +45,7 @@ import {
 import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { previewScriptResponse, resolveAppRoot } from "./app-assets";
+import { adapterDiagnostic, classifyNativeDisconnect, type DiagnosticReason } from "./diagnostics";
 import { MetroInspector } from "./metro";
 import { packetsFromLatestKeyframe } from "./preview";
 import { captureScreenshot } from "./screenshot";
@@ -101,6 +105,8 @@ export interface WarmObservation {
 export type AccessibilityObservation = z.output<typeof accessibilityObserveResultSchema>;
 
 export type NativeTapResolution = {
+  failureReason?: NativeTargetFailureReason;
+  actionabilityEvidence?: NativeActionEvidence;
   accepted: boolean;
   code:
     | "stale_ref"
@@ -166,6 +172,7 @@ type RejectedInputReceiptOptions = {
   retryable: boolean;
   recoveryAllowed: boolean;
   recoveryAction?: InputReceipt["recoveryAction"];
+  lastNativeDisconnect?: NativeDisconnect | undefined;
 };
 
 class InputDispatchFailure extends Error {
@@ -209,6 +216,24 @@ export function inputReceiptFromError(error: unknown): InputReceipt {
   });
 }
 
+export function nativeTargetFailureMessage(resolution: NativeTapResolution): string {
+  const node = resolution.target;
+  const name = node?.label || node?.title || node?.identifier || resolution.fingerprint?.name;
+  const target = name
+    ? `Found ${JSON.stringify(name)} (${node?.role ?? "unknown role"})`
+    : "The semantic target";
+  switch (resolution.failureReason) {
+    case "missing_action_semantics":
+      return `${target}, but native accessibility metadata does not identify it as actionable. Searching again will not supply missing action semantics; the app or provider must expose reliable native action evidence. No tap was sent.`;
+    case "invalid_geometry":
+      return `${target}, but its native frame is missing or has no usable area. Obtain a fresh observation and resolve it again. No tap was sent.`;
+    case "native_corroboration_failed":
+      return `Could not corroborate ${name ? JSON.stringify(name) : "the semantic target"} in the fresh native accessibility tree. Search the current native tree and resolve it again. No tap was sent.`;
+    default:
+      return "The semantic target was not confirmed natively; no tap was sent.";
+  }
+}
+
 export function nativeTapRecovery(resolution: NativeTapResolution): NativeTapRecovery {
   switch (resolution.code) {
     case "target_offscreen":
@@ -238,6 +263,10 @@ export function nativeTapRecovery(resolution: NativeTapResolution): NativeTapRec
         };
       }
       return { retryInput: false, recoveryAllowed: false };
+    case "native_target_unconfirmed":
+      return resolution.failureReason === "missing_action_semantics"
+        ? { retryInput: false, recoveryAllowed: false }
+        : { retryInput: false, recoveryAllowed: true, recoveryAction: "search_again" };
     case "target_disabled":
     case "ready":
       return { retryInput: false, recoveryAllowed: false };
@@ -350,6 +379,7 @@ export class SimViewSession {
   #deviceDiscoveryPromises = new Set<Promise<DeviceDescription[]>>();
   #connectionGeneration = 0;
   #metroInspector: MetroInspector;
+  #lastNativeDisconnect: NativeDisconnect | undefined;
   #closed = false;
   #connectionTail: Promise<void> = Promise.resolve();
   readonly appRoot: string;
@@ -360,6 +390,7 @@ export class SimViewSession {
     private readonly dependencies: {
       attachScreenshotClient?: typeof SimViewClient.attach;
       metroInspector?: MetroInspector;
+      onDiagnostic?: (reason: DiagnosticReason) => void;
     } = {},
   ) {
     this.appRoot = context?.appRoot ?? resolveAppRoot();
@@ -627,6 +658,7 @@ export class SimViewSession {
       codec: this.codec,
       connected: this.client?.connected === true,
       iosAccessibility: this.#iosAccessibility,
+      lastNativeDisconnect: this.#lastNativeDisconnect,
     };
   }
 
@@ -1292,7 +1324,14 @@ export class SimViewSession {
       !fingerprint.value &&
       !fingerprint.placeholder
     ) {
-      return { accepted: false, code: "native_target_unconfirmed", retryable: false };
+      return {
+        accepted: false,
+        code: "native_target_unconfirmed",
+        failureReason: "native_corroboration_failed",
+        fingerprint,
+        target: discovery,
+        retryable: false,
+      };
     }
     const corroboration =
       discoverySource.source === "react-native-fiber"
@@ -1308,6 +1347,7 @@ export class SimViewSession {
       return {
         accepted: false,
         code: "native_target_unconfirmed",
+        failureReason: "native_corroboration_failed",
         retryable: true,
         discoverySource: discoverySource.source,
         discoverySnapshotId: discoverySource.snapshotId,
@@ -1347,6 +1387,7 @@ export class SimViewSession {
       return {
         accepted: false,
         code: "native_target_unconfirmed",
+        failureReason: "invalid_geometry",
         retryable: false,
         fingerprint,
         target,
@@ -1371,10 +1412,52 @@ export class SimViewSession {
         stable: true,
       };
     }
-    if (!isActionableSearchCandidate(target)) {
+    let activationHit: AccessibilityNode | undefined;
+    if (
+      !targetActionability.targetActionable &&
+      this.device?.platform === "ios" &&
+      observation.snapshot.source === "core-simulator-xctest" &&
+      normalizeFingerprintRole(target.role ?? "") === "unknown"
+    ) {
+      try {
+        const hit = await this.inspectPoint(point.x, point.y);
+        if (corroboratesNativeActivation(target, hit, observation.snapshot.screen)) {
+          activationHit = hit;
+        } else {
+          return {
+            accepted: false,
+            code: "native_target_unconfirmed",
+            failureReason: hit.actions?.includes("AXPress")
+              ? "native_corroboration_failed"
+              : "missing_action_semantics",
+            retryable: false,
+            fingerprint,
+            target,
+            rawFrame: target.frame,
+            viewport: observation.snapshot.screen,
+            actionabilityDiagnostics: targetActionability,
+            hitNode: hit,
+            hitTest: false,
+            hitMethod: "provider-element-at-point",
+          };
+        }
+      } catch {
+        return {
+          accepted: false,
+          code: "native_target_unconfirmed",
+          failureReason: "native_corroboration_failed",
+          retryable: true,
+          fingerprint,
+          target,
+          actionabilityDiagnostics: targetActionability,
+        };
+      }
+    }
+    if (!targetActionability.targetActionable && !activationHit) {
       return {
         accepted: false,
         code: "native_target_unconfirmed",
+        failureReason: "missing_action_semantics",
         retryable: false,
         fingerprint,
         target,
@@ -1384,10 +1467,28 @@ export class SimViewSession {
       };
     }
     const nativeFingerprint = semanticFingerprint(target);
-    const hitResolution =
-      this.device?.platform === "android"
-        ? resolveAndroidSnapshotHit(observation.snapshot, target, point)
-        : await this.#resolveProviderHit(nativeFingerprint, point);
+    let hitResolution: {
+      matchesTarget: boolean;
+      diagnostics: Pick<
+        NativeTapResolution,
+        "hitNode" | "actionableHitNode" | "hitRelationship" | "hitMethod"
+      >;
+    };
+    if (activationHit) {
+      hitResolution = {
+        matchesTarget: true,
+        diagnostics: {
+          hitNode: activationHit,
+          actionableHitNode: activationHit,
+          hitRelationship: "self" as const,
+          hitMethod: "provider-element-at-point" as const,
+        },
+      };
+    } else if (this.device?.platform === "android") {
+      hitResolution = resolveAndroidSnapshotHit(observation.snapshot, target, point);
+    } else {
+      hitResolution = await this.#resolveProviderHit(nativeFingerprint, point);
+    }
     if (!hitResolution.matchesTarget) {
       return {
         accepted: false,
@@ -1405,6 +1506,14 @@ export class SimViewSession {
       accepted: true,
       code: "ready",
       retryable: false,
+      ...(activationHit
+        ? {
+            actionabilityEvidence: {
+              source: "native-point-hit" as const,
+              action: "AXPress" as const,
+            },
+          }
+        : {}),
       discoverySource: discoverySource.source,
       discoverySnapshotId: discoverySource.snapshotId,
       interactionSource: observation.snapshot.source,
@@ -2110,7 +2219,11 @@ export class SimViewSession {
   requireClient(): SimViewClient {
     this.#assertOpen();
     if (!this.client?.connected) {
-      throw new Error("No device is connected; call connect_device before using device controls");
+      throw new Error(
+        this.#lastNativeDisconnect
+          ? `Native device connection lost (${this.#lastNativeDisconnect.reason}); call connect_device, then observe_screen before further input.`
+          : "No device is connected; call connect_device before using device controls",
+      );
     }
     return this.client;
   }
@@ -2136,7 +2249,8 @@ export class SimViewSession {
           inputDispatched: false,
           retryable: true,
           recoveryAllowed: true,
-          recoveryAction: "connect_device",
+          recoveryAction: this.#lastNativeDisconnect ? "reconnect_then_observe" : "connect_device",
+          lastNativeDisconnect: this.#lastNativeDisconnect,
         }),
       );
     }
@@ -2409,8 +2523,20 @@ export class SimViewSession {
   #bindFrames(): void {
     const client = this.requireClient();
     this.#unsubscribers.push(
-      client.onDisconnect(() => {
+      client.onDisconnect((error) => {
         if (this.client !== client) return;
+        this.#lastNativeDisconnect = {
+          reason: classifyNativeDisconnect(error),
+          occurredAt: new Date().toISOString(),
+          recoveryAction: "reconnect_then_observe",
+        };
+        try {
+          (this.dependencies.onDiagnostic ?? adapterDiagnostic)(
+            `native_${this.#lastNativeDisconnect.reason}`,
+          );
+        } catch {
+          // Diagnostic observers must not prevent disconnect cleanup.
+        }
         this.#connectionGeneration += 1;
         this.#resetPreviewDemand();
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
@@ -3046,6 +3172,29 @@ function isVisibleSearchCandidate(node: AccessibilityNode): boolean {
 
 function isFrameOffscreen(frame: NonNullable<AccessibilityNode["frame"]>["normalized"]): boolean {
   return frame.x + frame.width <= 0 || frame.y + frame.height <= 0 || frame.x >= 1 || frame.y >= 1;
+}
+
+function corroboratesNativeActivation(
+  target: AccessibilityNode,
+  hit: AccessibilityNode,
+  screen: AccessibilitySnapshot["screen"],
+): boolean {
+  if (hit.enabled === false || hit.hidden === true || (hit.visibleFraction ?? 1) <= 0) return false;
+  if (!hit.actions?.includes("AXPress") || screen.width <= 0 || screen.height <= 0) return false;
+  // Providers can disagree on a generic role, but identity and geometry must
+  // still describe the same unique native target. Scrolling actions do not count.
+  const fingerprint = semanticFingerprint(target);
+  if (!fingerprint.identifier && !fingerprint.name) return false;
+  if (!matchesFingerprint(hit, { ...fingerprint, role: undefined })) return false;
+  const original = target.frame?.normalized;
+  const resolved = hit.frame?.normalized;
+  if (!original || !resolved || resolved.width <= 0 || resolved.height <= 0) return false;
+  return (
+    Math.abs(original.x - resolved.x) * screen.width <= 1 &&
+    Math.abs(original.y - resolved.y) * screen.height <= 1 &&
+    Math.abs(original.width - resolved.width) * screen.width <= 1 &&
+    Math.abs(original.height - resolved.height) * screen.height <= 1
+  );
 }
 
 function isActionableSearchCandidate(node: AccessibilityNode): boolean {

@@ -23,6 +23,7 @@ import {
 import {
   type AccessibilityObservation,
   nativeTapRecovery,
+  nativeTargetFailureMessage,
   SimViewSession,
 } from "../packages/mcp/src/session";
 
@@ -2713,6 +2714,152 @@ describe("MCP app tools", () => {
     });
   });
 
+  test("explains missing action semantics and invalid geometry without dispatching input", async () => {
+    for (const failureReason of ["missing_action_semantics", "invalid_geometry"] as const) {
+      const session = new SimViewSession();
+      const target = interactionNode("ax:category", "Building Materials", 0.1, 0.2);
+      if (failureReason === "missing_action_semantics") {
+        target.role = "AXUnknown";
+        target.actions = [];
+      } else {
+        target.frame.normalized.width = 0;
+      }
+      session.accessibilityObserve = async () =>
+        ({
+          snapshot: interactionSnapshot("native-current", target),
+          revision: "1",
+          stable: true,
+          eventChanged: false,
+          timedOut: false,
+          strategy: "ios-axp",
+          settledAt: "2026-08-08T10:00:00.075Z",
+        }) as never;
+      session.lastAccessibility = interactionSnapshot("native-current", target);
+      let dispatched = 0;
+      session.dispatchInput = async () => {
+        dispatched++;
+        return {};
+      };
+      session.inspectPoint = async () => {
+        throw new Error("Must reject before hit testing");
+      };
+      const resolution = await session.resolveNativeTap({
+        name: "Building Materials",
+        exact: true,
+      });
+      expect(resolution).toMatchObject({
+        accepted: false,
+        code: "native_target_unconfirmed",
+        failureReason,
+      });
+      expect(nativeTargetFailureMessage(resolution)).toContain("Building Materials");
+      expect(nativeTargetFailureMessage(resolution)).toContain("No tap was sent");
+      expect(nativeTapRecovery(resolution)).toMatchObject({
+        recoveryAllowed: failureReason !== "missing_action_semantics",
+        retryInput: false,
+      });
+      const harness = await connectMcpTestServer("target-reasons", session, createServer(session));
+      try {
+        const result = await harness.client.callTool({
+          name: "tap_element",
+          arguments: { name: "Building Materials" },
+        });
+        expect(result.isError).toBe(true);
+        expect(result.structuredContent).toMatchObject({
+          accepted: false,
+          inputDispatched: false,
+          failureReason,
+          interaction: { target: { label: "Building Materials" } },
+        });
+        expect(dispatched).toBe(0);
+      } finally {
+        await harness.closeHarness();
+      }
+    }
+  });
+
+  test("requires matching native AXPress evidence before accepting an unknown XCTest role", async () => {
+    for (const variant of [
+      "matching",
+      "name-only",
+      "wrong-id",
+      "wrong-name",
+      "moved",
+      "disabled",
+      "hidden",
+      "scroll-only",
+      "no-actions",
+      "invalid-screen",
+      "unavailable",
+    ] as const) {
+      const session = new SimViewSession();
+      session.device = parseDeviceDescription({
+        udid: "native-action",
+        name: "Fixture",
+        state: "Booted",
+        runtime: "iOS",
+      });
+      const target: AccessibilityNode = {
+        ...interactionNode("ax:unknown", "All Branches", 0.5, 0.1),
+        role: "AXUnknown",
+        actions: [],
+      };
+      if (variant === "name-only") delete target.identifier;
+      const hit: AccessibilityNode = {
+        ...target,
+        ref: "ax:hit",
+        role: "AXGenericElement",
+        actions: ["AXPress"],
+      };
+      if (variant === "wrong-id") hit.identifier = "different-control";
+      if (variant === "wrong-name") hit.label = "Another branch";
+      if (variant === "moved" && hit.frame)
+        hit.frame = { ...hit.frame, normalized: { ...hit.frame.normalized, y: 0.5 } };
+      if (variant === "disabled") hit.enabled = false;
+      if (variant === "hidden") hit.hidden = true;
+      if (variant === "scroll-only") hit.actions = ["AXScrollToVisible"];
+      if (variant === "no-actions") delete hit.actions;
+      const snapshot = {
+        ...interactionSnapshot("xctest", target),
+        source: "core-simulator-xctest" as const,
+      };
+      if (variant === "invalid-screen") snapshot.screen = { ...snapshot.screen, width: 0 };
+      session.lastAccessibility = snapshot;
+      session.accessibilityObserve = async () =>
+        ({
+          snapshot,
+          revision: "1",
+          stable: true,
+          eventChanged: false,
+          timedOut: false,
+          strategy: "ios-xctest",
+          settledAt: "2026-08-08T10:00:00.075Z",
+        }) as never;
+      let hits = 0;
+      session.inspectPoint = async () => {
+        hits++;
+        if (variant === "unavailable") throw new Error("No native hit");
+        return hit;
+      };
+      const resolution = await session.resolveNativeTap({ name: "All Branches", exact: true });
+      expect(hits).toBe(1);
+      if (variant === "matching" || variant === "name-only") {
+        expect(resolution).toMatchObject({
+          accepted: true,
+          hitTest: true,
+          actionabilityEvidence: { source: "native-point-hit", action: "AXPress" },
+          target: { role: "AXUnknown" },
+          actionableHitNode: { role: "AXGenericElement", actions: ["AXPress"] },
+        });
+      } else {
+        expect(resolution.accepted).toBe(false);
+        expect(nativeTapRecovery(resolution).retryInput).toBe(false);
+        expect(nativeTapRecovery(resolution).coordinateFallback).toBeUndefined();
+      }
+      await session.close();
+    }
+  });
+
   test("fails closed when Fiber name corroboration is ambiguous or absent", async () => {
     const ambiguousSession = new SimViewSession();
     const fiberTarget = {
@@ -2773,7 +2920,11 @@ describe("MCP app tools", () => {
     nameLessSession.accessibilityObserve = ambiguousSession.accessibilityObserve;
     expect(
       await nameLessSession.resolveNativeTap({ ref: "rn:nameless", exact: true }),
-    ).toMatchObject({ accepted: false, code: "native_target_unconfirmed" });
+    ).toMatchObject({
+      accepted: false,
+      code: "native_target_unconfirmed",
+      failureReason: "native_corroboration_failed",
+    });
   });
 
   test("reports exact semantic matches excluded because they are offscreen", async () => {
