@@ -10,7 +10,7 @@
     "@simview/client": "workspace:*",
     "@simview/contracts": "workspace:*",
     "metro-bridge": "0.2.10",
-    "zod": "4.4.3"
+    "zod": "4.5.4"
   },
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outdir=dist",

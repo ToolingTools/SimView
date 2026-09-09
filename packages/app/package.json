@@ -7,7 +7,7 @@
   "dependencies": {
     "@modelcontextprotocol/ext-apps": "1.7.5",
     "@simview/contracts": "workspace:*",
-    "preact": "10.29.7"
+    "preact": "10.29.8"
   },
   "scripts": {
     "build": "bun build src/index.tsx --target=browser --minify --outfile=dist/preview.js && cp src/preview.html dist/preview.html",
