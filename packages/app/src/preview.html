@@ -956,7 +956,7 @@
       .section-heading small { color: var(--muted); font-size: 9px; }
       .elements-panel {
         display: grid;
-        grid-template-rows: auto auto minmax(0, 1fr);
+        grid-template-rows: auto 30px auto minmax(0, 1fr);
         gap: 7px;
       }
       input, textarea, select {
@@ -965,7 +965,16 @@
         background: rgba(0, 0, 0, .18);
         color: var(--paper);
       }
-      .elements-panel input { min-height: 30px; padding: 0 9px; }
+      .elements-panel input { height: 30px; min-height: 30px; padding: 0 9px; }
+      .element-tree-status:empty { height: 0; }
+      .element-tree-error { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+      .element-tree-error span { flex: 1; }
+      .elements-spinner {
+        width: 11px; height: 11px; border: 2px solid var(--line);
+        border-top-color: var(--paper); border-radius: 50%;
+        animation: elements-spin .8s linear infinite;
+      }
+      @keyframes elements-spin { to { transform: rotate(360deg); } }
       .element-tree {
         min-height: 0;
         overflow: auto;

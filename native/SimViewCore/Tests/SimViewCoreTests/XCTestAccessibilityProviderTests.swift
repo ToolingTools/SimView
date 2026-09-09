@@ -5,6 +5,8 @@ import XCTest
 @testable import SimViewCore
 
 private final class FailingPointProvider: XCTestAccessibilityProviding {
+    var errorCode = "XCTEST_PROVIDER_DISCONNECTED"
+    var beforePointFailure: (() -> Void)?
     private(set) var pointRequestCount = 0
     private(set) var stopCount = 0
 
@@ -14,7 +16,8 @@ private final class FailingPointProvider: XCTestAccessibilityProviding {
 
     func elementAtPoint(bundleID _: String, x _: Double, y _: Double, timeout _: TimeInterval) throws -> [String: Any] {
         pointRequestCount += 1
-        throw SimViewError("XCTEST_PROVIDER_DISCONNECTED", "Provider disconnected")
+        beforePointFailure?()
+        throw SimViewError(errorCode, "Point unavailable")
     }
 
     func stop() {
@@ -41,6 +44,18 @@ private final class CountingProvider: XCTestAccessibilityProviding {
 }
 
 final class XCTestAccessibilityProviderTests: XCTestCase {
+    func testProviderFailureReasonSurvivesFallbackAndClearsOnRecovery() throws {
+        let provider = FailingPointProvider()
+        let service = AccessibilityService(foregroundBundleID: { _ in "dev.example.app" }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "test", bundleID: "dev.example.app")
+        _ = try? service.elementAtPoint(udid: "test", x: 0.5, y: 0.5)
+        XCTAssertEqual(
+            service.providerStatus(udid: "test", assessLegacy: false)["reason"] as? String,
+            "xctest-runtime-failure: XCTEST_PROVIDER_DISCONNECTED")
+        _ = try service.enableXCTestProvider(udid: "test", bundleID: "dev.example.app")
+        XCTAssertNil(service.providerStatus(udid: "test", assessLegacy: false)["reason"])
+    }
+
     func testSnapshotsFollowForegroundWithoutRestartingProvider() throws {
         let provider = CountingProvider()
         var foreground: String? = "dev.example.first"
@@ -140,10 +155,46 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
         session.stop()
 
         XCTAssertFalse(process.isRunning)
+        var childStatus: Int32 = 0
+        let reapResult = waitpid(process.processIdentifier, &childStatus, WNOHANG)
+        let reapError = errno
+        XCTAssertEqual(reapResult, -1)
+        XCTAssertEqual(reapError, ECHILD, "Foundation must have reaped the owned child")
         XCTAssertEqual(process.terminationReason, .uncaughtSignal)
         XCTAssertEqual(process.terminationStatus, SIGKILL)
         XCTAssertFalse(FileManager.default.fileExists(atPath: configurationURL.path))
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 4.5)
+    }
+
+    func testStopAlreadyExitedChildReturnsWithoutBlockingWorker() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try process.run()
+        let exitDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while process.isRunning, ProcessInfo.processInfo.systemUptime < exitDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertFalse(process.isRunning)
+        var sockets: [Int32] = [0, 0]
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets), 0)
+        defer { Darwin.close(sockets[1]) }
+        let configurationURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "simview-xctest-test-\(UUID().uuidString).xctestrun"
+        )
+        try Data("test".utf8).write(to: configurationURL)
+        let session = XCTestAccessibilityProviderSession(
+            connection: sockets[0], process: process, configuredXCTestRunURL: configurationURL
+        )
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        session.stop()
+        session.stop()
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - startedAt, 0.5)
+        var childStatus: Int32 = 0
+        let reapResult = waitpid(process.processIdentifier, &childStatus, WNOHANG)
+        let reapError = errno
+        XCTAssertEqual(reapResult, -1)
+        XCTAssertEqual(reapError, ECHILD, "Foundation must have reaped the exited child")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configurationURL.path))
     }
 
     func testPointFailureStopsAndEvictsProviderBeforeLegacyFallback() throws {
@@ -155,6 +206,44 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
         XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
         XCTAssertEqual(provider.pointRequestCount, 1)
         XCTAssertEqual(provider.stopCount, 1)
+    }
+
+    func testMissingPointKeepsHealthyProviderForSubsequentSnapshots() throws {
+        let provider = FailingPointProvider()
+        provider.errorCode = "XCTEST_ELEMENT_NOT_FOUND"
+        let service = AccessibilityService(foregroundBundleID: { _ in "dev.example.app" }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "missing-simulator", bundleID: "dev.example.app")
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5))
+        XCTAssertEqual(provider.pointRequestCount, 2)
+        XCTAssertEqual(provider.stopCount, 0)
+        XCTAssertEqual(
+            service.providerStatus(udid: "missing-simulator", assessLegacy: false)["activeProvider"] as? String,
+            "core-simulator-xctest")
+    }
+
+    func testMissingPointRejectsForegroundChangeBeforeLegacyFallback() throws {
+        let provider = FailingPointProvider()
+        provider.errorCode = "XCTEST_ELEMENT_NOT_FOUND"
+        var foreground = "dev.example.first"
+        provider.beforePointFailure = { foreground = "dev.example.second" }
+        let service = AccessibilityService(foregroundBundleID: { _ in foreground }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "missing-simulator", bundleID: foreground)
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5)) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "XCTEST_TARGET_CHANGED")
+        }
+        XCTAssertEqual(provider.stopCount, 0)
+    }
+
+    func testForegroundPointChangeFailsWithoutEvictingProviderOrUsingFallback() throws {
+        let provider = FailingPointProvider()
+        provider.errorCode = "XCTEST_TARGET_CHANGED"
+        let service = AccessibilityService(foregroundBundleID: { _ in "dev.example.app" }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "missing-simulator", bundleID: "dev.example.app")
+        XCTAssertThrowsError(try service.elementAtPoint(udid: "missing-simulator", x: 0.5, y: 0.5)) { error in
+            XCTAssertEqual((error as? SimViewError)?.code, "XCTEST_TARGET_CHANGED")
+        }
+        XCTAssertEqual(provider.stopCount, 0)
     }
 
     func testRuntimeConfigurationAddsPrivateSessionValuesAndAbsolutePaths() throws {
@@ -203,6 +292,41 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
             target["TestBundlePath"] as? String,
             "/private/tmp/provider/Debug-iphonesimulator/SimViewXCTestProbeUITests-Runner.app/PlugIns/Tests.xctest"
         )
+    }
+
+    func testMessageCodecHandlesBrokenPipeWithoutTerminatingProcess() throws {
+        let childMarker = "SIMVIEW_TEST_CLOSED_XCTEST_PEER"
+        if ProcessInfo.processInfo.environment[childMarker] == "1" {
+            Darwin.signal(SIGPIPE, SIG_DFL)
+            var sockets: [Int32] = [0, 0]
+            guard Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets) == 0 else { _exit(70) }
+            Darwin.shutdown(sockets[0], SHUT_WR)
+            do {
+                try XCTestProviderMessageCodec.write(["method": "shutdown"], to: sockets[0], timeout: 1)
+                _exit(71)
+            } catch {
+                _exit((error as? SimViewError)?.code == "XCTEST_PROVIDER_WRITE_FAILED" ? 42 : 72)
+            }
+        }
+        let child = Process()
+        child.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        child.arguments = [
+            "xctest", "-XCTest",
+            "SimViewCoreTests.XCTestAccessibilityProviderTests/testMessageCodecHandlesBrokenPipeWithoutTerminatingProcess",
+            Bundle(for: XCTestAccessibilityProviderTests.self).bundleURL.path,
+        ]
+        var environment = ProcessInfo.processInfo.environment
+        environment[childMarker] = "1"
+        child.environment = environment
+        child.standardOutput = FileHandle.nullDevice
+        child.standardError = FileHandle.nullDevice
+        try child.run()
+        let deadline = Date().addingTimeInterval(10)
+        while child.isRunning, Date() < deadline { Thread.sleep(forTimeInterval: 0.01) }
+        if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+        child.waitUntilExit()
+        XCTAssertEqual(child.terminationReason, .exit)
+        XCTAssertEqual(child.terminationStatus, 42, "Broken-pipe writes must throw instead of receiving SIGPIPE")
     }
 
     func testMessageCodecRoundTripsPartialSocketWrites() throws {

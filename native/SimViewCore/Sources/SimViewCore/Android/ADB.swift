@@ -195,32 +195,40 @@ final class ADBClient: @unchecked Sendable {
 
 struct AndroidDeviceProvider: DeviceProvider {
     let client: ADBClient
+    let discoveryTimeout: TimeInterval
 
-    init(client: ADBClient? = nil) throws {
+    init(client: ADBClient? = nil, discoveryTimeout: TimeInterval = 4) throws {
         self.client = try client ?? ADBClient()
+        self.discoveryTimeout = discoveryTimeout
     }
 
     func devices() throws -> [DeviceDescription] {
-        let listing = try client.require(["devices", "-l"])
-        return ADBClient.parseDevices(listing.text).map(describe)
+        // Android enrichment must finish before the caller's ten-second device
+        // discovery deadline, including when a listed emulator stops answering.
+        let deadline = ProcessInfo.processInfo.systemUptime + discoveryTimeout
+        let listing = try client.require(["devices", "-l"], timeout: discoveryTimeout)
+        return ADBClient.parseDevices(listing.text).map { describe($0, deadline: deadline) }
     }
 
-    private func describe(_ record: ADBDeviceRecord) -> DeviceDescription {
+    private func describe(_ record: ADBDeviceRecord, deadline: TimeInterval) -> DeviceDescription {
         let connected = record.state == "device"
-        let properties = connected ? properties(serial: record.serial) : [:]
-        let booted = connected && properties["sys.boot_completed"] == "1"
-        let emulatorName = officialEmulatorName(record)
-        let kind: DeviceKind = emulatorName == nil ? .physical : .emulator
+        let properties = connected ? properties(serial: record.serial, deadline: deadline) : nil
+        let booted = connected && properties?["sys.boot_completed"] == "1"
+        let isEmulator = record.serial.range(of: #"^emulator-[0-9]+$"#, options: .regularExpression) != nil
+        let emulatorName = booted ? officialEmulatorName(record, deadline: deadline) : nil
+        let kind: DeviceKind = isEmulator ? .emulator : .physical
         let model =
-            properties["ro.product.model"]
+            properties?["ro.product.model"]
             ?? record.attributes["model"]?.replacingOccurrences(of: "_", with: " ")
-        let release = properties["ro.build.version.release"] ?? "Android"
-        let api = properties["ro.build.version.sdk"]
-        let dimensions = connected ? displaySize(serial: record.serial) : nil
-        let densityDpi = connected ? displayDensity(serial: record.serial) : nil
+        let runtime = properties?["ro.build.version.release"].map { "Android \($0)" } ?? "Android"
+        let api = properties?["ro.build.version.sdk"]
+        let dimensions = booted ? displaySize(serial: record.serial, deadline: deadline) : nil
+        let densityDpi = booted ? displayDensity(serial: record.serial, deadline: deadline) : nil
         let state: String
         if !connected {
             state = record.state == "unauthorized" ? "unauthorized" : "offline"
+        } else if properties == nil {
+            state = "unknown"
         } else if !booted {
             state = "booting"
         } else {
@@ -228,6 +236,7 @@ struct AndroidDeviceProvider: DeviceProvider {
         }
         var metadata = record.attributes
         metadata["adbState"] = record.state
+        if connected && properties == nil { metadata["discoveryStatus"] = "metadata-unavailable" }
         if let api { metadata["apiLevel"] = api }
         if let emulatorName { metadata["avdName"] = emulatorName }
         if let densityDpi { metadata["densityDpi"] = String(densityDpi) }
@@ -238,7 +247,7 @@ struct AndroidDeviceProvider: DeviceProvider {
             nativeIdentifier: record.serial,
             name: emulatorName ?? model ?? record.serial,
             state: state,
-            runtime: api.map { "Android \(release) (API \($0))" } ?? "Android \(release)",
+            runtime: api.map { "\(runtime) (API \($0))" } ?? runtime,
             available: booted,
             pixelWidth: dimensions?.width,
             pixelHeight: dimensions?.height,
@@ -246,9 +255,22 @@ struct AndroidDeviceProvider: DeviceProvider {
         )
     }
 
-    private func properties(serial: String) -> [String: String] {
-        guard let result = try? client.execute(["shell", "getprop"], serial: serial), result.status == 0
-        else { return [:] }
+    private func query(
+        _ arguments: [String], serial: String, deadline: TimeInterval,
+        maximumOutput: Int = 64 * 1024 * 1024
+    ) -> ADBResult? {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard remaining > 0,
+            let result = try? client.execute(
+                arguments, serial: serial, maximumOutput: maximumOutput, timeout: min(1, remaining)
+            ), result.status == 0
+        else { return nil }
+        return result
+    }
+
+    private func properties(serial: String, deadline: TimeInterval) -> [String: String]? {
+        guard let result = query(["shell", "getprop"], serial: serial, deadline: deadline)
+        else { return nil }
         return Self.parseProperties(result.text)
     }
 
@@ -260,17 +282,16 @@ struct AndroidDeviceProvider: DeviceProvider {
         return properties
     }
 
-    private func officialEmulatorName(_ record: ADBDeviceRecord) -> String? {
+    private func officialEmulatorName(_ record: ADBDeviceRecord, deadline: TimeInterval) -> String? {
         guard record.serial.range(of: #"^emulator-[0-9]+$"#, options: .regularExpression) != nil,
             record.state == "device",
-            let result = try? client.execute(["emu", "avd", "name"], serial: record.serial),
-            result.status == 0
+            let result = query(["emu", "avd", "name"], serial: record.serial, deadline: deadline)
         else { return nil }
         return result.text.split(whereSeparator: \.isNewline).map(String.init).first?.nonEmpty
     }
 
-    private func displaySize(serial: String) -> (width: Int, height: Int)? {
-        guard let result = try? client.execute(["shell", "wm", "size"], serial: serial), result.status == 0 else {
+    private func displaySize(serial: String, deadline: TimeInterval) -> (width: Int, height: Int)? {
+        guard let result = query(["shell", "wm", "size"], serial: serial, deadline: deadline) else {
             return nil
         }
         let matches = result.text.matches(of: /(?:Override|Physical) size:\s*([0-9]+)x([0-9]+)/)
@@ -278,11 +299,11 @@ struct AndroidDeviceProvider: DeviceProvider {
             let width = Int(match.output.1),
             let height = Int(match.output.2)
         else { return nil }
-        let rotation = try? client.execute(
+        let rotation = query(
             ["shell", "dumpsys", "window", "displays"],
             serial: serial,
-            maximumOutput: 8 * 1024 * 1024,
-            timeout: 5
+            deadline: deadline,
+            maximumOutput: 8 * 1024 * 1024
         )
         return Self.orientedSize(
             width: width,
@@ -291,9 +312,8 @@ struct AndroidDeviceProvider: DeviceProvider {
         )
     }
 
-    private func displayDensity(serial: String) -> Int? {
-        guard let result = try? client.execute(["shell", "wm", "density"], serial: serial),
-            result.status == 0
+    private func displayDensity(serial: String, deadline: TimeInterval) -> Int? {
+        guard let result = query(["shell", "wm", "density"], serial: serial, deadline: deadline)
         else { return nil }
         return Self.parseDisplayDensity(result.text)
     }

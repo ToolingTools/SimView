@@ -32,6 +32,100 @@ record a passing real-device-set run here.
 | previous stable minor | — | arm64 | — | — | — | not tested |
 | second previous minor | — | arm64 | — | — | — | not tested |
 
+### 0.4.4 candidate lifecycle investigation
+
+The 8 September 2026 checks used Xcode 26.5 (17F42), macOS 26.6.2,
+arm64, and an iPhone 17 Pro Simulator on iOS 26.1.
+
+- The candidate release build passed 269 Bun tests and 76 Swift tests with
+  no failures; one opt-in Simulator test was skipped. The generated npm
+  package passed isolated npm and bunx smoke checks.
+- Earlier semantic-only navigation lost its native connection after about
+  5.5 minutes while the Simulator remained booted and MCP stayed responsive.
+  The native helper had exited, but its exit status was not captured.
+- A subsequent browser-attached baseline completed 15 minutes, 25 fresh
+  observations, and 12 navigation taps with both connections intact.
+- Terminating only SimView's temporary XCTest runner produced a usable native
+  AX fallback in both the baseline and patched candidate. A kernel process
+  monitor confirmed exit code zero when the baseline was intentionally closed.
+- An isolated subprocess reproduced SIGPIPE termination in the XCTest socket
+  writer. The candidate suppresses that signal per send and returns a write
+  error instead. A regression runs with default SIGPIPE handling so inherited
+  signal settings cannot hide the defect. This has not been established as
+  the cause of the earlier live exits. A later patched run was terminated by
+  SIGKILL (signal 9), confirmed by a kernel process-event monitor.
+- Restarting XCTest exceeded the tool's ten-second request deadline, then
+  completed successfully; a later fresh observation confirmed XCTest output.
+  This startup deadline mismatch remains a separate limitation.
+
+The patched browser-attached navigation run lost its backend after about six
+minutes; the Simulator remained booted and MCP remained responsive. The SIGKILL
+sender or OS reason is still unknown, so the release remains blocked. A
+read-only follow-up also ended with SIGKILL after ten successful observations.
+The kernel event had neither memory-exit nor code-signing-exit flags; sampled
+RSS peaked at about 570 MiB and returned near 300 MiB before termination. A
+temporary diagnostic build confirmed unlimited CPU limits inside the helper.
+An MKM
+crash report also coincided with the earlier deliberate runner-stop test; that
+fault injection is not evidence of an application-safe recovery path.
+
+These checks do not establish the cause of the native kills or complete
+all release gates. No new iOS 26.5 navigation acceptance was performed.
+
+### 0.4.4 preview reconnect regression
+
+The 9 September 2026 synthetic-motion check on the iOS 26.1 Simulator
+reproduced delivery falling to 2.4–2.8 fps after the last H.264 viewer left
+and rejoined. Native health counters showed capture itself slowing down;
+encoding continued to keep up. Surface-change callbacks were unregistering
+and recreating the display subscription, including forced captures during
+registration. The candidate now reads the existing descriptor's current
+surface without rebuilding its subscription.
+
+With this change, the same initial subscription and two reconnects delivered
+36.8, 37.6, and 37.8 fps. A second run of the checked-in smoke test delivered
+38.2, 37.8, and 38.2 fps. The Swift suite passed 76 tests (one opt-in test
+skipped), and TypeScript and targeted formatting checks passed. These are
+encoded delivery rates; distinct browser frames and end-to-end latency were not measured.
+The separate SIGKILL release blocker above remains unresolved.
+
+Run against a freshly built core and a dedicated Simulator displaying a
+continuously animated synthetic fixture:
+
+```sh
+SIMVIEW_DEVICE_ID=ios:<udid> SIMVIEW_BACKEND_MODE=ephemeral \
+  SIMVIEW_CORE_BINARY="$PWD/native/SimViewCore/.build/arm64-apple-macosx/release/simview-core" \
+  bun scripts/smoke-preview-reconnect.ts
+```
+
+The smoke check asserts at least 30 captured and delivered frames per second
+across five-second samples, before and after each reconnect. It retains no
+screen contents and keeps relay credentials private. Orientation and other
+Xcode/runtime combinations remain separate acceptance checks.
+
+### 0.4.4 device discovery isolation
+
+iOS and Android discovery run concurrently with independent four-second budgets.
+Android metadata commands share its budget and have a one-second per-command
+limit. An emulator listed by ADB that cannot answer metadata queries is retained
+with `state: unknown`, `available: false`, and `discoveryStatus: metadata-unavailable`.
+A failed platform does not discard devices returned by the other platform.
+
+On 9 September 2026, a stalled Android emulator's `shell getprop` caused the
+packaged MCP's ten-second device-list deadline to expire, blocking a ready iPhone.
+The patched native binary returned the iOS 26.5 iPhone and a healthy Android API 35
+emulator in 2.25 seconds while retaining the stalled emulator as unavailable.
+Regression tests cover either platform timing out, concurrent provider startup,
+the shared Android metadata budget, and bounded subprocess output handling.
+
+The subsequent MCP connection exposed a separate startup deadline mismatch:
+the client allowed ten seconds for XCTest activation, while the provider allowed
+thirty seconds. Activation now has a forty-second client deadline; the native
+accept and authentication phases share one thirty-second budget. With that fix,
+live MCP discovery took 1.92 seconds, connection reached `enhanced-ready` in
+12.59 seconds, H.264 preview packets arrived, and semantic observation returned
+55 nodes. This check used the iOS 26.5 Simulator and did not send device input.
+
 ### 0.4.3 lifecycle regression run
 
 The 7 September 2026 local run used Xcode 26.5 (17F42), macOS 26.6.2,

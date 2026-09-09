@@ -714,7 +714,10 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       var instance = candidates.find(function(candidate) {
         return candidate && (typeof candidate.getBoundingClientRect === 'function' || typeof candidate.measure === 'function');
       });
-      if (!instance) { measurementIncomplete = true; return; }
+      var fabric = globalThis.nativeFabricUIManager;
+      var shadowNode = stateNode && stateNode.node;
+      var canMeasureShadow = shadowNode && fabric && typeof fabric.getBoundingClientRect === 'function';
+      if (!instance && !canMeasureShadow) { measurementIncomplete = true; return; }
       measureJobs.push(new Promise(function(resolve) {
         var settled = false;
         var finish = function(rect) {
@@ -742,7 +745,11 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         var timer = setTimeout(function() { finish(null); }, 120);
         var done = function(rect) { clearTimeout(timer); finish(rect); };
         try {
-          if (typeof instance.getBoundingClientRect === 'function') {
+          if (!instance && canMeasureShadow) {
+            var bounds = fabric.getBoundingClientRect(shadowNode, true);
+            done(Array.isArray(bounds) && bounds.length === 4
+              ? { x: bounds[0], y: bounds[1], width: bounds[2], height: bounds[3] } : null);
+          } else if (typeof instance.getBoundingClientRect === 'function') {
             var rect = instance.getBoundingClientRect();
             if (rect && typeof rect.then === 'function') rect.then(done, function() { done(null); });
             else done(rect);
@@ -785,8 +792,7 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
         var fiber = queue.shift();
         if (!fiber) continue;
         visited++;
-        var props = fiber.memoizedProps || {};
-        if (nameOf(fiber) === 'SceneView' && inactiveScene(props.route)) continue;
+        if (nameOf(fiber) === 'SceneView' && inactiveScene(fiber)) continue;
         var entry = describe(fiber, rootIndex, rootEntries[rootIndex].renderer, order++);
         if (entry) entries.push(entry);
         var child = fiber.child;
@@ -974,10 +980,26 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       }
       return { route: route, path: path, routeKeys: routeKeys };
     }
-    function inactiveScene(route) {
+    function matchesRoute(left, right) {
+      if (!left || !right) return false;
+      if (typeof left.key === 'string' && typeof right.key === 'string') return left.key === right.key;
+      return typeof left.name === 'string' && left.name === right.name;
+    }
+    function inactiveScene(fiber) {
+      var route = fiber.memoizedProps && fiber.memoizedProps.route;
       if (!route || (!focus.routeKeys.length && !focus.path.length)) return false;
-      if (typeof route.key === 'string') return focus.routeKeys.indexOf(route.key) === -1;
-      return typeof route.name === 'string' && focus.path.indexOf(route.name) === -1;
+      var onFocusedPath = typeof route.key === 'string'
+        ? focus.routeKeys.indexOf(route.key) !== -1
+        : typeof route.name === 'string' && focus.path.indexOf(route.name) !== -1;
+      if (onFocusedPath) return false;
+      // Expo native tabs can publish the active tab without its nested stack
+      // state. Unknown descendants of that leaf are not evidence of inactivity.
+      var parent = fiber.return;
+      while (parent) {
+        if (nameOf(parent) === 'SceneView' && matchesRoute(parent.memoizedProps && parent.memoizedProps.route, focus.route)) return false;
+        parent = parent.return;
+      }
+      return true;
     }
     var match = null; var matchDepth = -1; var fallbackMatch = null; var fallbackDepth = -1;
     var fibers = rootEntries.map(function(entry) { return { fiber: entry.fiber, depth: 0 }; });
@@ -1034,15 +1056,15 @@ export function fiberInspectionExpression(width: number, height: number, maxNode
       var inferred = best(root, 0); if (inferred) {
         confidence = 'inferred';
         return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated, reasons: reasons(),
-          screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: inferred.node.component,
+          screen: { route: focus.route ? focus.route.name : undefined, navigationPath: focus.path, component: inferred.node.component,
             componentPath: inferred.node.componentPath, testID: inferred.node.testID, sourceLocation: inferred.node.sourceLocation, confidence: confidence } };
       }
     }
     var screenProps = screen && screen.memoizedProps || {};
     return { renderer: globalThis.nativeFabricUIManager ? 'fabric' : 'paper', root: root, nodeCount: outputNodeCount, truncated: truncated, reasons: reasons(),
-      screen: { route: focus.route && focus.route.name, navigationPath: focus.path, component: screen && nameOf(screen),
-        componentPath: screen && componentPath(screen), testID: typeof screenProps.testID === 'string' ? screenProps.testID : undefined,
-        sourceLocation: screen && sourceOf(screen), confidence: confidence } };
+      screen: { route: focus.route ? focus.route.name : undefined, navigationPath: focus.path, component: screen ? nameOf(screen) : undefined,
+        componentPath: screen ? componentPath(screen) : undefined, testID: typeof screenProps.testID === 'string' ? screenProps.testID : undefined,
+        sourceLocation: screen ? sourceOf(screen) : undefined, confidence: confidence } };
   })()`;
 }
 

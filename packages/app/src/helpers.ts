@@ -73,24 +73,6 @@ export function supportsDeviceButton(
   return device?.capabilities.input.buttons.includes(button) ?? false;
 }
 
-export class PreviewBridgeGate {
-  #priorityRequests = 0;
-
-  get priorityPending(): boolean {
-    return this.#priorityRequests > 0;
-  }
-
-  beginPriority(): () => void {
-    this.#priorityRequests += 1;
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      this.#priorityRequests = Math.max(0, this.#priorityRequests - 1);
-    };
-  }
-}
-
 export async function assembleElementTreePages(
   pages: readonly ElementTreePage[],
 ): Promise<ElementTreeOutput> {
@@ -515,10 +497,10 @@ export function commentableNodeAtPoint(
 ): AccessibilityNode | undefined {
   const matches: { node: AccessibilityNode; depth: number; area: number }[] = [];
   const visit = (node: AccessibilityNode, depth: number) => {
+    if (node.hidden) return;
     const frame = node.frame?.normalized;
     if (
       frame &&
-      !node.hidden &&
       frame.width > 0 &&
       frame.height > 0 &&
       point.x >= frame.x - slop.x &&

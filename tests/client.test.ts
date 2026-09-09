@@ -69,6 +69,39 @@ describe("SimViewClient", () => {
     );
   });
 
+  test("allows XCTest startup past the ordinary deadline while honoring explicit limits", async () => {
+    await withCore(
+      (request, respond) => {
+        if (request.method === "hello") return respond(request.id, helloResult());
+        if (request.method !== "accessibility.enableXCTestProvider") return;
+        const timer = setTimeout(
+          () =>
+            respond(request.id, {
+              schemaVersion: 1,
+              status: "enhanced-ready",
+              activeProvider: "core-simulator-xctest",
+            }),
+          11_000,
+        );
+        resources.push(() => clearTimeout(timer));
+      },
+      async ({ socketPath, token }) => {
+        const client = await SimViewClient.attach(socketPath, token);
+        resources.push(() => client.close());
+        await expect(
+          client.request("accessibility.enableXCTestProvider", { udid: "fixture" }),
+        ).resolves.toMatchObject({ status: "enhanced-ready" });
+        await expect(
+          client.request(
+            "accessibility.enableXCTestProvider",
+            { udid: "fixture" },
+            { timeoutMs: 20 },
+          ),
+        ).rejects.toThrow("accessibility.enableXCTestProvider timed out after 20ms");
+      },
+    );
+  }, 20_000);
+
   test.each([false, true])(
     "reaps discovery and its TERM-ignoring descendant (leader ignores TERM: %s)",
     async (ignoreLeaderTerm) => {

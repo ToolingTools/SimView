@@ -21,6 +21,7 @@ import {
   deviceListSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   ELEMENT_TREE_TRANSFER_MAX_BYTES,
+  ELEMENT_TREE_TRANSFER_TIMEOUT_MS,
   type ElementSearchMatch,
   type ElementTreeOutput,
   type ElementTreePage,
@@ -67,13 +68,14 @@ import {
   inputReceiptFromError,
   type NativeTapResolution,
   nativeTapRecovery,
+  nativeTargetFailureMessage,
   rejectedInputReceipt,
   SimViewSession,
   type WarmObservation,
 } from "./session";
 
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? SIMVIEW_VERSION;
-const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
+const ELEMENT_TREE_TRANSFER_TTL_MS = ELEMENT_TREE_TRANSFER_TIMEOUT_MS;
 const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 const BROWSER_FALLBACK_DELAY_MS = 5_000;
 const DEVICE_PAGE_LIMIT = 25;
@@ -826,6 +828,9 @@ function rejectedSemanticTap(
     safeToContinue: false,
     inputDispatched: false,
     code: resolution.code,
+    ...(resolution.failureReason
+      ? { failureReason: resolution.failureReason, message: nativeTargetFailureMessage(resolution) }
+      : {}),
     retryable: resolution.retryable,
     ...recovery,
     interaction: {
@@ -1696,7 +1701,7 @@ export function createServer(
     {
       title: "Perform actions",
       description:
-        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation. Semantic tap receipts contain compact node summaries for both iOS and Android, followed by the stable compact post-action tree exactly once; consume that embedded tree instead of immediately calling observe_screen. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a payment, invoice, order, or account flow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires one unique native identity and accepts up to four supporting assertions plus a 100-5000 ms timeout (maximum 5000); name falls back to non-redacted native text, and checked/selected/enabled can verify exposed control state. Assertions must be present but may match more than one node; an ambiguous identity hard-stops later actions. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. When inputDispatched is false, follow recoveryAllowed and recoveryAction using the bounded actionability, hit, and selector diagnostics. tap_known_coordinate permits one automatic raw tap only at coordinateFallback.point when the original user request authorized the action; no separate confirmation is needed, but observe immediately afterward and never repeat it. Never derive fallback coordinates from hit diagnostics. Disabled, ambiguous, or other unresolved targets require a new semantic resolution, independent UI change, or user direction.",
+        "Execute up to 20 ordered device actions, wait for post-action stability, and return one prepared observation. Semantic tap receipts contain compact node summaries for both iOS and Android, followed by the stable compact post-action tree exactly once; consume that embedded tree instead of immediately calling observe_screen. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a payment, invoice, order, or account flow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires one unique native identity and accepts up to four supporting assertions plus a 100-5000 ms timeout (maximum 5000); name falls back to non-redacted native text, and checked/selected/enabled can verify exposed control state. Assertions must be present but may match more than one node; an ambiguous identity hard-stops later actions. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. When inputDispatched is false, follow recoveryAllowed and recoveryAction using the bounded actionability, hit, and selector diagnostics. tap_known_coordinate permits one automatic raw tap only at coordinateFallback.point when the original user request authorized the action; no separate confirmation is needed, but observe immediately afterward and never repeat it. Never derive fallback coordinates from hit diagnostics. missing_action_semantics means native action metadata is insufficient; do not repeat searches or derive coordinate input for that target. Disabled, ambiguous, or other unresolved targets require a new semantic resolution, independent UI change, or user direction.",
       inputSchema: {
         actions: z.array(actionSchema).min(1).max(20),
         observe: z.enum(["auto", "semantic", "visual", "none"]).default("semantic"),
@@ -2118,7 +2123,10 @@ function registerAccessibilityTools(
       outputSchema: elementTreePageSchema,
       _meta: metadata.appOnly,
     },
-    async ({ action, source, scope, maxNodes, cursor }) => {
+    async ({ action, source, scope, maxNodes, cursor }, extra) => {
+      extra.mcpReq.signal.throwIfAborted();
+      const connectionGeneration = session.connectionGeneration;
+      const deviceId = session.device?.id;
       let pageIndex = 0;
       if (action === "continue") {
         if (!cursor || source || scope || maxNodes !== undefined) {
@@ -2143,6 +2151,13 @@ function registerAccessibilityTools(
           source === "accessibility"
             ? await session.accessibilityElementSnapshot(captureScope, nodeLimit)
             : await session.elementSnapshot(captureScope, nodeLimit);
+        extra.mcpReq.signal.throwIfAborted();
+        if (
+          connectionGeneration !== session.connectionGeneration ||
+          deviceId !== session.device?.id
+        ) {
+          throw new Error("Device changed during element tree transfer");
+        }
         const validated = elementTreeOutputSchema.parse(result);
         const bytes = Buffer.from(JSON.stringify(validated), "utf8");
         if (bytes.byteLength > ELEMENT_TREE_TRANSFER_MAX_BYTES) {
@@ -2216,7 +2231,7 @@ function registerAccessibilityTools(
             : resolution.code === "target_not_found" &&
                 resolution.selectorDiagnostics?.splitAcrossNodes
               ? "The selector fields matched different native nodes, but all fields must match one node. Use search_elements and pass the selected generation-scoped ref to tap_element; no tap was sent."
-              : "The semantic target was not confirmed natively; no tap was sent.";
+              : nativeTargetFailureMessage(resolution);
       return toolResult(message, rejectedSemanticTap(resolution, parsedSelector), true);
     }
     if (!session.device?.capabilities.input.touch) {
@@ -2439,7 +2454,7 @@ function registerAccessibilityTools(
     {
       title: "Tap element",
       description:
-        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through native device input; returned target/hit diagnostics are compact node summaries on both iOS and Android, followed by the stable compact post-action tree exactly once. Consume that embedded tree instead of immediately calling observe_screen. All supplied selector fields must match one node; target_not_found may report bounded selectorDiagnostics for split nodes, after which use search_elements and its generation-scoped ref. When inputDispatched is false, follow recoveryAllowed and recoveryAction using the bounded actionability, hit, and selector diagnostics. tap_known_coordinate permits one automatic raw tap only at coordinateFallback.point when the original user request authorized the action; no separate confirmation is needed, but observe immediately afterward and never repeat it. Never derive fallback coordinates from hit diagnostics. Disabled, ambiguous, or other unresolved targets require a new semantic resolution, independent UI change, or user direction. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a sensitive workflow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires a unique native identity, accepts up to four supporting assertions, and has a 100-5000 ms timeout (maximum 5000). Name matches label/title and falls back to non-redacted text values; checked/selected/enabled can verify exposed control state. Assertions such as amount/status must be present but may match multiple nodes. Prefer a stable identifier or complete entity label for identity, and use exact:false only for a known composite-label fragment.",
+        "Re-resolve one React Native or accessible element, validate it, and physically tap its visible center through native device input; returned target/hit diagnostics are compact node summaries on both iOS and Android, followed by the stable compact post-action tree exactly once. Consume that embedded tree instead of immediately calling observe_screen. All supplied selector fields must match one node; target_not_found may report bounded selectorDiagnostics for split nodes, after which use search_elements and its generation-scoped ref. When inputDispatched is false, follow recoveryAllowed and recoveryAction using the bounded actionability, hit, and selector diagnostics. tap_known_coordinate permits one automatic raw tap only at coordinateFallback.point when the original user request authorized the action; no separate confirmation is needed, but observe immediately afterward and never repeat it. Never derive fallback coordinates from hit diagnostics. missing_action_semantics means native action metadata is insufficient; do not repeat searches or derive coordinate input for that target. Disabled, ambiguous, or other unresolved targets require a new semantic resolution, independent UI change, or user direction. HARD STOP — INPUT WAS DISPATCHED and retryInput:false prohibit further device input until new user direction or an independent UI change. verifyDestination is optional and only proves a known, distinctive post-navigation destination; do not attach it to every tap in a sensitive workflow. Never copy the tapped control's label or use a generic section/action label such as Invoices, Orders, Card, or Pay as destination identity. For generic navigation, omit verifyDestination and rely on the stable semantic post-action observation. When used, verification requires a unique native identity, accepts up to four supporting assertions, and has a 100-5000 ms timeout (maximum 5000). Name matches label/title and falls back to non-redacted text values; checked/selected/enabled can verify exposed control state. Assertions such as amount/status must be present but may match multiple nodes. Prefer a stable identifier or complete entity label for identity, and use exact:false only for a known composite-label fragment.",
       inputSchema: tapElementInputSchema,
       outputSchema: genericObjectOutputSchema,
       _meta: metadata.modelOnly,

@@ -132,10 +132,10 @@ final class FrameCapture: @unchecked Sendable {
                 uuid: uuid,
                 callbackQueue: queue,
                 frameCallback: { [weak self] in self?.capture() },
-                surfacesChangedCallback: { [weak self] in
-                    guard let self else { return }
-                    try? self.wireFramebuffers()
-                },
+                // Surface replacement does not replace the display descriptor. Re-registering
+                // here can recursively trigger initial-surface notifications and discard the
+                // live frame subscription; read the descriptor's current surface instead.
+                surfacesChangedCallback: { [weak self] in self?.capture() },
                 propertiesChangedCallback: {}
             )
         }

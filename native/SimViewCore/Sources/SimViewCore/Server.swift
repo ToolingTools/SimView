@@ -185,11 +185,13 @@ final class SimViewServer: @unchecked Sendable {
     private var connections = Set<ClientConnection>()
     private var lastDisconnect = Date()
     private var hasAuthenticatedClient = false
+    private var deviceGeneration: UInt64 = 0
+    private var shuttingDown = false
     private var selectedDevice: DeviceDescription?
     private let capture = FrameCapture()
     private let hid = HIDInjector()
     private let accessibilityObservation = AccessibilityObservationCoordinator()
-    private let accessibility: AccessibilityService
+    private let accessibility: AccessibilityWorker
     private let probe = ProbeCoordinator()
     private let h264 = H264Encoder()
     private let metrics = Metrics()
@@ -264,7 +266,7 @@ final class SimViewServer: @unchecked Sendable {
         self.instanceID = instanceID
         self.parentPID = parentPID
         self.idleTimeout = idleTimeout
-        self.accessibility = AccessibilityService(observation: accessibilityObservation)
+        self.accessibility = AccessibilityWorker(observation: accessibilityObservation)
     }
 
     func run() throws -> Never {
@@ -280,6 +282,7 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     func receive(_ frame: WireFrame, from connection: ClientConnection) {
+        guard !shuttingDown else { return }
         guard frame.kind == .request else {
             sendError(
                 SimViewError("PROTOCOL_EXPECTED_REQUEST", "Clients may only send JSON request frames"),
@@ -651,83 +654,10 @@ final class SimViewServer: @unchecked Sendable {
                 Task { await h264.forceKeyframe() }
             }
             sendResult(["accepted": true], requestID: request.id, to: connection)
-        case "accessibility.snapshot":
-            let device = try selectDevice(request.deviceIdentifier)
-            let result = try accessibilitySnapshot(device, params: request.params)
-            sendResult(result, requestID: request.id, to: connection)
-        case "accessibility.observe":
-            let device = try selectDevice(request.deviceIdentifier)
-            let result = try accessibilityObserve(device, params: request.params)
-            sendResult(result, requestID: request.id, to: connection)
-        case "accessibility.elementAtPoint":
-            let device = try selectDevice(request.deviceIdentifier)
-            let result = try accessibilityElementAtPoint(device, params: request.params)
-            sendResult(result, requestID: request.id, to: connection)
-        case "accessibility.find":
-            let selector = try request.params.dictionary("selector")
-            let device = try selectDevice(request.deviceIdentifier)
-            let result: [String: Any]
-            if device.platform == .android {
-                result = try requireAndroidAccessibility().find(
-                    selector: selector.foundationDictionary,
-                    scope: request.params["scope"]?.stringValue ?? "visible"
-                )
-            } else {
-                result = try accessibility.find(
-                    udid: device.nativeIdentifier,
-                    selector: selector.foundationDictionary,
-                    scope: request.params["scope"]?.stringValue ?? "visible"
-                )
-            }
-            sendResult(result, requestID: request.id, to: connection)
-        case "accessibility.wait":
-            let device = try selectDevice(request.deviceIdentifier)
-            let selector = try request.params.dictionary("selector").foundationDictionary
-            let state = request.params["state"]?.stringValue ?? "visible"
-            let timeout = request.params["timeoutMs"]?.intValue ?? 5_000
-            let result =
-                device.platform == .android
-                ? try requireAndroidAccessibility().wait(selector: selector, state: state, timeoutMs: timeout)
-                : try accessibility.wait(
-                    udid: device.nativeIdentifier, selector: selector, state: state, timeoutMs: timeout)
-            sendResult(result, requestID: request.id, to: connection)
-        case "accessibility.providerStatus":
-            let device = try requireIOSDevice(request.deviceIdentifier)
-            sendResult(
-                accessibility.providerStatus(udid: device.nativeIdentifier),
-                requestID: request.id,
-                to: connection
-            )
-        case "accessibility.enableXCTestProvider":
-            let device = try requireIOSDevice(request.deviceIdentifier)
-            let detectedTarget = probe.target(udid: device.nativeIdentifier)["bundleId"] as? String
-            guard let bundleID = request.params["bundleId"]?.stringValue ?? detectedTarget else {
-                throw SimViewError(
-                    "ACCESSIBILITY_TARGET_UNAVAILABLE",
-                    "No foreground third-party application could be selected for XCTest accessibility"
-                )
-            }
-            sendResult(
-                try accessibility.enableXCTestProvider(
-                    udid: device.nativeIdentifier,
-                    bundleID: bundleID
-                ),
-                requestID: request.id,
-                to: connection
-            )
-        case "accessibility.disableXCTestProvider":
-            let device = try requireIOSDevice(request.deviceIdentifier)
-            sendResult(
-                accessibility.disableXCTestProvider(udid: device.nativeIdentifier),
-                requestID: request.id,
-                to: connection
-            )
-        case "device.context":
-            let device = try selectDevice(request.deviceIdentifier)
-            guard device.platform == .android else {
-                throw SimViewError("METHOD_UNSUPPORTED", "device.context is currently Android-only")
-            }
-            sendResult(try requireAndroidAccessibility().context(), requestID: request.id, to: connection)
+        case "accessibility.snapshot", "accessibility.observe", "accessibility.elementAtPoint",
+            "accessibility.find", "accessibility.wait", "accessibility.providerStatus",
+            "accessibility.enableXCTestProvider", "accessibility.disableXCTestProvider", "device.context":
+            try dispatchAccessibility(request, connection: connection)
         case "probe.status":
             sendResult(probe.status(), requestID: request.id, to: connection)
         case "probe.target":
@@ -1505,9 +1435,10 @@ final class SimViewServer: @unchecked Sendable {
             androidAgentRestartAttempts = 0
             androidInputWidth = 0
             androidInputHeight = 0
-            accessibility.stopObservation(udid: selectedDevice.nativeIdentifier)
+            accessibility.discardDevice(udid: selectedDevice.nativeIdentifier)
             accessibilityObservation.reset()
         }
+        deviceGeneration &+= 1
         selectedDevice = device
         return device
     }
@@ -1521,9 +1452,59 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func startIOSAccessibilityObservation(for device: DeviceDescription) {
-        accessibility.startObservation(udid: device.nativeIdentifier) { [weak self] in
-            self?.accessibilityObservation.markEvent()
+        accessibility.startObservation(for: device)
+    }
+
+    private func dispatchAccessibility(_ request: Request, connection: ClientConnection) throws {
+        let device = try selectDevice(request.deviceIdentifier)
+        if request.method == "device.context", device.platform != .android {
+            throw SimViewError("METHOD_UNSUPPORTED", "device.context is currently Android-only")
         }
+        if request.method == "accessibility.providerStatus"
+            || request.method == "accessibility.enableXCTestProvider"
+            || request.method == "accessibility.disableXCTestProvider"
+        {
+            guard device.platform == .ios else {
+                throw SimViewError("METHOD_UNSUPPORTED", "XCTest accessibility requires an iOS Simulator")
+            }
+        }
+        let android = device.platform == .android ? try requireAndroidAccessibility() : nil
+        let generation = deviceGeneration
+        accessibility.submit(
+            isCurrent: { [weak self] in
+                guard let self else { return false }
+                return self.queue.sync {
+                    guard !self.shuttingDown, self.connections.contains(connection) else { return false }
+                    guard self.deviceGeneration == generation else {
+                        self.sendError(
+                            SimViewError("DEVICE_MISMATCH", "Device changed before accessibility request"),
+                            requestID: request.id, to: connection)
+                        return false
+                    }
+                    return true
+                }
+            },
+            operation: { [accessibility] in
+                try accessibility.execute(request, device: device, android: android)
+            },
+            completion: { [weak self] result in
+                guard let self else { return }
+                self.queue.async {
+                    guard !self.shuttingDown, self.connections.contains(connection) else { return }
+                    guard self.deviceGeneration == generation else {
+                        self.sendError(
+                            SimViewError("DEVICE_MISMATCH", "Device changed during accessibility request"),
+                            requestID: request.id, to: connection)
+                        return
+                    }
+                    switch result {
+                    case .success(let value):
+                        self.sendResult(value.foundationObject, requestID: request.id, to: connection)
+                    case .failure(let error): self.sendError(error, requestID: request.id, to: connection)
+                    }
+                }
+            }
+        )
     }
 
     private func androidInputIfSelected() throws -> AndroidController? {
@@ -1562,96 +1543,6 @@ final class SimViewServer: @unchecked Sendable {
         )
         androidAccessibility = service
         return service
-    }
-
-    private func accessibilitySnapshot(
-        _ device: DeviceDescription, params: [String: JSONValue]
-    ) throws -> [String: Any] {
-        if device.platform == .android {
-            return try requireAndroidAccessibility().snapshot(
-                scope: params["scope"]?.stringValue ?? "interactive",
-                maxNodes: params["maxNodes"]?.intValue ?? 1_200
-            )
-        }
-        return try accessibility.snapshot(
-            udid: device.nativeIdentifier,
-            scope: params["scope"]?.stringValue ?? "interactive",
-            maxNodes: params["maxNodes"]?.intValue ?? 1_200
-        )
-    }
-
-    private func accessibilityObserve(
-        _ device: DeviceDescription, params: [String: JSONValue]
-    ) throws -> [String: Any] {
-        let scope = params["scope"]?.stringValue ?? "interactive"
-        let maxNodes = params["maxNodes"]?.intValue ?? 1_200
-        let quiet = params["settleQuietMs"]?.intValue ?? 75
-        let maximumWait = params["maxWaitMs"]?.intValue ?? 500
-        let afterRevision = params["afterRevision"]?.stringValue
-        let requireChange = params["requireChange"] != .bool(false)
-        if device.platform == .ios {
-            startIOSAccessibilityObservation(for: device)
-        }
-        let strategy =
-            device.platform == .android
-            ? try requireAndroidAccessibility().observationStrategy
-            : accessibility.observationStrategy
-        let result = try accessibilityObservation.observe(
-            afterRevision: afterRevision,
-            scope: scope,
-            maxNodes: maxNodes,
-            settleQuietMilliseconds: quiet,
-            maximumWaitMilliseconds: maximumWait,
-            requireChange: requireChange,
-            strategy: strategy
-        ) { [weak self] scope, maxNodes in
-            guard let self else {
-                throw SimViewError("ACCESSIBILITY_UNAVAILABLE", "SimView server is unavailable")
-            }
-            if device.platform == .android {
-                return try self.requireAndroidAccessibility().snapshot(
-                    scope: scope,
-                    maxNodes: maxNodes
-                )
-            }
-            return try self.accessibility.snapshot(
-                udid: device.nativeIdentifier,
-                scope: scope,
-                maxNodes: maxNodes
-            )
-        }
-        let formatter = ISO8601DateFormatter()
-        var value: [String: Any] = [
-            "snapshot": result.snapshot,
-            "revision": result.revision,
-            "eventChanged": result.eventChanged,
-            "stable": result.stable,
-            "timedOut": result.timedOut,
-            "strategy": result.strategy,
-            "settledAt": formatter.string(from: result.settledAt),
-            "fallbackUsed": result.fallbackUsed,
-            "captureCount": result.captureCount,
-            "changeSource": result.changeSource,
-        ]
-        if let firstChangedAt = result.firstChangedAt {
-            value["firstChangedAt"] = formatter.string(from: firstChangedAt)
-        }
-        return value
-    }
-
-    private func accessibilityElementAtPoint(
-        _ device: DeviceDescription, params: [String: JSONValue]
-    ) throws -> [String: Any] {
-        if device.platform == .android {
-            return try requireAndroidAccessibility().elementAtPoint(
-                x: params.double("x"), y: params.double("y")
-            )
-        }
-        return try accessibility.elementAtPoint(
-            udid: device.nativeIdentifier,
-            x: params.double("x"),
-            y: params.double("y")
-        )
     }
 
     private func deviceResponseDictionary(_ device: DeviceDescription) -> [String: Any] {
@@ -1736,6 +1627,7 @@ final class SimViewServer: @unchecked Sendable {
     }
 
     private func acceptConnection() {
+        guard !shuttingDown else { return }
         let fd = Darwin.accept(listenerFD, nil, nil)
         guard fd >= 0 else { return }
         let connection = ClientConnection(fd: fd, server: self)
@@ -1772,11 +1664,14 @@ final class SimViewServer: @unchecked Sendable {
         }
     }
 
-    private func shutdown(exitCode: Int32) -> Never {
+    private func shutdown(exitCode: Int32) {
+        guard !shuttingDown else { return }
+        shuttingDown = true
         DispatchQueue.global().asyncAfter(deadline: .now() + 5) { exit(1) }
         probe.close()
         stopCapture()
-        accessibility.shutdown()
+        // Finish server-owned socket cleanup before the worker can exit us.
+        accessibility.shutdown { [queue] in queue.async { exit(exitCode) } }
         listener?.cancel()
         timer?.cancel()
         for source in signalSources { source.cancel() }
@@ -1787,11 +1682,10 @@ final class SimViewServer: @unchecked Sendable {
         if parent.path.hasPrefix(FileManager.default.temporaryDirectory.path + "simview-") {
             try? FileManager.default.removeItem(at: parent)
         }
-        exit(exitCode)
     }
 }
 
-private extension Dictionary where Key == String, Value == JSONValue {
+extension Dictionary where Key == String, Value == JSONValue {
     func string(_ key: String) throws -> String {
         guard let value = self[key]?.stringValue else {
             throw SimViewError("PARAMETER_REQUIRED", "\(key) must be a string")

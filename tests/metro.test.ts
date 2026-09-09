@@ -7,6 +7,7 @@ import {
   type AccessibilitySnapshot,
   type DeviceDescription,
   parseDeviceDescription,
+  reactNativeScreenContextSchema,
 } from "@simview/contracts";
 import {
   fiberInspectionExpression,
@@ -472,6 +473,35 @@ describe("React Native Fiber projection", () => {
     expect(projectedHost?.frame?.points).toEqual({ x: 12, y: 24, width: 180, height: 60 });
   });
 
+  test.each(["valid", "throws", "malformed"])(
+    "measures Fabric text shadow nodes: %s",
+    async (mode) => {
+      const root = fiber("Root", {});
+      const host = fiber("Text", { children: "Message" });
+      host.type = "RCTText";
+      const shadowNode = {};
+      host.stateNode = { node: shadowNode, canonical: {} };
+      link(root, host);
+      const result = await inspectFiber(root, {
+        nativeFabricUIManager: {
+          getBoundingClientRect(node: unknown, includeTransform: boolean) {
+            expect(node).toBe(shadowNode);
+            expect(includeTransform).toBe(true);
+            if (mode === "throws") throw new Error("unsupported");
+            return mode === "valid" ? [12, 24, 180, 60] : [12, 24];
+          },
+        },
+      });
+      const projectedHost = result.root.children?.[0] as
+        | { frame?: { points?: unknown } }
+        | undefined;
+      expect(projectedHost?.frame?.points).toEqual(
+        mode === "valid" ? { x: 12, y: 24, width: 180, height: 60 } : undefined,
+      );
+      if (mode !== "valid") expect(result.reasons).toContain("host-measurement-incomplete");
+    },
+  );
+
   test("resolves nested navigation without serializing route params", async () => {
     const root = fiber("Root", {});
     const scene = fiber("SceneView", { route: { key: "detail-key", name: "Detail" } });
@@ -548,6 +578,32 @@ describe("React Native Fiber projection", () => {
     expect(serialized).toContain("toast-overlay");
     expect(serialized).not.toContain("settings-button");
     expect(result.screen).toMatchObject({ route: "Inbox", component: "InboxScreen" });
+  });
+
+  test("keeps a nested screen when Expo native-tab state ends at the active tab", async () => {
+    const root = fiber("BaseNavigationContainer", {});
+    root.memoizedState = {
+      memoizedState: { index: 0, routes: [{ key: "jobs-key", name: "jobs" }] },
+      next: null,
+    };
+    const active = fiber("SceneView", { route: { key: "jobs-key", name: "jobs" } });
+    const nested = fiber("SceneView", { route: { key: "index-key", name: "index" } });
+    const host = fiber("Text", { testID: "job-title" });
+    host.type = "RCTText";
+    host.stateNode = { getBoundingClientRect: () => ({ x: 10, y: 20, width: 100, height: 30 }) };
+    const inactive = fiber("SceneView", { route: { key: "messages-key", name: "messages" } });
+    const inactiveHost = fiber("View", { testID: "hidden-message" });
+    inactiveHost.type = "RCTView";
+    link(root, active);
+    active.sibling = inactive;
+    inactive.return = root;
+    link(active, nested);
+    link(nested, host);
+    link(inactive, inactiveHost);
+    const result = await inspectFiber(root, {});
+    expect(JSON.stringify(result)).toContain("job-title");
+    expect(JSON.stringify(result)).not.toContain("hidden-message");
+    expect(result.screen.navigationPath).toEqual(["jobs"]);
   });
 
   test("reads Expo Router state without bridge instrumentation", async () => {
@@ -779,7 +835,21 @@ describe("React Native Fiber projection", () => {
       route: "Invoices",
       confidence: "none",
     });
-    expect(result.screen.component).toBeNull();
+    expect(result.screen.component).toBeUndefined();
+    expect(result.screen.componentPath).toBeUndefined();
+    const serialized = JSON.parse(JSON.stringify(result.screen));
+    expect(
+      reactNativeScreenContextSchema.safeParse({
+        schemaVersion: 1,
+        kind: "react-native",
+        renderer: "fabric",
+        target: "fixture",
+        capturedAt: "2026-09-08T00:00:00Z",
+        frameId: "1",
+        ...serialized,
+        screenComponent: serialized.component,
+      }).success,
+    ).toBe(true);
   });
 });
 

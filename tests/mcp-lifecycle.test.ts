@@ -12,6 +12,9 @@ describe("MCP process lifecycle", () => {
     const exitCode = await Promise.race([child.exited, Bun.sleep(2_000).then(() => undefined)]);
     if (exitCode === undefined) child.kill();
     expect(exitCode).toBe(0);
+    const diagnostic = JSON.parse((await new Response(child.stderr).text()).trim());
+    expect(diagnostic.component).toBe("adapter");
+    expect(["stdin_end", "stdin_close"]).toContain(diagnostic.reason);
   });
 
   test("shuts down cleanly on termination signals", async () => {
@@ -21,14 +24,24 @@ describe("MCP process lifecycle", () => {
       stdout: "pipe",
       stderr: "pipe",
     });
-    // Cold Bun transpilation can exceed 250 ms on a loaded release builder.
-    // Give the entrypoint time to install its signal handlers before testing shutdown.
-    await Bun.sleep(750);
-    child.kill("SIGTERM");
-    const exitCode = await Promise.race([child.exited, Bun.sleep(2_000).then(() => undefined)]);
-    if (exitCode === undefined) child.kill(9);
-    expect(exitCode).toBe(0);
-  });
+    const reader = child.stdout.getReader();
+    const deadline = setTimeout(() => child.kill(9), 8_000);
+    try {
+      // Test shutdown after the server is ready, independently of cold startup.
+      child.stdin.write(
+        `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "signal-test", version: "1" } } })}\n`,
+      );
+      expect((await reader.read()).done).toBe(false);
+      child.kill("SIGTERM");
+      const exitCode = await Promise.race([child.exited, Bun.sleep(2_000).then(() => undefined)]);
+      expect(exitCode).toBe(0);
+    } finally {
+      clearTimeout(deadline);
+      reader.releaseLock();
+      if (child.exitCode === null) child.kill(9);
+      await child.exited;
+    }
+  }, 10_000);
 });
 
 test("disconnects when the host closes its output pipe", async () => {

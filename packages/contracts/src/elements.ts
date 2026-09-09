@@ -138,6 +138,8 @@ export const elementTreeOutputSchema = z.object({
     .optional(),
 });
 
+// Shared by the app deadline and the server's in-memory page expiry.
+export const ELEMENT_TREE_TRANSFER_TIMEOUT_MS = 30_000;
 export const ELEMENT_TREE_PAGE_RAW_BYTES = 48 * 1_024;
 export const ELEMENT_TREE_TRANSFER_MAX_BYTES = 4 * 1_024 * 1_024;
 export const ELEMENT_TREE_TRANSFER_MAX_PAGES = Math.ceil(

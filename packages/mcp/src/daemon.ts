@@ -23,6 +23,7 @@ import {
   SIMVIEW_VERSION,
 } from "@simview/contracts";
 import { z } from "zod";
+import { type DiagnosticReason, daemonDiagnostic } from "./diagnostics";
 import { createServer } from "./server";
 import { SimViewSession } from "./session";
 
@@ -43,6 +44,8 @@ export async function runMcpDaemon(): Promise<void> {
     version: SIMVIEW_VERSION,
   };
   const paths = mcpDaemonPaths(record.identity);
+  const diagnostic = (reason: DiagnosticReason, error?: unknown) =>
+    daemonDiagnostic(`${paths.record}.diagnostics.log`, reason, error);
   const sockets = new Set<Socket>();
   const connections = new Map<Socket, { owners: ProcessOwner[]; close: () => Promise<void> }>();
   const closing = new Set<Promise<void>>();
@@ -59,12 +62,16 @@ export async function runMcpDaemon(): Promise<void> {
       ),
     ).size,
   });
-  const shutdown = () => {
+  const shutdown = (reason: DiagnosticReason, error?: unknown) => {
     if (draining) return;
     draining = true;
+    diagnostic(reason, error);
     clearTimeout(startupTimeout);
     server.close();
-    const deadline = setTimeout(() => process.exit(1), MCP_SHUTDOWN_TIMEOUT_MS);
+    const deadline = setTimeout(() => {
+      diagnostic("shutdown_timeout");
+      process.exit(1);
+    }, MCP_SHUTDOWN_TIMEOUT_MS);
     for (const socket of sockets) socket.destroy();
     void (async () => {
       await Promise.allSettled([...connections.values()].map((entry) => entry.close()));
@@ -80,7 +87,10 @@ export async function runMcpDaemon(): Promise<void> {
       return;
     }
     sockets.add(socket);
-    socket.on("error", () => socket.destroy());
+    socket.on("error", (error) => {
+      diagnostic("socket_error", error);
+      socket.destroy();
+    });
     socket.once("close", () => sockets.delete(socket));
     void (async () => {
       const hello = mcpDaemonHelloSchema.parse(await readHandshake(socket));
@@ -109,12 +119,13 @@ export async function runMcpDaemon(): Promise<void> {
         draining
       )
         throw new Error("MCP owner is no longer connected");
-      const session = new SimViewSession(hello.context);
+      const session = new SimViewSession(hello.context, { onDiagnostic: diagnostic });
       let handle: ReturnType<typeof serveStdio> | undefined;
       let closePromise: Promise<void> | undefined;
       let unwatch = () => {};
-      const close = (): Promise<void> => {
+      const close = (reason: DiagnosticReason = "socket_close", error?: unknown): Promise<void> => {
         if (closePromise) return closePromise;
+        diagnostic(reason, error);
         unwatch();
         connections.delete(socket);
         socket.destroy();
@@ -123,15 +134,17 @@ export async function runMcpDaemon(): Promise<void> {
         });
         closing.add(closePromise);
         void closePromise.finally(() => closing.delete(closePromise as Promise<void>));
-        if (served && connections.size === 0) shutdown();
+        if (served && connections.size === 0) shutdown("last_connection_closed");
         return closePromise;
       };
       connections.set(socket, { owners: hello.owners, close });
       served = true;
       clearTimeout(startupTimeout);
       socket.once("close", () => void close());
-      socket.once("end", () => void close());
-      unwatch = watchProcessOwners(hello.owners, () => void close());
+      socket.once("end", () => void close("socket_end"));
+      unwatch = watchProcessOwners(hello.owners, (reason) => void close(reason), {
+        onDiagnostic: diagnostic,
+      });
       socket.write(`${JSON.stringify(status())}\n`);
       handle = serveStdio(
         () => {
@@ -144,19 +157,25 @@ export async function runMcpDaemon(): Promise<void> {
           const originalClose = mcp.server.onclose;
           mcp.server.onclose = () => {
             originalClose?.();
-            void close();
+            void close("protocol_close");
           };
           return mcp;
         },
-        { transport: new StdioServerTransport(socket, socket), onerror: () => void close() },
+        {
+          transport: new StdioServerTransport(socket, socket),
+          onerror: (error) => void close("protocol_error", error),
+        },
       );
       socket.resume();
-    })().catch(() => socket.destroy());
+    })().catch((error) => {
+      diagnostic("handshake_rejected", error);
+      socket.destroy();
+    });
   });
-  const startupTimeout = setTimeout(shutdown, MCP_STARTUP_TIMEOUT_MS);
-  process.once("SIGINT", shutdown);
-  process.once("SIGTERM", shutdown);
-  server.on("error", shutdown);
+  const startupTimeout = setTimeout(() => shutdown("startup_timeout"), MCP_STARTUP_TIMEOUT_MS);
+  process.once("SIGINT", () => shutdown("sigint"));
+  process.once("SIGTERM", () => shutdown("sigterm"));
+  server.on("error", (error) => shutdown("server_error", error));
   // Publish identity before binding so a crash cannot leave an unowned socket.
   await publishMcpRecord(record);
   await new Promise<void>((resolve, reject) => {

@@ -5,6 +5,28 @@ MCPB configurations. It is a stdio adapter. Adapters from compatible builds join
 one authenticated local MCP daemon; each retains its own review and project.
 The daemon is on demand, with no login item or background service to install.
 
+## Video pauses and element-tree recovery
+
+Annotation mode and an open Inspector intentionally freeze that viewer's frame.
+Return to Interact and close Inspector to resume live video. Finishing or failing
+a tree transfer does not release this pause. Other reviews and background
+accessibility reads must not stall a viewer that is interacting normally.
+
+If no app was open when XCTest startup ran, open the app and reconnect or press
+Refresh elements. An explicit tree load checks provider status and retries startup
+once; background enrichment does not restart it. If you explicitly disabled
+XCTest for the review, use `enable_ios_accessibility` to enable it again. Startup
+has a separate allowance from the 30-second tree transfer deadline. A timeout
+retains the previous tree and offers refresh; partial/truncated trees remain
+labelled as such rather than being presented as complete. A spinner beside Elements
+indicates loading; the search field stays fixed in height and the last successful
+tree remains available. Failed explicit loads offer a Retry button.
+
+React Native text without a public host instance uses feature-detected Fabric
+shadow-node bounds. Nested screens remain visible when Expo Router's root state
+only identifies the active native tab. Explicitly hidden subtrees are excluded
+from both the tree and canvas hover selection.
+
 ## Understanding process counts
 
 While connected, expect one adapter per host connection, one MCP daemon per
@@ -62,3 +84,56 @@ Set that variable in a host's MCP configuration when the host launches SimView
 from a plugin/cache directory instead of the React Native project. Another
 host's project settings cannot replace this review's settings. Metro inspection
 is optional; native inspection remains available without a matching Metro target.
+
+## MCP transport closes unexpectedly
+
+The process-owner watchdog keeps an established connection alive when `ps`
+cannot inspect its owners. It retries on the next tick, closing only when a
+successful snapshot confirms owner exit or PID reuse, or a signal-zero probe
+reports `ESRCH`. Permission failures are inconclusive. EOF, closed sockets, and
+termination signals still clean up immediately; device actions are never replayed.
+
+Adapter stderr reports fixed shutdown reason codes and error categories. The MCP
+daemon retains `<build-identity>.json.diagnostics.log` in its private MCP registry
+(`sv-mcp/<uid>` under the OS user temporary directory). Each file is mode 0600 and
+limited to 64 KiB; it resets when full and survives daemon shutdown. These files
+contain timestamps, component names, fixed reason codes, and error categories,
+never raw errors, tokens, environment values, or device contents. Inspection
+failure and recovery are logged once per transition. Look for
+`owner_inspection_failed`, `owner_inspection_recovered`, `owner_exited`,
+`owner_identity_changed`, or transport/termination reasons around the failure.
+Only share the diagnostic log, never the adjacent registry JSON containing tokens.
+
+### Native target failures and disconnected devices
+
+`native_target_unconfirmed` includes `failureReason`: `missing_action_semantics`,
+`invalid_geometry`, or `native_corroboration_failed`. These rejections send no input.
+A visible, enabled `AXUnknown` node may be discoverable without exposing native
+activation semantics. For `missing_action_semantics`, repeated searches cannot
+repair that metadata; do not infer tappability from a label, test ID, React Native
+press handler, or screen coordinates. The app or accessibility provider must
+supply reliable native action evidence. Other failures retain their specific
+search, observation, scroll, or bounded hit-test recovery guidance.
+
+MCP availability does not prove the native device connection is alive.
+`get_simview_state.connected` reports native connectivity. The optional
+`lastNativeDisconnect` records the most recent loss with a sanitised reason and
+timestamp, retained as history after reconnecting. Native disconnect diagnostic
+reasons have a `native_` prefix, distinct from MCP adapter/daemon shutdown events.
+`connection_closed` means the native socket closed; it does not establish why the
+backend closed it. `unknown` means the cause is not yet classified.
+Call `connect_device`, then obtain a fresh `observe_screen` before continuing.
+Never replay input that may already have been dispatched, and never reuse refs
+from before the disconnect. Diagnostic logs contain no Simulator UI content.
+
+For an unknown-role XCTest target, SimView can consult a fresh native point hit.
+If native observation exposes such a candidate, obtain its ref with
+`find_elements` or `search_elements(actionableOnly: false)` and let `tap_element`
+verify it; discovery alone does not establish tappability.
+It accepts activation only when that hit exposes `AXPress`, agrees with the
+unique target's identifier/name and other identity fields, and matches its frame
+within one screen point. Scrolling actions alone do not qualify. Successful
+receipts preserve the original XCTest role and report `actionabilityEvidence`
+with `source: native-point-hit`; hit diagnostics retain the native action list.
+A missing XCTest point does not disable a healthy XCTest provider. Foreground
+changes fail closed. The agent must not reproduce this check with guessed input.
