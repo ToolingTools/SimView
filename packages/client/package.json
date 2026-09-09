@@ -8,7 +8,7 @@
   "dependencies": {
     "@simview/contracts": "workspace:*",
     "@simview/core": "workspace:*",
-    "zod": "4.4.3"
+    "zod": "4.5.4"
   },
   "scripts": {
     "build": "bun build src/index.ts --target=bun --outdir=dist",
