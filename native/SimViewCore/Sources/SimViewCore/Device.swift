@@ -94,27 +94,35 @@ protocol DeviceProvider {
     func devices() throws -> [DeviceDescription]
 }
 
+private final class DeviceDiscoveryResult: @unchecked Sendable {
+    private let lock = NSLock()
+    private var result: Result<[DeviceDescription], Error> = .success([])
+
+    func set(_ value: Result<[DeviceDescription], Error>) {
+        lock.withLock { result = value }
+    }
+
+    func get() -> Result<[DeviceDescription], Error> {
+        lock.withLock { result }
+    }
+}
+
 enum DeviceRuntime {
-    static func devices() throws -> [DeviceDescription] {
-        var result: [DeviceDescription] = []
-        var iosFailure: Error?
-        var androidFailure: Error?
-        var iosSucceeded = false
-        var androidSucceeded = false
-        do {
-            result.append(contentsOf: try IOSDeviceProvider().devices())
-            iosSucceeded = true
-        } catch {
-            iosFailure = error
+    static func devices(
+        ios: @escaping @Sendable () throws -> [DeviceDescription] = { try IOSDeviceProvider().devices() },
+        android: @escaping @Sendable () throws -> [DeviceDescription] = { try AndroidDeviceProvider().devices() }
+    ) throws -> [DeviceDescription] {
+        // Each provider has its own bounded discovery budget. Run them together
+        // so a stalled platform cannot consume the other platform's time.
+        let providers = [ios, android]
+        let results = providers.map { _ in DeviceDiscoveryResult() }
+        DispatchQueue.concurrentPerform(iterations: providers.count) { index in
+            results[index].set(Result { try providers[index]() })
         }
-        do {
-            result.append(contentsOf: try AndroidDeviceProvider().devices())
-            androidSucceeded = true
-        } catch {
-            androidFailure = error
-        }
-        if !iosSucceeded, !androidSucceeded, let failure = iosFailure ?? androidFailure { throw failure }
-        return result
+        let outcomes = results.map { $0.get() }
+        let successes = outcomes.compactMap { try? $0.get() }
+        if successes.isEmpty { return try outcomes[0].get() }
+        return successes.flatMap { $0 }
     }
 
     static func select(requested: String?, configured: String?) throws -> DeviceDescription {

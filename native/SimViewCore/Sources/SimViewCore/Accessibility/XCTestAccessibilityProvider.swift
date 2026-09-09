@@ -158,12 +158,17 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
         do {
             try process.run()
             processStarted = true
+            let startupDeadline = ProcessInfo.processInfo.systemUptime + startupTimeout
             let connection = try listener.accept(timeout: startupTimeout)
             var transferredConnection = false
             defer {
                 if !transferredConnection { Darwin.close(connection) }
             }
-            let hello = try XCTestProviderMessageCodec.read(from: connection, timeout: startupTimeout)
+            let remaining = startupDeadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else {
+                throw providerError("XCTEST_PROVIDER_TIMEOUT", "XCTest provider startup exceeded its deadline")
+            }
+            let hello = try XCTestProviderMessageCodec.read(from: connection, timeout: remaining)
             guard
                 hello["type"] as? String == "hello",
                 (hello["protocolVersion"] as? NSNumber)?.intValue == xctestProviderProtocolVersion,

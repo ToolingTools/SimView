@@ -60,15 +60,37 @@ struct ProcessResult {
     let error: String
 }
 
+private func stopCommand(_ process: Process) {
+    if process.isRunning {
+        process.terminate()
+        let grace = ProcessInfo.processInfo.systemUptime + 0.25
+        while process.isRunning, ProcessInfo.processInfo.systemUptime < grace {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        if process.isRunning {
+            kill(process.processIdentifier, SIGKILL)
+            let reapDeadline = ProcessInfo.processInfo.systemUptime + 0.25
+            while process.isRunning, ProcessInfo.processInfo.systemUptime < reapDeadline {
+                Thread.sleep(forTimeInterval: 0.01)
+            }
+        }
+    }
+    // Do not turn a command deadline into an unbounded wait on a child that
+    // has not exited after receiving SIGKILL.
+    if !process.isRunning { process.waitUntilExit() }
+}
+
 @discardableResult
 func run(
     _ executable: String,
     _ arguments: [String],
     input: Data? = nil,
-    environment: [String: String]? = nil
+    environment: [String: String]? = nil,
+    timeout: TimeInterval? = nil
 ) -> ProcessResult {
     let process = Process()
     let output = Pipe()
+    defer { try? output.fileHandleForReading.close() }
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
     if let environment {
@@ -89,7 +111,31 @@ func run(
     }
     // Drain while the process is running. `simctl list --json` can exceed a
     // pipe buffer on machines with many runtimes, so waiting first deadlocks.
-    let data = output.fileHandleForReading.readDataToEndOfFile()
+    let data: Data
+    if let timeout {
+        let descriptor = output.fileHandleForReading.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) == 0 else {
+            stopCommand(process)
+            return ProcessResult(status: -1, output: "", error: "Unable to read command output")
+        }
+        let deadline = ProcessInfo.processInfo.systemUptime + max(0.1, timeout)
+        var collected = Data()
+        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            let count = Darwin.read(descriptor, &buffer, buffer.count)
+            if count > 0 { collected.append(contentsOf: buffer.prefix(count)) }
+            if count == 0 && !process.isRunning { break }
+            if ProcessInfo.processInfo.systemUptime >= deadline {
+                stopCommand(process)
+                return ProcessResult(status: 124, output: "", error: "Command exceeded its deadline")
+            }
+            if count <= 0 { Thread.sleep(forTimeInterval: 0.01) }
+        }
+        data = collected
+    } else {
+        data = output.fileHandleForReading.readDataToEndOfFile()
+    }
     process.waitUntilExit()
     let text = String(data: data, encoding: .utf8) ?? ""
     return ProcessResult(

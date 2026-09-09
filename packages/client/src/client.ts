@@ -428,11 +428,12 @@ export class SimViewClient {
     };
     const payload = new TextEncoder().encode(JSON.stringify(request));
     const promise = new Promise<ResultFor<M>>((resolve, reject) => {
-      // Emulator console rotation is asynchronous and may require up to three
-      // clockwise transitions. Keep the ordinary protocol deadline tight while
-      // allowing this explicitly slow device operation to finish honestly.
-      const timeoutMs =
-        options.timeoutMs ?? (method === "device.orientation.set" ? 30_000 : 10_000);
+      // XCTest startup has a thirty-second native budget plus cleanup. Ordinary
+      // requests must not time it out and queue a fallback behind the same startup.
+      let defaultTimeoutMs = 10_000;
+      if (method === "device.orientation.set") defaultTimeoutMs = 30_000;
+      if (method === "accessibility.enableXCTestProvider") defaultTimeoutMs = 40_000;
+      const timeoutMs = options.timeoutMs ?? defaultTimeoutMs;
       const timeout = setTimeout(() => {
         this.#pending.delete(id);
         options.signal?.removeEventListener("abort", abort);

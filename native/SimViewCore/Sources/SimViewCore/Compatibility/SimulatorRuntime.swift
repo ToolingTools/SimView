@@ -14,7 +14,7 @@ struct SimulatorDevice {
 
 enum SimulatorRuntime {
     static func devices() throws -> [SimulatorDevice] {
-        let result = run("/usr/bin/xcrun", ["simctl", "list", "devices", "--json"])
+        let result = run("/usr/bin/xcrun", ["simctl", "list", "devices", "--json"], timeout: 4)
         guard result.status == 0 else {
             throw SimViewError(
                 "SIMULATOR_SERVICE_UNAVAILABLE",
