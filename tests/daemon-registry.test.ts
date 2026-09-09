@@ -281,7 +281,16 @@ async function abandonedStartup(contents: string) {
   await client.close();
   await stopDaemons(SimViewClient, { udid: options.udid }).catch(() => {});
   await waitForDaemonExit(options.udid);
-  await pruneDaemons(options.udid);
+  // A closed socket can disappear from status before its process exits. Wait
+  // until pruning removes the old record, or acquire may reclaim our new lock
+  // together with that record instead of exercising stale-lock ownership.
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    await pruneDaemons(options.udid);
+    if (!(await Bun.file(join(directory, "record.json")).exists())) break;
+    if (Date.now() >= deadline) throw new Error("Fake backend record was not pruned");
+    await Bun.sleep(20);
+  }
   await mkdir(directory, { recursive: true, mode: 0o700 });
   const lock = join(directory, "startup.lock");
   await writeFile(lock, contents, { mode: 0o600 });
