@@ -7,6 +7,7 @@ import {
   type ElementSnapshot as ContractElementSnapshot,
   type DeviceDescription,
   deviceListSchema,
+  ELEMENT_TREE_TRANSFER_TIMEOUT_MS,
   type ElementFallbackReason,
   type ElementTreePage,
   elementTreeOutputSchema,
@@ -24,7 +25,7 @@ import {
   uiContextSchema,
 } from "@simview/contracts";
 import { type ComponentChildren, render } from "preact";
-import { useEffect, useMemo, useRef, useState } from "preact/hooks";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "preact/hooks";
 import {
   annotationCropRect,
   annotationMessageContent,
@@ -44,7 +45,6 @@ import {
   formatFrame,
   formatProbeValue,
   inspectorTreeRows,
-  PreviewBridgeGate,
   parseSessionState,
   preferredInlineHeight,
   requireAnnotation,
@@ -168,6 +168,9 @@ function SimView() {
   const [probeEnabling, setProbeEnabling] = useState(false);
   const [probeError, setProbeError] = useState("");
   const [elementsOpen, setElementsOpen] = useState(false);
+  const previewPaused = mode === "annotate" || elementsOpen;
+  const [elementTreeLoading, setElementTreeLoading] = useState(false);
+  const [elementTreeError, setElementTreeError] = useState("");
   const [infoOpen, setInfoOpen] = useState(true);
   const [infoHeight, setInfoHeight] = useState(190);
   const [sceneOpen, setSceneOpen] = useState(true);
@@ -230,7 +233,6 @@ function SimView() {
   const bridgeConnectedRef = useRef(false);
   const connectedForFullscreenRef = useRef(Boolean(initialState?.connected));
   const fullscreenRequestGateRef = useRef({ claimed: false });
-  const previewBridgeGateRef = useRef(new PreviewBridgeGate());
 
   const token = useMemo(() => {
     const match = location.href.match(/[#&]token=([^&]+)/);
@@ -402,7 +404,7 @@ function SimView() {
   }, [elementsOpen, elementFallback, accessibility?.source, state.device?.id]);
 
   useEffect(() => {
-    if (embedded || !state.relayOrigin || !token) return;
+    if (embedded || !state.relayOrigin || !token || previewPaused) return;
     const url = `${state.relayOrigin.replace(/^http/, "ws")}/stream?codec=${streamCodec}`;
     const socket = new WebSocket(url);
     socket.binaryType = "arraybuffer";
@@ -422,19 +424,16 @@ function SimView() {
         videoPaintRequestRef.current = undefined;
       }
     };
-  }, [embedded, state.relayOrigin, token, streamCodec]);
+  }, [embedded, state.relayOrigin, token, streamCodec, previewPaused]);
 
   useEffect(() => {
-    if (!embedded || !state.connected || mode !== "interact") return;
+    if (!embedded || !state.connected || previewPaused) return;
     let stopped = false;
     let afterSequence: number | undefined;
     let reportedError = false;
     const controller = new AbortController();
     const pump = async () => {
       while (!stopped) {
-        while (!stopped && previewBridgeGateRef.current.priorityPending) {
-          await pause(16);
-        }
         if (stopped) return;
         try {
           const result = await bridge.callServerTool(
@@ -494,7 +493,7 @@ function SimView() {
         videoPaintRequestRef.current = undefined;
       }
     };
-  }, [embedded, state.connected, state.device?.id, mode]);
+  }, [embedded, state.connected, state.device?.id, previewPaused]);
 
   async function loadBrowserState() {
     const hashToken = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
@@ -641,6 +640,7 @@ function SimView() {
             return sessionStateSchema.parse(await response.json());
           });
       frozenRef.current = false;
+      setElementsOpen(false);
       latestFrameIdRef.current = nextState.frameId;
       previewReadyRef.current = false;
       setFrozenFrameId(undefined);
@@ -658,7 +658,7 @@ function SimView() {
       setState(nextState);
       setStartupPhase("waiting-for-frame");
       setDeviceMenuOpen(false);
-      if (elementsOpen) void loadAccessibility(true);
+
       show(`Switched to ${nextState.device?.name ?? device.name}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -917,6 +917,12 @@ function SimView() {
       screenRef.current?.setPointerCapture(event.pointerId);
       return;
     }
+    if (elementsOpen) {
+      setSelectedElement(
+        accessibility ? commentableNodeAtPoint(accessibility.root, point, hoverSlop()) : undefined,
+      );
+      return;
+    }
     activePointer.current = event.pointerId;
     screenRef.current?.setPointerCapture(event.pointerId);
     if (state.device?.capabilities.input.rawTouch === false) {
@@ -937,8 +943,8 @@ function SimView() {
 
   function onPointerMove(event: PointerEvent) {
     const point = coordinate(event);
-    if (mode === "annotate") {
-      const drag = annotationDragRef.current;
+    if (mode === "annotate" || elementsOpen) {
+      const drag = mode === "annotate" ? annotationDragRef.current : undefined;
       if (drag?.pointerId === event.pointerId) {
         const movedX = Math.abs(event.clientX - drag.startClientX);
         const movedY = Math.abs(event.clientY - drag.startClientY);
@@ -1355,7 +1361,8 @@ function SimView() {
   );
   pendingAnnotationsRef.current = unsentAnnotations;
 
-  function enterAnnotateMode() {
+  function freezePreview() {
+    if (frozenRef.current) return;
     frozenRef.current = true;
     const frameId = latestFrameIdRef.current ?? state.frameId ?? "current";
     setFrozenFrameId(frameId);
@@ -1364,6 +1371,19 @@ function SimView() {
         ? { ...screenContext, frameId }
         : createNativeScreenContext({ ...state, frameId }, uiContext, visibleAnnotations),
     );
+  }
+
+  useLayoutEffect(() => {
+    if (previewPaused) freezePreview();
+    else {
+      frozenRef.current = false;
+      setFrozenFrameId(undefined);
+      setFrozenScreenContext(undefined);
+    }
+  }, [previewPaused]);
+
+  function enterAnnotateMode() {
+    freezePreview();
     setMode("annotate");
     setEditor(undefined);
     void loadAccessibility();
@@ -1379,9 +1399,6 @@ function SimView() {
   }
 
   function completeEnterInteractMode() {
-    frozenRef.current = false;
-    setFrozenFrameId(undefined);
-    setFrozenScreenContext(undefined);
     setMode("interact");
     setEditor(undefined);
     setSelectedElement(undefined);
@@ -1432,22 +1449,70 @@ function SimView() {
   }
 
   async function loadAccessibility(quiet = false) {
-    if (accessibilityRequestPending.current) return undefined;
+    if (accessibilityRequestPending.current && quiet) return undefined;
+    elementTreeAbortRef.current?.abort();
     accessibilityRequestPending.current = true;
+    setElementTreeLoading(true);
+    setElementTreeError("");
     const controller = new AbortController();
     elementTreeAbortRef.current = controller;
-    const timeout = window.setTimeout(
-      () => controller.abort(new DOMException("Element tree transfer timed out", "TimeoutError")),
-      15_000,
-    );
-    const releasePreviewBridge = embedded
-      ? previewBridgeGateRef.current.beginPriority()
-      : undefined;
+    let timeout: number | undefined;
     try {
+      if (!quiet && state.device?.platform === "ios") {
+        // Provider startup has its own 40s native request allowance. Status
+        // discovery can take another 10s; neither consumes the tree budget.
+        timeout = window.setTimeout(
+          () =>
+            controller.abort(new DOMException("Accessibility recovery timed out", "TimeoutError")),
+          50_000,
+        );
+        const recovered = embedded
+          ? await bridge
+              .callServerTool(
+                { name: "app_connect_device", arguments: { deviceId: state.device.id } },
+                { signal: controller.signal },
+              )
+              .then((result) => {
+                if (result.isError) throw new Error(toolResultError(result.content));
+                return sessionStateSchema.parse(result.structuredContent);
+              })
+          : await relayFetch("/device", {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ deviceId: state.device.id }),
+              signal: controller.signal,
+            }).then(async (response) => {
+              if (!response.ok) throw new Error(await response.text());
+              return sessionStateSchema.parse(await response.json());
+            });
+        throwIfAborted(controller.signal);
+        setState((current) => ({
+          ...current,
+          connected: recovered.connected,
+          iosAccessibility: recovered.iosAccessibility,
+          lastNativeDisconnect: recovered.lastNativeDisconnect,
+        }));
+        if (recovered.connected) {
+          connectedForFullscreenRef.current = true;
+          if (embedded) bridgeConnectedRef.current = true;
+          setStartupError("");
+          setStartupPhase((current) => {
+            if (current !== "disconnected" && current !== "error") return current;
+            return previewReadyRef.current ? "ready" : "waiting-for-frame";
+          });
+        }
+        window.clearTimeout(timeout);
+      }
+      timeout = window.setTimeout(
+        () => controller.abort(new DOMException("Element tree transfer timed out", "TimeoutError")),
+        ELEMENT_TREE_TRANSFER_TIMEOUT_MS,
+      );
       try {
         const result = embedded
           ? await loadPagedElementTree("elements", controller.signal)
-          : await relayFetch("/elements?scope=full&maxNodes=1200").then(async (response) => {
+          : await relayFetch("/elements?scope=full&maxNodes=1200", {
+              signal: controller.signal,
+            }).then(async (response) => {
               if (!response.ok) throw new Error(`Element request failed (${response.status})`);
               return elementTreeOutputSchema.parse(await response.json());
             });
@@ -1467,16 +1532,18 @@ function SimView() {
         return fallback.snapshot;
       }
     } catch (error) {
-      if (!isAbortError(error) && !quiet) {
-        show(`Element tree unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      if (elementTreeAbortRef.current === controller && !quiet && !isAbortError(error)) {
+        const message = `Element tree unavailable: ${error instanceof Error ? error.message : String(error)}`;
+        setElementTreeError(message);
+        if (!quiet) show(message);
       }
       return undefined;
     } finally {
       window.clearTimeout(timeout);
-      releasePreviewBridge?.();
       if (elementTreeAbortRef.current === controller) {
         elementTreeAbortRef.current = undefined;
         accessibilityRequestPending.current = false;
+        setElementTreeLoading(false);
       }
     }
   }
@@ -1659,18 +1726,7 @@ function SimView() {
       x: frame.x + frame.width / 2,
       y: frame.y + frame.height / 2,
     };
-    frozenRef.current = true;
-    const currentFrameId = latestFrameIdRef.current ?? state.frameId ?? "current";
-    setFrozenFrameId(currentFrameId);
-    setFrozenScreenContext(
-      screenContext
-        ? { ...screenContext, frameId: currentFrameId }
-        : createNativeScreenContext(
-            { ...state, frameId: currentFrameId },
-            uiContext,
-            visibleAnnotations,
-          ),
-    );
+    freezePreview();
     if (activateMode) setMode("annotate");
     setElementsOpen(true);
     setSelectedElement(node);
@@ -1679,7 +1735,7 @@ function SimView() {
       point,
       geometry: point,
       note: "",
-      frameId: frozenFrameId ?? currentFrameId,
+      frameId: frozenFrameId ?? latestFrameIdRef.current ?? state.frameId ?? "current",
       context: elementContext(node),
     });
   }
@@ -1973,6 +2029,7 @@ function SimView() {
                 setElementsOpen(false);
                 if (mode !== "annotate") elementTreeAbortRef.current?.abort();
               } else {
+                freezePreview();
                 setElementsOpen(true);
                 void loadAccessibility();
                 void loadUiContext();
@@ -2157,10 +2214,13 @@ function SimView() {
             onPointerUp={stopSidebarResize}
             onPointerCancel={stopSidebarResize}
           />
-          <section class="inspector-section elements-panel">
+          <section class="inspector-section elements-panel" aria-busy={elementTreeLoading}>
             <div class="section-heading">
               <div>
                 <strong>Elements</strong>
+                {elementTreeLoading && (
+                  <span class="elements-spinner" role="status" aria-label="Loading elements" />
+                )}
                 <small>
                   {accessibility ? (
                     <span
@@ -2226,6 +2286,16 @@ function SimView() {
               value={elementSearch}
               onInput={(event) => setElementSearch(event.currentTarget.value)}
             />
+            <div class="element-tree-status">
+              {elementTreeError && (
+                <div class="element-tree-error" role="alert">
+                  <span>{elementTreeError}</span>
+                  <button type="button" onClick={() => void loadAccessibility()}>
+                    Retry
+                  </button>
+                </div>
+              )}
+            </div>
             <div class="element-tree" role="tree" onMouseLeave={() => setHoveredElement(undefined)}>
               {elementRows.map(({ node, depth, isRoot, hasChildren }) => (
                 <button

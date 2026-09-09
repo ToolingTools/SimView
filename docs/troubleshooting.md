@@ -5,6 +5,28 @@ MCPB configurations. It is a stdio adapter. Adapters from compatible builds join
 one authenticated local MCP daemon; each retains its own review and project.
 The daemon is on demand, with no login item or background service to install.
 
+## Video pauses and element-tree recovery
+
+Annotation mode and an open Inspector intentionally freeze that viewer's frame.
+Return to Interact and close Inspector to resume live video. Finishing or failing
+a tree transfer does not release this pause. Other reviews and background
+accessibility reads must not stall a viewer that is interacting normally.
+
+If no app was open when XCTest startup ran, open the app and reconnect or press
+Refresh elements. An explicit tree load checks provider status and retries startup
+once; background enrichment does not restart it. If you explicitly disabled
+XCTest for the review, use `enable_ios_accessibility` to enable it again. Startup
+has a separate allowance from the 30-second tree transfer deadline. A timeout
+retains the previous tree and offers refresh; partial/truncated trees remain
+labelled as such rather than being presented as complete. A spinner beside Elements
+indicates loading; the search field stays fixed in height and the last successful
+tree remains available. Failed explicit loads offer a Retry button.
+
+React Native text without a public host instance uses feature-detected Fabric
+shadow-node bounds. Nested screens remain visible when Expo Router's root state
+only identifies the active native tab. Explicitly hidden subtrees are excluded
+from both the tree and canvas hover selection.
+
 ## Understanding process counts
 
 While connected, expect one adapter per host connection, one MCP daemon per

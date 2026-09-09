@@ -12,10 +12,12 @@ enum JSONValue: Codable, Sendable, Equatable {
         switch value {
         case is NSNull:
             self = .null
-        case let value as Bool:
-            self = .bool(value)
         case let value as NSNumber:
-            self = .number(value.doubleValue)
+            // NSNumber(0/1) also casts to Bool. Preserve JSON numeric fields
+            // such as schemaVersion and normalized coordinates across queues.
+            self =
+                CFGetTypeID(value) == CFBooleanGetTypeID()
+                ? .bool(value.boolValue) : .number(value.doubleValue)
         case let value as String:
             self = .string(value)
         case let value as [Any]:

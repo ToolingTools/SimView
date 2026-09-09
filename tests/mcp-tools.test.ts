@@ -696,6 +696,7 @@ describe("MCP app tools", () => {
       });
       while (true) {
         expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThan(80 * 1_024);
+        if (result.isError) throw new Error(JSON.stringify(result.content));
         const page = elementTreePageSchema.parse(result.structuredContent);
         pages.push(page);
         if (!page.nextCursor) break;
@@ -716,6 +717,76 @@ describe("MCP app tools", () => {
       expect(captures).toBe(1);
       expect(pages.length).toBeGreaterThan(1);
       expect(await assembleElementTreePages(pages)).toEqual(output);
+
+      let finishCapture!: () => void;
+      let enteredCapture!: () => void;
+      const entered = new Promise<void>((resolve) => {
+        enteredCapture = resolve;
+      });
+      session.elementSnapshot = () =>
+        new Promise<ElementTreeOutput>((resolve) => {
+          finishCapture = () => resolve(output);
+          enteredCapture();
+        });
+      const staleCapture = client.callTool({
+        name: "app_get_element_tree_page",
+        arguments: { action: "start" },
+      });
+      await entered;
+      const originalDevice = session.device;
+      session.device = parseDeviceDescription({
+        udid: "replacement",
+        name: "Replacement",
+        state: "Booted",
+        runtime: "iOS",
+      });
+      finishCapture();
+      expect((await staleCapture).isError).toBe(true);
+      session.device = originalDevice;
+
+      let enterCancelled!: () => void;
+      const cancelledEntered = new Promise<void>((resolve) => {
+        enterCancelled = resolve;
+      });
+      session.elementSnapshot = () =>
+        new Promise<ElementTreeOutput>((resolve) => {
+          finishCapture = () => resolve(output);
+          enterCancelled();
+        });
+      const controller = new AbortController();
+      const cancelledCapture = client
+        .callTool(
+          {
+            name: "app_get_element_tree_page",
+            arguments: { action: "start" },
+          },
+          undefined,
+          { signal: controller.signal },
+        )
+        .catch((error: unknown) => error);
+      await cancelledEntered;
+      session.elementSnapshot = async () => output;
+      const freshResult = await client.callTool({
+        name: "app_get_element_tree_page",
+        arguments: { action: "start" },
+      });
+      if (freshResult.isError) throw new Error(JSON.stringify(freshResult.content));
+      const fresh = elementTreePageSchema.parse(freshResult.structuredContent);
+      controller.abort();
+      await cancelledCapture;
+      // Let the cancellation notification reach the server before releasing
+      // its deliberately blocked capture.
+      await Bun.sleep(10);
+      finishCapture();
+      await Bun.sleep(10);
+      const continued = await client.callTool({
+        name: "app_get_element_tree_page",
+        arguments: { action: "continue", cursor: fresh.nextCursor },
+      });
+      expect(continued.isError).not.toBe(true);
+      expect(elementTreePageSchema.parse(continued.structuredContent).transferId).toBe(
+        fresh.transferId,
+      );
     } finally {
       await closeHarness();
     }

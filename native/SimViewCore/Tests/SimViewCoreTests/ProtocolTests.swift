@@ -56,6 +56,19 @@ private final class LockedErrorCode: @unchecked Sendable {
 }
 
 final class ProtocolTests: XCTestCase {
+    func testFoundationJSONPreservesNumericZeroAndOneSeparatelyFromBooleans() throws {
+        let object = try JSONSerialization.jsonObject(
+            with: Data(#"{"schemaVersion":1,"x":0,"visibleFraction":1,"enabled":true,"hidden":false}"#.utf8))
+        XCTAssertEqual(
+            JSONValue(object),
+            .object([
+                "schemaVersion": .number(1), "x": .number(0), "visibleFraction": .number(1),
+                "enabled": .bool(true), "hidden": .bool(false),
+            ]))
+        XCTAssertEqual(JSONValue(true), .bool(true))
+        XCTAssertEqual(JSONValue(1), .number(1))
+    }
+
     private func pixelBuffer(red: UInt8, green: UInt8, blue: UInt8) throws -> CVPixelBuffer {
         var buffer: CVPixelBuffer?
         XCTAssertEqual(

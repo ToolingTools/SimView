@@ -441,6 +441,10 @@ export class SimViewSession {
   #foregroundRead: Promise<string | undefined> | undefined;
   #visualObservationTail: Promise<void> = Promise.resolve();
   #iosAccessibility: IOSAccessibilityStatus | undefined;
+  #iosAccessibilityDisabled = false;
+  #iosAccessibilityEpoch = 0;
+  #iosAccessibilityDisable: Promise<SessionState> | undefined;
+  #iosAccessibilityRecovery: { generation: number; promise: Promise<void> } | undefined;
 
   get connectionGeneration(): number {
     return this.#connectionGeneration;
@@ -540,9 +544,12 @@ export class SimViewSession {
         this.#resetPreviewPackets();
         throw error;
       }
-    } else if (deviceId) {
-      if (!matchesDeviceId(this.device, deviceId)) await this.#selectDevice(deviceId);
-      else await this.refreshDevice();
+    } else {
+      if (deviceId && !matchesDeviceId(this.device, deviceId)) await this.#selectDevice(deviceId);
+      else {
+        await this.refreshDevice();
+        await this.#refreshIOSAccessibilityStatus();
+      }
     }
     return this.state();
   }
@@ -586,6 +593,11 @@ export class SimViewSession {
   }
 
   async #selectDevice(deviceId: string): Promise<SessionState> {
+    if (matchesDeviceId(this.device, deviceId)) {
+      await this.refreshDevice();
+      await this.#refreshIOSAccessibilityStatus();
+      return this.state();
+    }
     const selected = (await this.availableDevices()).find((device) =>
       matchesDeviceId(device, deviceId),
     );
@@ -663,46 +675,131 @@ export class SimViewSession {
   }
 
   async enableIOSAccessibilityProvider(bundleId?: string): Promise<SessionState> {
-    const client = this.requireClient();
-    const device = this.device;
-    if (device?.platform !== "ios") {
+    if (this.#iosAccessibilityDisable) await this.#iosAccessibilityDisable;
+    if (this.device?.platform !== "ios") {
       throw new Error("The XCTest accessibility provider is available only for iOS Simulators");
     }
-    this.#iosAccessibility = await client.request("accessibility.enableXCTestProvider", {
-      ...selectedDeviceParams(device),
-      bundleId,
-    });
-    this.#clearSemanticState();
+    this.#iosAccessibilityDisabled = false;
+    const generation = this.#connectionGeneration;
+    const assertCurrent = () => {
+      if (
+        this.#closed ||
+        generation !== this.#connectionGeneration ||
+        this.#iosAccessibilityDisabled
+      ) {
+        throw new Error("Accessibility enable was superseded by a review or provider change");
+      }
+    };
+    await this.#refreshIOSAccessibilityStatus(bundleId, true);
+    assertCurrent();
+    if (this.#iosAccessibility?.activeProvider !== "core-simulator-xctest") {
+      throw new Error(this.#iosAccessibility?.reason ?? "XCTest accessibility is unavailable");
+    }
     await this.#primeObservation();
+    assertCurrent();
     return this.state();
   }
 
   async disableIOSAccessibilityProvider(): Promise<SessionState> {
+    if (this.#iosAccessibilityDisable) return this.#iosAccessibilityDisable;
+    const operation = this.#disableIOSAccessibilityProvider();
+    this.#iosAccessibilityDisable = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.#iosAccessibilityDisable === operation) this.#iosAccessibilityDisable = undefined;
+    }
+  }
+
+  async #disableIOSAccessibilityProvider(): Promise<SessionState> {
     const client = this.requireClient();
     const device = this.device;
     if (device?.platform !== "ios") return this.state();
-    this.#iosAccessibility = await client.request("accessibility.disableXCTestProvider", {
-      ...selectedDeviceParams(device),
-    });
-    this.#clearSemanticState();
+    this.#iosAccessibilityDisabled = true;
+    const epoch = ++this.#iosAccessibilityEpoch;
+    const generation = this.#connectionGeneration;
+    // Startup already in flight must settle before the explicit stop is sent.
+    await this.#iosAccessibilityRecovery?.promise.catch(() => {});
+    if (client !== this.client || generation !== this.#connectionGeneration || this.#closed)
+      return this.state();
+    const status = await client.request(
+      "accessibility.disableXCTestProvider",
+      selectedDeviceParams(device),
+    );
+    if (
+      epoch === this.#iosAccessibilityEpoch &&
+      generation === this.#connectionGeneration &&
+      !this.#closed
+    ) {
+      this.#iosAccessibility = status;
+      this.#clearSemanticState();
+    }
     return this.state();
   }
 
-  async #refreshIOSAccessibilityStatus(): Promise<void> {
+  async #refreshIOSAccessibilityStatus(bundleId?: string, explicitEnable = false): Promise<void> {
     const device = this.device;
     if (device?.platform !== "ios") {
       this.#iosAccessibility = undefined;
       return;
     }
+    const generation = this.#connectionGeneration;
+    const existing = this.#iosAccessibilityRecovery;
+    if (existing?.generation === generation) {
+      await existing.promise;
+      if (
+        explicitEnable &&
+        generation === this.#connectionGeneration &&
+        (this.#iosAccessibility?.activeProvider !== "core-simulator-xctest" ||
+          (bundleId !== undefined && this.#iosAccessibility.bundleId !== bundleId))
+      ) {
+        return this.#refreshIOSAccessibilityStatus(bundleId, true);
+      }
+      return;
+    }
     const client = this.requireClient();
+    const epoch = this.#iosAccessibilityEpoch;
+    const current = () =>
+      !this.#closed &&
+      client === this.client &&
+      generation === this.#connectionGeneration &&
+      epoch === this.#iosAccessibilityEpoch;
+    const promise = (async () => {
+      let status: IOSAccessibilityStatus;
+      try {
+        status = await client.request("accessibility.providerStatus", selectedDeviceParams(device));
+      } catch (error) {
+        status = {
+          schemaVersion: 1,
+          status: "unavailable",
+          activeProvider: "core-simulator-ax",
+          reason: error instanceof Error ? error.message : String(error),
+        };
+      }
+      if (!current()) return;
+      if (
+        !this.#iosAccessibilityDisabled &&
+        (explicitEnable || status.activeProvider !== "core-simulator-xctest")
+      ) {
+        try {
+          status = await client.request("accessibility.enableXCTestProvider", {
+            ...selectedDeviceParams(device),
+            bundleId,
+          });
+          if (current()) this.#clearSemanticState();
+        } catch (error) {
+          if (explicitEnable) throw error;
+          status = { ...status, reason: error instanceof Error ? error.message : String(error) };
+        }
+      }
+      if (current()) this.#iosAccessibility = status;
+    })();
+    const recovery = { generation, promise };
+    this.#iosAccessibilityRecovery = recovery;
     try {
-      this.#iosAccessibility = await client.request("accessibility.enableXCTestProvider", {
-        ...selectedDeviceParams(device),
-      });
-    } catch {
-      this.#iosAccessibility = await client.request("accessibility.providerStatus", {
-        ...selectedDeviceParams(device),
-      });
+      await promise;
+    } finally {
+      if (this.#iosAccessibilityRecovery === recovery) this.#iosAccessibilityRecovery = undefined;
     }
   }
 
@@ -948,6 +1045,7 @@ export class SimViewSession {
       maxNodes,
     });
     if (
+      semanticGeneration === this.#semanticGeneration &&
       snapshot.source === "core-simulator-ax" &&
       this.#iosAccessibility?.activeProvider === "core-simulator-xctest"
     ) {

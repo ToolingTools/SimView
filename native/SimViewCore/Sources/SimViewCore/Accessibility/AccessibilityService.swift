@@ -245,6 +245,7 @@ final class AccessibilityService: @unchecked Sendable {
     private var screenBounds: [String: (width: Double, height: Double)] = [:]
     private var xctestProviders: [String: any XCTestAccessibilityProviding] = [:]
     private var xctestBundleIDs: [String: String] = [:]
+    private var xctestFailureCodes: [String: String] = [:]
     private let xctestProviderFactory: (String, String) throws -> any XCTestAccessibilityProviding
     private let foregroundBundleID: (String) -> String?
     private let observation: AccessibilityObservationCoordinator
@@ -254,14 +255,16 @@ final class AccessibilityService: @unchecked Sendable {
     init(
         observation: AccessibilityObservationCoordinator = AccessibilityObservationCoordinator(),
         foregroundBundleID: @escaping (String) -> String? = SimulatorForegroundApplication.bundleID,
-        xctestProviderFactory: @escaping (String, String) throws -> any XCTestAccessibilityProviding = {
-            udid, bundleID in
-            try XCTestAccessibilityProviderSession.start(udid: udid, targetBundleID: bundleID)
-        }
+        cancellation: AccessibilityCancellation = AccessibilityCancellation(),
+        xctestProviderFactory: ((String, String) throws -> any XCTestAccessibilityProviding)? = nil
     ) {
         self.foregroundBundleID = foregroundBundleID
         self.observation = observation
-        self.xctestProviderFactory = xctestProviderFactory
+        self.xctestProviderFactory =
+            xctestProviderFactory ?? { udid, bundleID in
+                try XCTestAccessibilityProviderSession.start(
+                    udid: udid, targetBundleID: bundleID, cancellation: cancellation)
+            }
     }
 
     deinit { shutdown() }
@@ -297,13 +300,16 @@ final class AccessibilityService: @unchecked Sendable {
             return result
         }
         let availability = XCTestAccessibilityProviderSession.availability()
+        let failureReason = xctestFailureCodes[udid].map { "xctest-runtime-failure: \($0)" }
         guard assessLegacy else {
-            return [
+            var result: [String: Any] = [
                 "schemaVersion": 1,
                 "status": "native-ready",
                 "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
                 "xctestAvailability": availability.availability.rawValue,
             ]
+            if let failureReason { result["reason"] = failureReason }
+            return result
         }
         do {
             let legacy = try captureLegacySnapshot(udid: udid, maxNodes: 240)
@@ -316,7 +322,7 @@ final class AccessibilityService: @unchecked Sendable {
                     "status": "native-ready",
                     "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
                     "legacyQuality": quality,
-                    "reason": availability.reason ?? "xctest-primary-available",
+                    "reason": failureReason ?? availability.reason ?? "xctest-primary-available",
                 ].compactMapValues { $0 }
             }
             return [
@@ -324,14 +330,14 @@ final class AccessibilityService: @unchecked Sendable {
                 "status": "unavailable",
                 "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
                 "legacyQuality": quality,
-                "reason": availability.reason ?? "xctest-provider-unavailable",
+                "reason": failureReason ?? availability.reason ?? "xctest-provider-unavailable",
             ]
         } catch {
             return [
                 "schemaVersion": 1,
                 "status": "unavailable",
                 "activeProvider": IOSAccessibilityProviderKind.axp.rawValue,
-                "reason": error.localizedDescription,
+                "reason": failureReason ?? error.localizedDescription,
             ]
         }
     }
@@ -341,6 +347,7 @@ final class AccessibilityService: @unchecked Sendable {
             xctestProviders[udid] = try xctestProviderFactory(udid, bundleID)
         }
         xctestBundleIDs[udid] = bundleID
+        xctestFailureCodes.removeValue(forKey: udid)
         // XCTest snapshots do not emit AXP revision events. Keeping the legacy
         // observer active makes every wait take the bounded AXP fallback path
         // and can also inject unrelated revisions into the XCTest session.
@@ -349,6 +356,7 @@ final class AccessibilityService: @unchecked Sendable {
     }
 
     func disableXCTestProvider(udid: String) -> [String: Any] {
+        xctestFailureCodes.removeValue(forKey: udid)
         stopXCTestProvider(udid: udid)
         return providerStatus(udid: udid, assessLegacy: false)
     }
@@ -406,7 +414,10 @@ final class AccessibilityService: @unchecked Sendable {
                     xctestBundleIDs[udid] = bundleID
                     captured = snapshot
                 } catch {
-                    if !isForegroundTransition(error) { stopXCTestProvider(udid: udid) }
+                    if !isForegroundTransition(error) {
+                        xctestFailureCodes[udid] = (error as? SimViewError)?.code ?? "XCTEST_PROVIDER_ERROR"
+                        stopXCTestProvider(udid: udid)
+                    }
                     captured = try captureLegacySnapshot(udid: udid, maxNodes: maxNodes)
                 }
             } else {
@@ -449,6 +460,7 @@ final class AccessibilityService: @unchecked Sendable {
                 // A healthy XCTest provider can lack activation semantics for a
                 // node. Keep it alive while consulting the native AX point hit.
                 if (error as? SimViewError)?.code != "XCTEST_ELEMENT_NOT_FOUND" {
+                    xctestFailureCodes[udid] = (error as? SimViewError)?.code ?? "XCTEST_PROVIDER_ERROR"
                     stopXCTestProvider(udid: udid)
                 }
             }

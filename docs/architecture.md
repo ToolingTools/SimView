@@ -72,9 +72,13 @@ The process model has two layers:
   validated and
   serialized once, split into bounded UTF-8 byte chunks, and reassembled and
   validated in the app. Tree capture runs only when Inspector or Annotate is
-  opened or Inspector is explicitly refreshed. Inspector transfers temporarily
-  pause video polling, while Annotate already holds a frozen frame; with both
-  surfaces closed, the bridge performs no background tree refresh. This is the
+  opened or Inspector is explicitly refreshed. Annotation mode and an open
+  Inspector each hold the viewer's displayed frame and suspend its packet polling.
+  Polling resumes only when both are inactive; tree success, failure, and refresh
+  do not release that pause. Other viewers sharing the native backend continue
+  receiving frames. Clicking the frozen Inspector canvas selects an element
+  without sending a native touch. With both surfaces closed, the bridge performs no background
+  tree refresh. This is the
   primary embedded transport because
   Codex cannot open insecure localhost HTTP/WebSocket origins and a local TLS
   certificate would impose user setup. A second MCP resource would still use
@@ -310,3 +314,44 @@ H.264 browser viewers and embedded packet requests own primary preview demand.
 Packet polling retains a five-second idle lease. MJPEG viewers own only their
 secondary connection, so MJPEG-only reviews do not encode H.264. Opening the
 review does not itself acquire continuous capture demand; its consumers do.
+
+## Accessibility scheduling and recovery
+
+The native server queue owns connection, device-selection, and capture state.
+Accessibility requests capture their device and connection generation there,
+then run on a dedicated serial worker. That worker owns mutable iOS provider
+state, observations, snapshot traversal, searches, waits, and provider lifecycle.
+Android accessibility requests use service handles captured at dispatch. Results
+return through the server queue; disconnected clients and replaced devices cannot
+receive stale results. Device replacement serializes old-provider cleanup before
+new work. Terminal shutdown interrupts registered XCTest sockets and startup
+polling, then cleans up provider processes on the worker within the existing
+five-second server shutdown bound. Provider cleanup uses monotonic grace/force
+budgets and never calls Foundation's potentially unbounded `waitUntilExit` on the
+worker. Foundation owns child reaping; a slow-exiting child stays retained by
+asynchronous termination checks without holding subsequent accessibility work.
+
+Same-device reconnect and explicit Inspector/Annotate tree loads check provider
+status and retry unavailable XCTest startup once. Concurrent recovery shares one
+attempt for the connection generation, and explicit disable suppresses automatic
+startup for that review. Background enrichment does not initiate recovery. A
+failed recovery leaves the native AX fallback available and records the startup
+failure reason. Successful recovery invalidates semantic caches before tree load.
+
+Provider startup retains its 40-second client allowance. The preview allows
+another 10 seconds for status discovery, independently of the 30-second tree
+acquisition/transfer budget shared with the server's page expiry. Closing the
+inspector, changing device, or replacing a request aborts the UI transfer; late
+results cannot overwrite the retained tree. Both the embedded bridge and browser
+relay carry the abort signal. The last successful tree remains visible during
+loading or failure, and partial/truncated results keep their provenance. A compact
+heading spinner reports loading, the search field keeps its fixed height, and
+explicit load failures have a separate retry row. Browser viewers close their
+video socket during intentional pauses and reconnect when both pauses end.
+
+Fabric inspection first uses public host measurement APIs, then feature-detects
+shadow-node bounds for hosts without a public instance (including RN 0.86 text).
+When Expo Router's root state ends at a native tab, nested scenes under that
+focused leaf remain eligible; missing nested state alone is not proof that a
+scene is inactive. Inactive sibling scenes stay excluded. Inspector rows and
+canvas hit testing both exclude entire explicitly hidden subtrees.

@@ -115,8 +115,10 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
         udid: String,
         targetBundleID: String,
         artifacts: XCTestProviderArtifacts? = XCTestProviderArtifacts.locate(),
-        startupTimeout: TimeInterval = 30
+        startupTimeout: TimeInterval = 30,
+        cancellation: AccessibilityCancellation = AccessibilityCancellation()
     ) throws -> XCTestAccessibilityProviderSession {
+        try cancellation.check()
         guard let artifacts else {
             throw providerError(
                 "XCTEST_PROVIDER_UNAVAILABLE",
@@ -159,7 +161,7 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
             try process.run()
             processStarted = true
             let startupDeadline = ProcessInfo.processInfo.systemUptime + startupTimeout
-            let connection = try listener.accept(timeout: startupTimeout)
+            let connection = try listener.accept(timeout: startupTimeout, cancellation: cancellation)
             var transferredConnection = false
             defer {
                 if !transferredConnection { Darwin.close(connection) }
@@ -168,7 +170,9 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
             guard remaining > 0 else {
                 throw providerError("XCTEST_PROVIDER_TIMEOUT", "XCTest provider startup exceeded its deadline")
             }
-            let hello = try XCTestProviderMessageCodec.read(from: connection, timeout: remaining)
+            let hello = try cancellation.withSocket(connection) {
+                try XCTestProviderMessageCodec.read(from: connection, timeout: remaining)
+            }
             guard
                 hello["type"] as? String == "hello",
                 (hello["protocolVersion"] as? NSNumber)?.intValue == xctestProviderProtocolVersion,
@@ -180,18 +184,25 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
             let session = XCTestAccessibilityProviderSession(
                 connection: connection,
                 process: process,
-                configuredXCTestRunURL: temporaryURL
+                configuredXCTestRunURL: temporaryURL,
+                cancellation: cancellation
             )
             transferredConnection = true
             return session
         } catch {
-            if processStarted { Self.terminateAndReap(process) }
+            if processStarted { Self.terminateBoundedly(process) }
             try? FileManager.default.removeItem(at: temporaryURL)
             throw error
         }
     }
 
-    init(connection: Int32, process: Process, configuredXCTestRunURL: URL) {
+    private let cancellation: AccessibilityCancellation
+
+    init(
+        connection: Int32, process: Process, configuredXCTestRunURL: URL,
+        cancellation: AccessibilityCancellation = AccessibilityCancellation()
+    ) {
+        self.cancellation = cancellation
         self.connection = connection
         self.process = process
         self.configuredXCTestRunURL = configuredXCTestRunURL
@@ -227,7 +238,7 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
         }
         Darwin.shutdown(connection, SHUT_RDWR)
         Darwin.close(connection)
-        Self.terminateAndReap(process)
+        Self.terminateBoundedly(process)
         removeConfiguredXCTestRun()
     }
 
@@ -237,34 +248,38 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
         } catch CocoaError.fileNoSuchFile {
             // Cleanup is idempotent when a failed startup already removed it.
         } catch {
-            // The child has already been reaped. Keep shutdown best-effort so
+            // Keep shutdown best-effort so
             // a filesystem error cannot leave the provider running.
         }
     }
 
-    private static func terminateAndReap(_ process: Process) {
-        guard process.isRunning else {
-            process.waitUntilExit()
-            return
-        }
+    private static func terminateBoundedly(_ process: Process) {
+        guard process.isRunning else { return }
 
-        // The authenticated shutdown message lets the test finish normally.
-        // SIGTERM asks xcodebuild to cancel testing and can shut down the user's
-        // booted Simulator. After a bounded grace period, reap only our host child.
-        let gracefulDeadline = Date().addingTimeInterval(xctestProviderGracefulShutdownTimeout)
-        while process.isRunning, Date() < gracefulDeadline {
+        // SIGTERM can make xcodebuild shut down the user's Simulator. Give the
+        // authenticated shutdown request time to finish, then kill only our child.
+        let gracefulDeadline = ProcessInfo.processInfo.systemUptime + xctestProviderGracefulShutdownTimeout
+        while process.isRunning, ProcessInfo.processInfo.systemUptime < gracefulDeadline {
             Thread.sleep(forTimeInterval: 0.01)
         }
         if process.isRunning {
             kill(process.processIdentifier, SIGKILL)
-            let forcedDeadline = Date().addingTimeInterval(xctestProviderForcedShutdownTimeout)
-            while process.isRunning, Date() < forcedDeadline {
+            let forcedDeadline = ProcessInfo.processInfo.systemUptime + xctestProviderForcedShutdownTimeout
+            while process.isRunning, ProcessInfo.processInfo.systemUptime < forcedDeadline {
                 Thread.sleep(forTimeInterval: 0.01)
             }
         }
-        // Reap the child after either the graceful request or SIGKILL. The
-        // server's terminal shutdown watchdog also covers this final wait.
-        process.waitUntilExit()
+        // Foundation tracks/reaps launched children. waitUntilExit can hang even
+        // after isRunning is false, blocking every later accessibility request.
+        // Retain a slow-exiting child without holding the accessibility worker.
+        retainUntilExited(process)
+    }
+
+    private static func retainUntilExited(_ process: Process) {
+        guard process.isRunning else { return }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1) {
+            retainUntilExited(process)
+        }
     }
 
     private func request(
@@ -277,7 +292,9 @@ final class XCTestAccessibilityProviderSession: XCTestAccessibilityProviding, @u
         guard !stopped, process.isRunning else {
             throw providerError("XCTEST_PROVIDER_STOPPED", "XCTest provider session is stopped")
         }
-        return try requestLocked(method: method, parameters: parameters, timeout: timeout)
+        return try cancellation.withSocket(connection) {
+            try requestLocked(method: method, parameters: parameters, timeout: timeout)
+        }
     }
 
     private func requestLocked(
@@ -417,18 +434,28 @@ private final class LoopbackListener {
 
     deinit { Darwin.close(descriptor) }
 
-    func accept(timeout: TimeInterval) throws -> Int32 {
-        var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
-        let milliseconds = Int32(max(1, min(timeout * 1_000, Double(Int32.max))))
-        guard Darwin.poll(&pollDescriptor, 1, milliseconds) > 0 else {
-            throw providerError("XCTEST_START_TIMEOUT", "XCTest provider did not connect")
+    func accept(timeout: TimeInterval, cancellation: AccessibilityCancellation) throws -> Int32 {
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        while true {
+            try cancellation.check()
+            let remaining = deadline - ProcessInfo.processInfo.systemUptime
+            guard remaining > 0 else {
+                throw providerError("XCTEST_START_TIMEOUT", "XCTest provider did not connect")
+            }
+            var pollDescriptor = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let milliseconds = Int32(max(1, min(remaining * 1_000, 100)))
+            let result = Darwin.poll(&pollDescriptor, 1, milliseconds)
+            if result == 0 || (result < 0 && errno == EINTR) { continue }
+            guard result > 0 else { throw providerError("XCTEST_SOCKET_FAILED", String(cString: strerror(errno))) }
+            try cancellation.check()
+            let connection = Darwin.accept(descriptor, nil, nil)
+            guard connection >= 0 else {
+                throw providerError("XCTEST_SOCKET_FAILED", String(cString: strerror(errno)))
+            }
+            return connection
         }
-        let connection = Darwin.accept(descriptor, nil, nil)
-        guard connection >= 0 else {
-            throw providerError("XCTEST_SOCKET_FAILED", String(cString: strerror(errno)))
-        }
-        return connection
     }
+
 }
 
 private func constantTimeEqual(_ lhs: String, _ rhs: String) -> Bool {

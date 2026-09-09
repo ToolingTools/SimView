@@ -28,7 +28,6 @@ import {
   flattenTree,
   formatRuntime,
   inspectorTreeRows,
-  PreviewBridgeGate,
   parseSessionState,
   preferredInlineHeight,
   requireAnnotation,
@@ -92,18 +91,6 @@ describe("app helpers", () => {
 
     expect(enriched).toBe(false);
     expect(loads).toBe(0);
-  });
-
-  test("pauses fallback preview polling while priority bridge work is pending", () => {
-    const gate = new PreviewBridgeGate();
-    const releaseFirst = gate.beginPriority();
-    const releaseSecond = gate.beginPriority();
-    expect(gate.priorityPending).toBe(true);
-    releaseFirst();
-    expect(gate.priorityPending).toBe(true);
-    releaseFirst();
-    releaseSecond();
-    expect(gate.priorityPending).toBe(false);
   });
 
   test("reassembles byte-paged Fiber trees without changing their structure", async () => {
@@ -247,6 +234,30 @@ describe("app helpers", () => {
     expect(commentableNodeAtPoint(reactRoot, { kind: "point", x: 0.3, y: 0.3 })?.ref).toBe(
       "rn:host",
     );
+  });
+
+  test("hover and Inspector exclude descendants of a hidden screen", () => {
+    const frame = {
+      points: { x: 20, y: 20, width: 80, height: 40 },
+      normalized: { x: 0.2, y: 0.2, width: 0.4, height: 0.2 },
+    };
+    const visible: AccessibilityNode = { ref: "visible", kind: "host", frame };
+    const tree: AccessibilityNode = {
+      ref: "root",
+      children: [
+        {
+          ref: "hidden-screen",
+          hidden: true,
+          children: [{ ref: "hidden-child", kind: "host", frame }],
+        },
+        visible,
+      ],
+    };
+    expect(commentableNodeAtPoint(tree, { kind: "point", x: 0.3, y: 0.3 })).toBe(visible);
+    expect(inspectorTreeRows(tree, true).map(({ node }) => node.ref)).toEqual(["root", "visible"]);
+    expect(
+      commentableNodeAtPoint({ ...tree, hidden: true }, { kind: "point", x: 0.3, y: 0.3 }),
+    ).toBeUndefined();
   });
 
   test("builds stable element paths and annotation context", () => {

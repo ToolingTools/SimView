@@ -44,6 +44,18 @@ private final class CountingProvider: XCTestAccessibilityProviding {
 }
 
 final class XCTestAccessibilityProviderTests: XCTestCase {
+    func testProviderFailureReasonSurvivesFallbackAndClearsOnRecovery() throws {
+        let provider = FailingPointProvider()
+        let service = AccessibilityService(foregroundBundleID: { _ in "dev.example.app" }) { _, _ in provider }
+        _ = try service.enableXCTestProvider(udid: "test", bundleID: "dev.example.app")
+        _ = try? service.elementAtPoint(udid: "test", x: 0.5, y: 0.5)
+        XCTAssertEqual(
+            service.providerStatus(udid: "test", assessLegacy: false)["reason"] as? String,
+            "xctest-runtime-failure: XCTEST_PROVIDER_DISCONNECTED")
+        _ = try service.enableXCTestProvider(udid: "test", bundleID: "dev.example.app")
+        XCTAssertNil(service.providerStatus(udid: "test", assessLegacy: false)["reason"])
+    }
+
     func testSnapshotsFollowForegroundWithoutRestartingProvider() throws {
         let provider = CountingProvider()
         var foreground: String? = "dev.example.first"
@@ -143,10 +155,46 @@ final class XCTestAccessibilityProviderTests: XCTestCase {
         session.stop()
 
         XCTAssertFalse(process.isRunning)
+        var childStatus: Int32 = 0
+        let reapResult = waitpid(process.processIdentifier, &childStatus, WNOHANG)
+        let reapError = errno
+        XCTAssertEqual(reapResult, -1)
+        XCTAssertEqual(reapError, ECHILD, "Foundation must have reaped the owned child")
         XCTAssertEqual(process.terminationReason, .uncaughtSignal)
         XCTAssertEqual(process.terminationStatus, SIGKILL)
         XCTAssertFalse(FileManager.default.fileExists(atPath: configurationURL.path))
         XCTAssertLessThan(Date().timeIntervalSince(startedAt), 4.5)
+    }
+
+    func testStopAlreadyExitedChildReturnsWithoutBlockingWorker() throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+        try process.run()
+        let exitDeadline = ProcessInfo.processInfo.systemUptime + 2
+        while process.isRunning, ProcessInfo.processInfo.systemUptime < exitDeadline {
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        XCTAssertFalse(process.isRunning)
+        var sockets: [Int32] = [0, 0]
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &sockets), 0)
+        defer { Darwin.close(sockets[1]) }
+        let configurationURL = FileManager.default.temporaryDirectory.appendingPathComponent(
+            "simview-xctest-test-\(UUID().uuidString).xctestrun"
+        )
+        try Data("test".utf8).write(to: configurationURL)
+        let session = XCTestAccessibilityProviderSession(
+            connection: sockets[0], process: process, configuredXCTestRunURL: configurationURL
+        )
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        session.stop()
+        session.stop()
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - startedAt, 0.5)
+        var childStatus: Int32 = 0
+        let reapResult = waitpid(process.processIdentifier, &childStatus, WNOHANG)
+        let reapError = errno
+        XCTAssertEqual(reapResult, -1)
+        XCTAssertEqual(reapError, ECHILD, "Foundation must have reaped the exited child")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: configurationURL.path))
     }
 
     func testPointFailureStopsAndEvictsProviderBeforeLegacyFallback() throws {

@@ -21,6 +21,7 @@ import {
   deviceListSchema,
   ELEMENT_TREE_PAGE_RAW_BYTES,
   ELEMENT_TREE_TRANSFER_MAX_BYTES,
+  ELEMENT_TREE_TRANSFER_TIMEOUT_MS,
   type ElementSearchMatch,
   type ElementTreeOutput,
   type ElementTreePage,
@@ -74,7 +75,7 @@ import {
 } from "./session";
 
 const VERSION = process.env.SIMVIEW_RESOURCE_VERSION ?? SIMVIEW_VERSION;
-const ELEMENT_TREE_TRANSFER_TTL_MS = 30_000;
+const ELEMENT_TREE_TRANSFER_TTL_MS = ELEMENT_TREE_TRANSFER_TIMEOUT_MS;
 const RESOURCE_MIME_TYPE = "text/html;profile=mcp-app";
 const BROWSER_FALLBACK_DELAY_MS = 5_000;
 const DEVICE_PAGE_LIMIT = 25;
@@ -2122,7 +2123,10 @@ function registerAccessibilityTools(
       outputSchema: elementTreePageSchema,
       _meta: metadata.appOnly,
     },
-    async ({ action, source, scope, maxNodes, cursor }) => {
+    async ({ action, source, scope, maxNodes, cursor }, extra) => {
+      extra.mcpReq.signal.throwIfAborted();
+      const connectionGeneration = session.connectionGeneration;
+      const deviceId = session.device?.id;
       let pageIndex = 0;
       if (action === "continue") {
         if (!cursor || source || scope || maxNodes !== undefined) {
@@ -2147,6 +2151,13 @@ function registerAccessibilityTools(
           source === "accessibility"
             ? await session.accessibilityElementSnapshot(captureScope, nodeLimit)
             : await session.elementSnapshot(captureScope, nodeLimit);
+        extra.mcpReq.signal.throwIfAborted();
+        if (
+          connectionGeneration !== session.connectionGeneration ||
+          deviceId !== session.device?.id
+        ) {
+          throw new Error("Device changed during element tree transfer");
+        }
         const validated = elementTreeOutputSchema.parse(result);
         const bytes = Buffer.from(JSON.stringify(validated), "utf8");
         if (bytes.byteLength > ELEMENT_TREE_TRANSFER_MAX_BYTES) {
