@@ -171,9 +171,12 @@ final class HIDInjector: @unchecked Sendable {
         guard let udid else {
             throw SimViewError("DEVICE_NOT_SELECTED", "No simulator is selected")
         }
-        let copy = run("/usr/bin/xcrun", ["simctl", "pbcopy", udid], input: Data(text.utf8))
-        guard copy.status == 0 else {
-            throw SimViewError("PASTEBOARD_COPY_FAILED", copy.error.nonEmpty ?? "Could not set simulator pasteboard")
+        if try !DeviceHubPasteboard.copy(udid: udid, text: text) {
+            let copy = run("/usr/bin/xcrun", ["simctl", "pbcopy", udid], input: Data(text.utf8))
+            guard copy.status == 0 else {
+                throw SimViewError(
+                    "PASTEBOARD_COPY_FAILED", copy.error.nonEmpty ?? "Could not set simulator pasteboard")
+            }
         }
         key(usage: 0xe3, down: true)
         key(usage: 0x19, down: true)
@@ -257,7 +260,7 @@ final class HIDInjector: @unchecked Sendable {
         }
     }
 
-    func setOrientation(_ name: String) throws {
+    func setLegacyOrientation(_ name: String) throws {
         let orientation: UInt32
         switch name {
         case "portrait": orientation = 1
@@ -289,7 +292,7 @@ final class HIDInjector: @unchecked Sendable {
             throw error
                 ?? SimViewError(
                     "ORIENTATION_BACKEND_UNAVAILABLE",
-                    "PurpleWorkspacePort was not found; Simulator.app may need to be running"
+                    "PurpleWorkspacePort was not found; Device Hub or Simulator may need to be running"
                 )
         }
         var buffer = [UInt8](repeating: 0, count: 112)

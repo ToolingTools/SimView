@@ -24,6 +24,12 @@ consume its versioned binary protocol.
 - Bun 1.3.14 for source development only
 - XcodeGen, JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
 
+SimView targets simulated iOS devices in both Xcode 27's Device Hub and the
+legacy Simulator application. It retains CoreSimulator device identifiers and
+uses `devicectl` for rotation and Unicode paste when available. See the
+[compatibility matrix](docs/compatibility.md) for tested configurations and the
+division between `simctl`, `devicectl`, and native interfaces.
+
 Android support targets API 26 or later. SimView uses the user's existing ADB
 server and authorization keys; it does not pair devices, enable legacy
 `adb tcpip 5555`, or install a persistent helper app. ADB is resolved from
@@ -243,7 +249,35 @@ observe without replaying the action. `get_simview_state` exposes the selected
 device's named-key support in `device.capabilities.input.keys`; iOS includes
 Return and Delete, while Android currently reports no named-key support.
 
-The standalone browser preview uses the authenticated localhost stream. The
+### Share a preview on your LAN
+
+Run `simview preview --lan` to print a link another device can open on your local
+network. The local browser also opens as usual; add `--no-open` to suppress it.
+Use `--lan-host <local-ipv4>` to choose an interface and `--lan-port <port>` for a
+fixed port (0 selects an available port). Overrides require `--lan`.
+
+SimView selects the default-route interface's private IPv4 address, or the only
+eligible address. If there are multiple candidates, choose one explicitly. It
+binds only that address. `--print-url` prints the LAN link when sharing is enabled.
+
+The link grants full device interaction and annotation access. HTTP traffic is
+unencrypted, so use only a trusted LAN. Remote video uses MJPEG. Keep the host
+awake and SimView running; Ctrl-C revokes the link. Check macOS firewall access
+and Wi-Fi client isolation if another device cannot connect. After changing
+networks, restart sharing. SimView does not configure routers or firewalls.
+
+With the plugin, ask `$simview-lan` to share the current review. The agent uses
+`start_lan_sharing`, `get_lan_sharing_status`, and `stop_lan_sharing`. Remote
+viewers share the agent's device and annotations. Stopping sharing disconnects
+remote viewers without closing the local review. Starting again creates a fresh
+link; old links no longer work. A device switch changes the shared device too.
+The standalone CLI creates its own review rather than joining an MCP review.
+
+For acceptance testing, `SIMVIEW_TEST_LAN=1 bun test tests/lan-sharing.test.ts`
+uses the real LAN interface. The default test suite exercises the same relay
+handlers over loopback so it can run without LAN permissions.
+
+By default, the standalone browser preview uses the authenticated localhost stream. The
 embedded MCP App does not make localhost HTTP or WebSocket requests: Codex
 requires secure network origins, so it carries bounded video packet batches and
 byte-paged React Native/AX element snapshots through app-only bridge tools. A

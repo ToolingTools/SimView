@@ -498,7 +498,7 @@ function SimView() {
   async function loadBrowserState() {
     const hashToken = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
     if (!hashToken) {
-      setStartupError("The local preview link is incomplete.");
+      setStartupError("The preview link is incomplete.");
       setStartupPhase("error");
       return;
     }
@@ -506,9 +506,11 @@ function SimView() {
       const response = await fetch("/state", {
         headers: { authorization: `Bearer ${hashToken}` },
       });
-      if (!response.ok) throw new Error(`The local relay returned ${response.status}`);
+      if (!response.ok) throw new Error(`The preview relay returned ${response.status}`);
+      const browserState = sessionStateSchema.parse(await response.json());
+      if (browserState.codec === "mjpeg") setStreamCodec("mjpeg");
       setState({
-        ...sessionStateSchema.parse(await response.json()),
+        ...browserState,
         relayOrigin: location.origin,
       });
       setStartupPhase("waiting-for-frame");
@@ -519,7 +521,7 @@ function SimView() {
   }
 
   async function relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
-    if (!token) throw new Error("The local relay token is unavailable");
+    if (!token) throw new Error("The preview relay token is unavailable");
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${token}`);
     return fetch(path, { ...init, headers });
@@ -1301,7 +1303,7 @@ function SimView() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(reviewImageInput(review)),
       });
-      if (!response.ok) throw new Error(`The local relay returned ${response.status}`);
+      if (!response.ok) throw new Error(`The preview relay returned ${response.status}`);
       const savedImages = saveReviewImagesOutputSchema.parse(await response.json());
       const text = createReviewMessageContent(savedImages, review)
         .map((block) => block.text)

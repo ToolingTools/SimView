@@ -1,0 +1,9 @@
+interface:
+  display_name: "SimView LAN"
+  short_description: "Share a SimView review on your LAN"
+  default_prompt: "Use $simview-lan to share my current SimView review on the local network."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "simview"
+      description: "SimView LAN sharing controls"

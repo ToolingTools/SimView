@@ -362,3 +362,19 @@ When Expo Router's root state ends at a native tab, nested scenes under that
 focused leaf remain eligible; missing nested state alone is not proof that a
 scene is inactive. Inactive sibling scenes stay excluded. Inspector rows and
 canvas hit testing both exclude entire explicitly hidden subtrees.
+
+## Explicit LAN browser sharing
+
+The browser relay can additionally listen on one assigned private IPv4 address
+when requested through `preview --lan` or `start_lan_sharing`. It shares the
+SimViewSession review and handlers, but owns a separate random capability token,
+listener, and viewer identity. `stop_lan_sharing` invalidates that token and closes
+remote sockets without replacing the local relay. Session close stops both.
+No native backend, Metro, ADB, or MCP transport is exposed by this feature.
+
+LAN links use HTTP and MJPEG over authenticated WebSockets. The browser state
+advertises MJPEG for that listener; local H.264 behavior is preserved. Host,
+Origin, and CSP are scoped to the listener origin. Capture demand combines the
+embedded preview and browser viewers; unused MJPEG attachments are released.
+Sharing metadata has dedicated contract schemas. Ordinary state and status omit
+capabilities; only explicit start-sharing results contain the secret URL.

@@ -9,7 +9,14 @@ import {
   SimViewClient,
   stopDaemons,
 } from "@simview/client";
-import { accessibilitySelectorSchema, SIMVIEW_VERSION } from "@simview/contracts";
+import {
+  accessibilitySelectorSchema,
+  type LanSharingInput,
+  type LanSharingStarted,
+  lanSharingInputSchema,
+  type SessionState,
+  SIMVIEW_VERSION,
+} from "@simview/contracts";
 import { resolveBinary } from "@simview/core";
 import { SimViewSession } from "@simview/mcp";
 
@@ -32,6 +39,9 @@ const commandOptions: Record<string, Record<string, OptionDefinition>> = {
     udid: { type: "string" },
     "no-open": { type: "boolean" },
     "print-url": { type: "boolean" },
+    lan: { type: "boolean" },
+    "lan-host": { type: "string" },
+    "lan-port": { type: "string" },
   },
   screenshot: {
     "device-id": { type: "string" },
@@ -216,20 +226,30 @@ export async function run(argv = process.argv): Promise<void> {
       throw new Error(`Unknown daemon action: ${action}`);
     }
     case "preview": {
+      const lanOptions = previewLanOptions(options);
       const session = new SimViewSession();
-      const state = await session.open(deviceId ?? udid, { startRelay: true });
+      let state: SessionState;
+      let sharing: LanSharingStarted | undefined;
+      try {
+        state = await session.open(deviceId ?? udid, { startRelay: true });
+        sharing = lanOptions ? session.startLanSharing(lanOptions) : undefined;
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
       const browserUrl = session.browserUrl();
       const shouldOpen = options["no-open"] !== true;
       printJson(
         {
           device: state.device,
           ...(shouldOpen ? {} : { browserUrl }),
+          ...(sharing ? { lanUrl: sharing.url, lanNotice: sharing.notice } : {}),
           note: "Press Ctrl-C to stop SimView.",
         },
         false,
       );
       if (shouldOpen && browserUrl) Bun.spawn(["/usr/bin/open", browserUrl]);
-      if (options["print-url"] === true && browserUrl) console.log(browserUrl);
+      if (options["print-url"] === true && browserUrl) console.log(sharing?.url ?? browserUrl);
       const stop = async () => {
         await session.close();
         process.exit(0);
@@ -445,6 +465,23 @@ function nextFrame(client: SimViewClient, kind: FrameKind): Promise<Uint8Array> 
   });
 }
 
+export function previewLanOptions(options: Options): LanSharingInput | undefined {
+  if (options.lan !== true) {
+    if (options["lan-host"] !== undefined || options["lan-port"] !== undefined) {
+      throw new Error("--lan-host and --lan-port require --lan");
+    }
+    return undefined;
+  }
+  const port = options["lan-port"];
+  if (port !== undefined && (typeof port !== "string" || !/^\d+$/.test(port))) {
+    throw new Error("--lan-port must be an integer from 0 to 65535");
+  }
+  return lanSharingInputSchema.parse({
+    ...(options["lan-host"] !== undefined ? { host: options["lan-host"] } : {}),
+    ...(port !== undefined ? { port: Number(port) } : {}),
+  });
+}
+
 function selectorFromOptions(options: Options) {
   return accessibilitySelectorSchema.parse({
     identifier: stringOption(options, "id", false),
@@ -525,6 +562,7 @@ Usage:
   simview devices [--booted] [--json]
   simview doctor --json
   simview preview [--device-id <id>] [--no-open] [--print-url]
+                  [--lan [--lan-host <local-ipv4>] [--lan-port <0-65535>]]
   simview screenshot --output <path> [--device-id <id>]
   simview observe [--scope interactive|visible|full] [--output <png>] [--json]
   simview tree [--scope interactive|visible|full] [--json]

@@ -1,3 +1,6 @@
+import { cp, mkdir, readFile } from "node:fs/promises";
+import { join } from "node:path";
+
 export const repositoryUrl = "https://github.com/ToolingTools/SimView";
 export const maxCodexPluginArchiveBytes = 50 * 1024 * 1024;
 
@@ -79,4 +82,17 @@ export function createPackagedMcpConfig(config: unknown): Record<string, unknown
     throw new Error("The project MCP configuration has no SimView server");
   }
   return { mcpServers: { simview } };
+}
+export async function copyPluginSkills(root: string, stage: string): Promise<void> {
+  await mkdir(join(stage, "skills"), { recursive: true });
+  for (const name of ["simview", "simview-lan"]) {
+    const source = join(root, "skills", name);
+    const target = join(stage, "skills", name);
+    await cp(source, target, { recursive: true });
+    if (
+      !(await readFile(join(source, "SKILL.md"))).equals(await readFile(join(target, "SKILL.md")))
+    ) {
+      throw new Error(`Packaged ${name} skill differs from its source`);
+    }
+  }
 }
