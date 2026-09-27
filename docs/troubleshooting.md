@@ -41,6 +41,17 @@ connection count, and unique owner count. It does not expose credentials or
 Simulator contents. Status queries do not keep a daemon alive. Use the existing
 `simview daemon status --json` commands for native backend diagnostics.
 
+After startup, adapters forward traffic without recurring ownership polling. The
+daemon checks the distinct owner PIDs once per second for all connections, so
+opening more chats does not create additional polling loops.
+
+A correctly packaged CLI also needs the `com.apple.security.cs.allow-jit`
+entitlement alongside its hardened-runtime signature. Omitting it can leave
+compiled adapters using substantial idle CPU even after ownership polling stops.
+Check the installed executable with `codesign -d --entitlements :- /path/to/simview`;
+use a fresh release build to repair packaging rather than disabling hardened
+runtime. Reconnect through the host to replace already-running executables.
+
 An idle, connected agent is still an owner. Closing a preview tab does not end
 the agent's review. Closing the agent connection does: its browser relay and
 native clients close, and another agent's review continues independently.
@@ -48,8 +59,8 @@ The last connection starts MCP shutdown immediately, capped at five seconds.
 Unused native backends stop capture on disconnect and start bounded shutdown immediately. Startup has a separate bounded allowance for the first client.
 When iOS accessibility uses the temporary XCTest provider, terminal backend shutdown also stops and reaps its provider process and removes the generated `.xctestrun` configuration. Preview and capture toggles keep an enabled provider alive.
 
-If a host leaves an orphaned worker after its GUI quits, adapters also watch the
-original GUI ancestor and its process start time. They close their own connection
+If a host leaves an orphaned worker after its GUI quits, ownership monitoring also
+checks the original GUI ancestor and its process start time. Affected adapters close
 without terminating the host's worker. Existing older SimView processes must
 be restarted through their host to gain this behavior; rebuilding source does
 not replace a running installed MCP server.

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { ProcessOwner } from "@simview/contracts";
 import {
+  createProcessOwnerMonitor,
   type OwnerExitReason,
   type OwnerInspectionEvent,
   type ProcessIdentity,
@@ -51,6 +52,41 @@ function harness() {
 const failed = async (): Promise<Map<number, ProcessIdentity>> => {
   throw new Error("ps unavailable");
 };
+
+function monitorHarness() {
+  let inspect: (pids: number[]) => Promise<Map<number, ProcessIdentity>> = async () =>
+    new Map([
+      [41, { pid: 41, ppid: 1, startedAt: "first", executable: "host" }],
+      [42, { pid: 42, ppid: 1, startedAt: "second", executable: "host" }],
+    ]);
+  let tick!: () => Promise<void>;
+  let inspections = 0;
+  const requestedPids: number[][] = [];
+  let cancellations = 0;
+  const exits: OwnerExitReason[] = [];
+  const monitor = createProcessOwnerMonitor({
+    snapshot: async (pids) => {
+      inspections += 1;
+      requestedPids.push([...(pids ?? [])]);
+      return inspect(pids ?? []);
+    },
+    schedule: (check) => {
+      tick = check;
+      return () => {
+        cancellations += 1;
+      };
+    },
+  });
+  return {
+    monitor,
+    tick: () => tick(),
+    setInspect: (value: typeof inspect) => {
+      inspect = value;
+    },
+    exits,
+    counts: () => ({ inspections, requestedPids, cancellations }),
+  };
+}
 
 describe("process owner watchdog", () => {
   test("survives one or repeated failed checks and resumes identity verification", async () => {
@@ -127,5 +163,90 @@ describe("process owner watchdog", () => {
     await h.tick();
     expect(h.counts().inspections).toBe(2);
     h.stop();
+  });
+
+  test("takes one deduplicated snapshot for many subscriptions", async () => {
+    const h = monitorHarness();
+    const owners = [
+      { pid: 41, startedAt: "first", kind: "agent" as const },
+      { pid: 42, startedAt: "second", kind: "agent" as const },
+    ];
+    for (let i = 0; i < 25; i += 1) {
+      const owner = owners[i % 2];
+      if (!owner) throw new Error("missing test owner");
+      h.monitor.subscribe([owner], (reason) => h.exits.push(reason));
+    }
+    await h.tick();
+    await h.tick();
+    expect(h.counts().inspections).toBe(2);
+    expect(h.counts().requestedPids).toEqual([
+      [41, 42],
+      [41, 42],
+    ]);
+    h.monitor.dispose();
+    expect(h.counts().cancellations).toBe(1);
+  });
+
+  test("closes only the subscription whose owner is absent", async () => {
+    const h = monitorHarness();
+    const secondExits: OwnerExitReason[] = [];
+    const first = h.monitor.subscribe([{ pid: 41, startedAt: "first", kind: "agent" }], (reason) =>
+      h.exits.push(reason),
+    );
+    h.monitor.subscribe([{ pid: 42, startedAt: "second", kind: "agent" }], (reason) =>
+      secondExits.push(reason),
+    );
+    h.setInspect(
+      async () => new Map([[41, { pid: 41, ppid: 1, startedAt: "first", executable: "host" }]]),
+    );
+    await h.tick();
+    expect(h.exits).toEqual([]);
+    expect(secondExits).toEqual(["owner_exited"]);
+    first();
+    h.monitor.dispose();
+  });
+
+  test("does not act on a subscription removed during an in-flight snapshot", async () => {
+    const h = monitorHarness();
+    const pending = Promise.withResolvers<Map<number, ProcessIdentity>>();
+    h.setInspect(() => pending.promise);
+    const exits: OwnerExitReason[] = [];
+    const stop = h.monitor.subscribe([{ pid: 41, startedAt: "first", kind: "agent" }], (reason) =>
+      exits.push(reason),
+    );
+    const first = h.tick();
+    await h.tick();
+    stop();
+    pending.resolve(new Map());
+    await first;
+    expect(exits).toEqual([]);
+    h.monitor.dispose();
+  });
+
+  test("does not emit callbacks after monitor disposal", async () => {
+    const h = monitorHarness();
+    const pending = Promise.withResolvers<Map<number, ProcessIdentity>>();
+    h.setInspect(() => pending.promise);
+    const exits: OwnerExitReason[] = [];
+    const events: OwnerInspectionEvent[] = [];
+    const monitor = createProcessOwnerMonitor({
+      snapshot: () => pending.promise,
+      schedule: (check) => {
+        tick = check;
+        return () => {};
+      },
+      onDiagnostic: (event) => events.push(event),
+    });
+    let tick!: () => Promise<void>;
+    monitor.subscribe([{ pid: 41, startedAt: "first", kind: "agent" }], (reason) =>
+      exits.push(reason),
+    );
+    const first = tick();
+    monitor.dispose();
+    pending.reject(new Error("late failure"));
+    await first;
+    expect(exits).toEqual([]);
+    expect(events).toEqual([]);
+    h.monitor.dispose();
   });
 });

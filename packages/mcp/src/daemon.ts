@@ -4,6 +4,7 @@ import { createServer as createSocketServer, type Socket } from "node:net";
 import { isAbsolute } from "node:path";
 import { StdioServerTransport, serveStdio } from "@modelcontextprotocol/server/stdio";
 import {
+  createProcessOwnerMonitor,
   ensureMcpRegistry,
   MCP_SHUTDOWN_TIMEOUT_MS,
   MCP_STARTUP_TIMEOUT_MS,
@@ -14,7 +15,6 @@ import {
   publishMcpRecord,
   readHandshake,
   removeMcpRecord,
-  watchProcessOwners,
 } from "@simview/client";
 import {
   type McpDaemonStatus,
@@ -48,6 +48,7 @@ export async function runMcpDaemon(): Promise<void> {
     daemonDiagnostic(`${paths.record}.diagnostics.log`, reason, error);
   const sockets = new Set<Socket>();
   const connections = new Map<Socket, { owners: ProcessOwner[]; close: () => Promise<void> }>();
+  const ownerMonitor = createProcessOwnerMonitor({ onDiagnostic: diagnostic });
   const closing = new Set<Promise<void>>();
   let draining = false;
   let served = false;
@@ -66,6 +67,7 @@ export async function runMcpDaemon(): Promise<void> {
     if (draining) return;
     draining = true;
     diagnostic(reason, error);
+    ownerMonitor.dispose();
     clearTimeout(startupTimeout);
     server.close();
     const deadline = setTimeout(() => {
@@ -142,9 +144,7 @@ export async function runMcpDaemon(): Promise<void> {
       clearTimeout(startupTimeout);
       socket.once("close", () => void close());
       socket.once("end", () => void close("socket_end"));
-      unwatch = watchProcessOwners(hello.owners, (reason) => void close(reason), {
-        onDiagnostic: diagnostic,
-      });
+      unwatch = ownerMonitor.subscribe(hello.owners, (reason) => void close(reason));
       socket.write(`${JSON.stringify(status())}\n`);
       handle = serveStdio(
         () => {

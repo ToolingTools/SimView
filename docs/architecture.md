@@ -207,8 +207,11 @@ Native discovery and backend startup use that connection's working directory.
 Discovery has a bounded deadline and is cancelled when its request or owning
 review closes; review shutdown waits for discovery cleanup before completing.
 
-Adapters and the daemon validate owner PIDs and process start identities every
-second, including original GUI application ancestors. EOF, broken output,
+Adapters validate owner PIDs and process start identities during startup, including
+original GUI application ancestors. After authenticated handoff, adapters stop
+polling and the daemon monitors all connections with one snapshot per second of
+the distinct owner PIDs. Each review retains its own expected process identities.
+EOF, broken output,
 signals, socket loss or owner exit close that review. Cleanup is idempotent,
 serialized against device startup/switching, and scoped to the connection. After
 the final adapter leaves, the daemon stops accepting connections and drains under
@@ -292,6 +295,10 @@ release output. After native or protocol changes, run `bun run release:build`
 before packaging or plugin testing so the compiled artifacts cannot be stale.
 The release build produces arm64 binaries, permission-safe
 archives, SHA-256 checksums, `release-manifest.json`, and a CycloneDX SBOM.
+Both ad-hoc and Developer ID signing retain the hardened runtime. The Bun-based
+CLI additionally receives only `com.apple.security.cs.allow-jit`, so its embedded
+JavaScriptCore runtime can compile JavaScript. Native core and probe binaries do
+not receive this entitlement.
 Binary publication remains blocked until the licensing, Developer ID signing,
 notarization, and real-target gates in `docs/binary-redistribution.md` and
 `docs/compatibility.md` have been reviewed.

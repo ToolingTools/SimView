@@ -204,6 +204,7 @@ async function startupLock(identity: string, signal: AbortSignal): Promise<() =>
   const temporary = `${path}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   await writeFile(temporary, contents, { mode: 0o600, flag: "wx" });
   const deadline = Date.now() + MCP_STARTUP_TIMEOUT_MS;
+  let nextOwnerInspection = 0;
   try {
     while (!signal.aborted && Date.now() < deadline) {
       try {
@@ -234,12 +235,16 @@ async function startupLock(identity: string, signal: AbortSignal): Promise<() =>
           if ((await readFile(path, "utf8").catch(() => "")) === text)
             await unlink(path).catch(() => {});
         }
-        if (
-          owner &&
-          (await processSnapshot([owner.pid])).get(owner.pid)?.startedAt !== owner.startedAt &&
-          (await readFile(path, "utf8").catch(() => "")) === text
-        ) {
-          await unlink(path).catch(() => {});
+        // Waiting launchers must not turn the 25ms lock retry into a ps storm.
+        // Uninspected claims stay untouched; the next check can reclaim a dead owner.
+        if (owner && Date.now() >= nextOwnerInspection) {
+          nextOwnerInspection = Date.now() + 1_000;
+          if (
+            (await processSnapshot([owner.pid])).get(owner.pid)?.startedAt !== owner.startedAt &&
+            (await readFile(path, "utf8").catch(() => "")) === text
+          ) {
+            await unlink(path).catch(() => {});
+          }
         }
         await Bun.sleep(25);
       }
