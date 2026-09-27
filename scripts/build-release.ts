@@ -2,6 +2,7 @@ import { cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 import { ANDROID_AGENT_PROTOCOL_VERSION } from "./android-agent-config";
+import { codesignArguments, type ReleaseBinary } from "./release-signing";
 
 const root = resolve(import.meta.dir, "..");
 const artifacts = join(root, "artifacts", "release");
@@ -24,10 +25,10 @@ await $`bun run build:android-agent`;
 await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64`;
 await $`bun run --cwd ${join(root, "packages/cli")} compile`;
 
-const nativeBinary = join(
-  root,
-  "native/SimViewCore/.build/arm64-apple-macosx/release/simview-core",
-);
+const nativeBinPath = (
+  await $`swift build --disable-sandbox --package-path ${join(root, "native/SimViewCore")} -c release --arch arm64 --show-bin-path`.text()
+).trim();
+const nativeBinary = join(nativeBinPath, "simview-core");
 const probeBinary = join(root, "native/SimViewProbe/build/libSimViewProbe.dylib");
 const cliBinary = join(root, "packages/cli/dist/simview");
 const packagedCore = join(root, "packages/core/bin/simview-core");
@@ -43,7 +44,7 @@ const xctestProviderMetadata = (await Bun.file(xctestProviderManifest).json()) a
 const xctestProviderManifestSha256 = new Bun.CryptoHasher("sha256")
   .update(await Bun.file(xctestProviderManifest).arrayBuffer())
   .digest("hex");
-const releaseBinaries = [
+const releaseBinaries: ReleaseBinary[] = [
   { path: cliBinary, identifier: "com.simview.cli" },
   { path: packagedCore, identifier: "com.simview.core" },
   { path: packagedProbe, identifier: "com.simview.probe" },
@@ -62,7 +63,7 @@ if (process.env.SIMVIEW_SIGNING_IDENTITY) {
   throw new Error("SIMVIEW_REQUIRE_SIGNING=1 but SIMVIEW_SIGNING_IDENTITY was not provided");
 } else {
   for (const binary of releaseBinaries) {
-    await $`/usr/bin/codesign --force --sign - --identifier ${binary.identifier} --options runtime ${binary.path}`;
+    await $`/usr/bin/codesign ${codesignArguments(binary, "adhoc", "-")}`;
   }
   console.warn(
     "Building ad-hoc signed release artifacts; set SIMVIEW_SIGNING_IDENTITY to Developer ID sign them.",

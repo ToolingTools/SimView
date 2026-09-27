@@ -4,7 +4,7 @@
     "includes": [
       "**",
       "!!**/.claude",
-      "!!**/.codex",
+      "!!.codex",
       "!!**/.simview",
       "!!**/.vscode/extensions.json",
       "!!**/.vscode/mcp.json",

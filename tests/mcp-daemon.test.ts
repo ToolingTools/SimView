@@ -40,12 +40,16 @@ async function openClient(resourceVersion: string) {
     stderr: "pipe",
   });
   const client = new Client({ name: "daemon-test", version: "1" });
+  let diagnostics = "";
+  transport.stderr?.on("data", (chunk: Buffer) => {
+    diagnostics = (diagnostics + chunk.toString()).slice(-4_096);
+  });
   try {
     await client.connect(transport);
     return { client, transport };
   } catch (error) {
     await transport.close();
-    throw error;
+    throw new Error(`MCP test client failed: ${diagnostics}`, { cause: error });
   }
 }
 
@@ -216,9 +220,10 @@ describe("shared MCP service", () => {
 });
 
 describe("MCP startup and shutdown coordination", () => {
-  test("serializes concurrent launchers across repeated final-disconnect restarts", async () => {
-    const configuration = await adapterConfiguration();
-    for (let cycle = 0; cycle < 3; cycle += 1) {
+  test.each([0, 1, 2])(
+    "serializes concurrent launchers after final disconnect (cycle %i)",
+    async (cycle) => {
+      const configuration = await adapterConfiguration();
       const results = await Promise.allSettled(
         Array.from({ length: 8 }, (_, index) => openClient(`contender-${cycle}-${index}`)),
       );
@@ -237,8 +242,9 @@ describe("MCP startup and shutdown coordination", () => {
         await Promise.allSettled(clients.map((client) => client.close()));
       }
       await eventually(async () => (await readMcpRecord(configuration.identity)) === undefined);
-    }
-  }, 30_000);
+    },
+    30_000,
+  );
 
   test("recovers stale records and keeps incompatible build identities separate", async () => {
     const configuration = await adapterConfiguration();

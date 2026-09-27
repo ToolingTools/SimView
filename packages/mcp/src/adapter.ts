@@ -124,6 +124,10 @@ export async function runAdapter(): Promise<void> {
     socket.once("error", (error) => finish("socket_error", error));
     socket.once("close", () => finish("socket_close"));
     socket.once("end", () => finish("socket_end"));
+    // The daemon registers ownership monitoring before acknowledging the handshake.
+    // From here socket closure carries owner loss back to this adapter.
+    unwatch();
+    unwatch = () => {};
     socket.pipe(process.stdout, { end: false });
     process.stdin.pipe(socket);
     await done;
