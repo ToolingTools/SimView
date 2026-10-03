@@ -45,13 +45,14 @@ import {
   type SessionState,
   saveReviewImagesInputSchema,
   summarizeAccessibilityNode,
+  TAILSCALE_SHARING_NOTICE,
   uiContextSchema,
 } from "@simview/contracts";
 import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { previewScriptResponse, resolveAppRoot } from "./app-assets";
 import { adapterDiagnostic, classifyNativeDisconnect, type DiagnosticReason } from "./diagnostics";
-import { resolveLanAddress } from "./lan";
+import { resolveLanAddress, resolveTailscaleAddress } from "./lan";
 import { MetroInspector } from "./metro";
 import { packetsFromLatestKeyframe } from "./preview";
 import { captureScreenshot } from "./screenshot";
@@ -2114,19 +2115,23 @@ export class SimViewSession {
     const options = lanSharingInputSchema.parse(input);
     if (this.#lanRelay) {
       if (
+        (options.network ?? "lan") !== (this.#lanOptions?.network ?? "lan") ||
         options.host !== this.#lanOptions?.host ||
         (options.port ?? 0) !== (this.#lanOptions?.port ?? 0)
       ) {
-        throw new Error("Stop LAN sharing before changing its host or port.");
+        throw new Error("Stop LAN sharing before changing its network, host, or port.");
       }
     } else {
-      const host = resolveLanAddress(options.host);
+      const host =
+        options.network === "tailscale"
+          ? resolveTailscaleAddress(options.host)
+          : resolveLanAddress(options.host);
       const access = { token: randomBytes(32).toString("hex"), lan: true, active: true };
       try {
         this.#lanRelay = this.#createRelay(host, options.port ?? 0, access);
       } catch {
         throw new Error(
-          `Unable to listen on ${host}:${options.port ?? 0}. Check the address or choose another LAN port.`,
+          `Unable to listen on ${host}:${options.port ?? 0}. Check the address or choose another sharing port.`,
         );
       }
       this.#lanAccess = access;
@@ -2137,7 +2142,7 @@ export class SimViewSession {
     return {
       ...status,
       url: `http://${status.host}:${status.port}/#token=${this.#lanAccess.token}`,
-      notice: LAN_SHARING_NOTICE,
+      notice: options.network === "tailscale" ? TAILSCALE_SHARING_NOTICE : LAN_SHARING_NOTICE,
     };
   }
 
@@ -2147,6 +2152,7 @@ export class SimViewSession {
     if (!host || !port) return { active: false };
     return {
       active: true,
+      ...(this.#lanOptions?.network ? { network: this.#lanOptions.network } : {}),
       host,
       port,
       transport: "http",

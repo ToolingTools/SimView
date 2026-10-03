@@ -10,7 +10,13 @@ import {
 } from "@simview/contracts";
 import { previewLanOptions } from "../packages/cli/src/commands";
 import * as lan from "../packages/mcp/src/lan";
-import { isPrivateIPv4, lanAddresses, selectLanAddress } from "../packages/mcp/src/lan";
+import {
+  isPrivateIPv4,
+  isTailscaleIPv4,
+  lanAddresses,
+  selectLanAddress,
+  selectTailscaleAddress,
+} from "../packages/mcp/src/lan";
 import { createServer } from "../packages/mcp/src/server";
 import { SimViewSession } from "../packages/mcp/src/session";
 
@@ -62,6 +68,65 @@ describe("LAN configuration", () => {
       expect(() => previewLanOptions({ lan: true, "lan-port": port })).toThrow();
     }
     expect(lanSharingInputSchema.safeParse({ port: 65536 }).success).toBe(false);
+  });
+  test("Tailscale address selection verifies the CLI address and local assignment", () => {
+    const tailscaleAddresses = [
+      ...addresses,
+      { name: "utun4", address: "100.100.103.97" },
+      { name: "utun5", address: "100.100.103.98" },
+    ];
+    expect(selectTailscaleAddress(tailscaleAddresses, "100.100.103.97")).toBe("100.100.103.97");
+    expect(selectTailscaleAddress(tailscaleAddresses, "100.100.103.97", "100.100.103.97")).toBe(
+      "100.100.103.97",
+    );
+    expect(() => selectTailscaleAddress(addresses, "100.100.103.97")).toThrow("assigned");
+    expect(() =>
+      selectTailscaleAddress(tailscaleAddresses, "100.100.103.97", "100.100.103.98"),
+    ).toThrow("match");
+    expect(selectLanAddress(tailscaleAddresses, "en0")).toBe("192.168.1.2");
+    expect(() => selectLanAddress(tailscaleAddresses, undefined, "100.100.103.97")).toThrow();
+    for (const address of [
+      "100.63.255.255",
+      "100.128.0.0",
+      "100.064.0.1",
+      "100.64.0.256",
+      "100.64.0",
+      "0.0.0.0",
+      "127.0.0.1",
+      "192.168.1.2",
+      "8.8.8.8",
+      "::1",
+    ]) {
+      expect(isTailscaleIPv4(address)).toBe(false);
+      expect(() => selectTailscaleAddress([{ name: "test", address }], address)).toThrow();
+    }
+    expect(isTailscaleIPv4("100.64.0.0")).toBe(true);
+    expect(isTailscaleIPv4("100.127.255.255")).toBe(true);
+  });
+  test("Tailscale CLI flags are explicit, exclusive, and validated", () => {
+    expect(previewLanOptions({ tailscale: true })).toEqual({ network: "tailscale" });
+    expect(
+      previewLanOptions({
+        tailscale: true,
+        "tailscale-host": "100.100.103.97",
+        "tailscale-port": "4041",
+      }),
+    ).toEqual({ network: "tailscale", host: "100.100.103.97", port: 4041 });
+    expect(() => previewLanOptions({ tailscale: true, lan: true })).toThrow("either");
+    expect(() => previewLanOptions({ "tailscale-port": "4041" })).toThrow("require --tailscale");
+    expect(() => previewLanOptions({ "tailscale-host": "100.100.103.97" })).toThrow(
+      "require --tailscale",
+    );
+    expect(() => previewLanOptions({ tailscale: true, "lan-port": "4041" })).toThrow(
+      "require --lan",
+    );
+    expect(() => previewLanOptions({ lan: true, "tailscale-port": "4041" })).toThrow(
+      "require --tailscale",
+    );
+    for (const port of ["-1", "65536", "1.5", "", "1e3"]) {
+      expect(() => previewLanOptions({ tailscale: true, "tailscale-port": port })).toThrow();
+    }
+    expect(lanSharingInputSchema.safeParse({ network: "public" }).success).toBe(false);
   });
   test("requires a connected review and does not start a listener implicitly", async () => {
     const session = new SimViewSession();
@@ -409,5 +474,66 @@ lanTest("stopping sharing while MJPEG attaches closes the late attachment", asyn
     socket.close();
   } finally {
     attachment.mockRestore();
+  }
+});
+
+test("Tailscale sharing keeps relay authentication and revocation, and reports its network without tokens", async () => {
+  const resolver = spyOn(lan, "resolveTailscaleAddress").mockReturnValue("127.0.0.1");
+  try {
+    const { session, inputs } = fixture();
+    const sharing = session.startLanSharing({ network: "tailscale" });
+    const remote = auth(sharing.url);
+    expect(sharing.network).toBe("tailscale");
+    expect(sharing.notice).toContain("Tailscale encrypts");
+    expect(session.startLanSharing({ network: "tailscale" }).url === sharing.url).toBe(true);
+    expect(() => session.startLanSharing({})).toThrow("network");
+    expect(resolver).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(session.lanSharingStatus()).includes(remote.token)).toBe(false);
+    expect(JSON.stringify(session.state()).includes(remote.token)).toBe(false);
+    expect((await fetch(`${remote.origin}/state`)).status).toBe(401);
+    expect(
+      (
+        await fetch(`${remote.origin}/state`, {
+          headers: { authorization: `Bearer ${session.relayToken}` },
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await fetch(`${remote.origin}/state`, {
+          headers: { ...remote.headers, origin: "http://evil.example" },
+        })
+      ).status,
+    ).toBe(403);
+    expect(
+      (
+        await fetch(`${remote.origin}/input`, {
+          method: "POST",
+          headers: remote.headers,
+          body: JSON.stringify({ method: "input.tap", params: { x: 0.5, y: 0.5 } }),
+        })
+      ).ok,
+    ).toBe(true);
+    expect(inputs).toEqual(["input.tap"]);
+    expect(
+      (
+        await fetch(`${remote.origin}/annotation`, {
+          method: "POST",
+          headers: remote.headers,
+          body: JSON.stringify({
+            action: "add",
+            geometry: { kind: "point", x: 0.5, y: 0.5 },
+            note: "Tailnet feedback",
+          }),
+        })
+      ).ok,
+    ).toBe(true);
+    expect(session.state().annotations[0]?.note).toBe("Tailnet feedback");
+    await session.stopLanSharing();
+    const next = session.startLanSharing({ network: "tailscale", port: sharing.port });
+    expect(next.url === sharing.url).toBe(false);
+    expect((await fetch(`${remote.origin}/state`, { headers: remote.headers })).status).toBe(401);
+  } finally {
+    resolver.mockRestore();
   }
 });

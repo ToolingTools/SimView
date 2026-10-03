@@ -40,6 +40,9 @@ const commandOptions: Record<string, Record<string, OptionDefinition>> = {
     "no-open": { type: "boolean" },
     "print-url": { type: "boolean" },
     lan: { type: "boolean" },
+    tailscale: { type: "boolean" },
+    "tailscale-host": { type: "string" },
+    "tailscale-port": { type: "string" },
     "lan-host": { type: "string" },
     "lan-port": { type: "string" },
   },
@@ -243,7 +246,11 @@ export async function run(argv = process.argv): Promise<void> {
         {
           device: state.device,
           ...(shouldOpen ? {} : { browserUrl }),
-          ...(sharing ? { lanUrl: sharing.url, lanNotice: sharing.notice } : {}),
+          ...(sharing
+            ? lanOptions?.network === "tailscale"
+              ? { tailscaleUrl: sharing.url, tailscaleNotice: sharing.notice }
+              : { lanUrl: sharing.url, lanNotice: sharing.notice }
+            : {}),
           note: "Press Ctrl-C to stop SimView.",
         },
         false,
@@ -466,18 +473,31 @@ function nextFrame(client: SimViewClient, kind: FrameKind): Promise<Uint8Array> 
 }
 
 export function previewLanOptions(options: Options): LanSharingInput | undefined {
-  if (options.lan !== true) {
-    if (options["lan-host"] !== undefined || options["lan-port"] !== undefined) {
-      throw new Error("--lan-host and --lan-port require --lan");
-    }
-    return undefined;
+  const tailscale = options.tailscale === true;
+  if (tailscale && options.lan === true)
+    throw new Error("Pass either --lan or --tailscale, not both");
+  if (
+    !tailscale &&
+    (options["tailscale-host"] !== undefined || options["tailscale-port"] !== undefined)
+  ) {
+    throw new Error("--tailscale-host and --tailscale-port require --tailscale");
   }
-  const port = options["lan-port"];
+  if (
+    options.lan !== true &&
+    (options["lan-host"] !== undefined || options["lan-port"] !== undefined)
+  ) {
+    throw new Error("--lan-host and --lan-port require --lan");
+  }
+  if (!tailscale && options.lan !== true) return undefined;
+  const prefix = tailscale ? "tailscale" : "lan";
+  const port = options[`${prefix}-port`];
+  const host = options[`${prefix}-host`];
   if (port !== undefined && (typeof port !== "string" || !/^\d+$/.test(port))) {
-    throw new Error("--lan-port must be an integer from 0 to 65535");
+    throw new Error(`--${prefix}-port must be an integer from 0 to 65535`);
   }
   return lanSharingInputSchema.parse({
-    ...(options["lan-host"] !== undefined ? { host: options["lan-host"] } : {}),
+    ...(tailscale ? { network: "tailscale" } : {}),
+    ...(host !== undefined ? { host } : {}),
     ...(port !== undefined ? { port: Number(port) } : {}),
   });
 }
@@ -563,6 +583,7 @@ Usage:
   simview doctor --json
   simview preview [--device-id <id>] [--no-open] [--print-url]
                   [--lan [--lan-host <local-ipv4>] [--lan-port <0-65535>]]
+                  [--tailscale [--tailscale-host <tailscale-ipv4>] [--tailscale-port <0-65535>]]
   simview screenshot --output <path> [--device-id <id>]
   simview observe [--scope interactive|visible|full] [--output <png>] [--json]
   simview tree [--scope interactive|visible|full] [--json]

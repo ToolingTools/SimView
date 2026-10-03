@@ -1,11 +1,11 @@
 ---
 name: simview-lan
-description: Share the current SimView review with another device on a trusted local network, check LAN sharing status, or stop sharing.
+description: Share the current SimView review over a trusted LAN or private Tailscale tailnet, check sharing status, or stop sharing.
 ---
 
 # SimView LAN sharing
 
-Use this skill when the user requests LAN access to a SimView preview. Ordinary
+Use this skill when the user requests LAN or Tailscale access to a SimView preview. Ordinary
 local preview requests do not enable sharing.
 
 - Reuse the current connected review. Check `get_simview_state` when its state is
@@ -13,11 +13,13 @@ local preview requests do not enable sharing.
   explicitly selected device; connect automatically when only one is available,
   otherwise ask the user to select a device. Call `connect_device` before sharing.
 - Call `start_lan_sharing` with no arguments for automatic address selection and
-  an available port. Use `host` and `port` only when the user specifies them or
+  an available port. For an explicit Tailscale request, pass `network: "tailscale"`
+  to bind the address verified through the host Tailscale CLI. Use `host` and `port` only when the user specifies them or
   address selection requires a choice. For ambiguous interfaces, present the
   returned candidates and ask which network to use. Do not guess a VPN address.
 - Present the returned URL as a clickable link along with its notice: anyone
-  with the link can control the device, and HTTP traffic is unencrypted. The
+  with the link and network access can control the device. LAN HTTP traffic is
+  unencrypted; Tailscale encrypts traffic between tailnet devices. The
   viewer must be on a network that can reach the host. This link is intentionally
   returned by the sharing tool; do not save it in project files or other logs.
 - `get_lan_sharing_status` checks sharing without revealing the link. Repeating
@@ -38,3 +40,10 @@ For an explicitly requested standalone terminal preview, use
 `simview preview --lan`, optionally with `--lan-host <local-ipv4>`,
 `--lan-port <port>`, and `--no-open`. This creates a separate review; prefer the
 MCP tools when sharing the agent's current annotations. Ctrl-C stops that process.
+
+For a standalone tailnet preview, use `simview preview --tailscale`, optionally
+with `--tailscale-port <port>`, `--tailscale-host <current-tailscale-ipv4>`, and
+`--no-open`. Tailscale must be connected on both devices and permit the port.
+Use the returned IP link unchanged; substituting MagicDNS fails Host/Origin
+validation. Never enable Serve or Funnel as part of private preview sharing.
+Status and stop still use `get_lan_sharing_status` and `stop_lan_sharing`.

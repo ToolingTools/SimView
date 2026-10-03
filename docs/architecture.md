@@ -378,3 +378,15 @@ Origin, and CSP are scoped to the listener origin. Capture demand combines the
 embedded preview and browser viewers; unused MJPEG attachments are released.
 Sharing metadata has dedicated contract schemas. Ordinary state and status omit
 capabilities; only explicit start-sharing results contain the secret URL.
+
+
+### Private tailnet preview
+
+Tailscale sharing is an explicit alternative to LAN sharing, using the same
+separate revocable capability and MJPEG/annotation relay. The network selector
+queries the installed Tailscale CLI and requires its CGNAT IPv4 address to be
+assigned locally. A different VPN's CGNAT address is insufficient. The listener
+binds only this address, never a wildcard or LAN interface. Native, ADB, Metro,
+MCP, and the default browser relay retain their local transports. No Serve or
+Funnel state is modified. Status includes the sharing network without tokens;
+only an explicit sharing operation returns the private capability link.

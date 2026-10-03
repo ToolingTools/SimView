@@ -277,6 +277,36 @@ For acceptance testing, `SIMVIEW_TEST_LAN=1 bun test tests/lan-sharing.test.ts`
 uses the real LAN interface. The default test suite exercises the same relay
 handlers over loopback so it can run without LAN permissions.
 
+### Share a preview over Tailscale
+
+Run `simview preview --tailscale --device-id <id>` for private tailnet access.
+SimView queries the installed Tailscale CLI (`tailscale ip -4`, including the
+macOS app's bundled CLI) and binds only to that locally assigned Tailscale IPv4
+address. Tailscale must be connected on the host and viewer, with tailnet policy
+allowing the chosen port. No Serve/Funnel configuration or public endpoint is
+created. Ordinary `--lan` sharing still selects only RFC1918 LAN addresses.
+
+Use `--tailscale-port <0-65535>` to choose a fixed port (`0` selects an available
+port) and optionally
+`--tailscale-host <tailscale-ipv4>` to assert the current host address. These
+options require `--tailscale` and cannot be combined with `--lan` or its
+options. Add `--no-open` to avoid opening the host's local browser. For example:
+
+```sh
+simview preview --tailscale --tailscale-port 4041 --device-id <id> --no-open
+```
+
+Open the printed IP-based capability link from your iPad or another tailnet
+device. Tailscale encrypts traffic between devices; the link still grants full
+interactive access and must be kept private. Host/Origin validation requires
+the printed IP address rather than substituting a MagicDNS hostname. Preview
+video uses MJPEG, and annotations are shared with the same review. Stop sharing
+or exit the process to revoke the link. Restarting creates a new token.
+
+With MCP, call `start_lan_sharing` with `network: "tailscale"` (and optional
+`port`) to share the current review. The existing status and stop tools work
+for both networks; ordinary diagnostics never return the link or token.
+
 By default, the standalone browser preview uses the authenticated localhost stream. The
 embedded MCP App does not make localhost HTTP or WebSocket requests: Codex
 requires secure network origins, so it carries bounded video packet batches and

@@ -101,7 +101,9 @@ The repository has no established commit history yet. Use concise, imperative su
 ## Security & Configuration
 
 Keep transports loopback-only and authenticated by default. The browser relay
-may bind to one assigned private IPv4 address only through explicit LAN sharing.
+may bind to one assigned private IPv4 address only through explicit LAN or
+Tailscale sharing. Tailscale selection verifies the CLI-reported address against
+local assignments and does not configure Serve or Funnel.
 LAN sharing uses separate revocable tokens and HTTP/MJPEG; capability links may
 be returned only by explicit sharing operations. Native, Metro, ADB, and MCP
 transports retain their existing local boundaries. Native sockets use a mode-0700
