@@ -4,7 +4,10 @@ export { filterDeviceList, formatElementTree } from "./output";
 
 // Keep the stdio adapter independent of the device/MCP implementation graph.
 export async function run(argv = process.argv): Promise<void> {
-  if (argv[2] === "mcp") {
+  if (argv[2] === "serve" && argv.length === 4 && argv[3] === "--daemon") {
+    const { runPreviewDaemonFromStdin } = await import("./serve");
+    await runPreviewDaemonFromStdin();
+  } else if (argv[2] === "mcp") {
     const { runMcp } = await import("../../mcp/src/adapter");
     await runMcp(argv.slice(3));
   } else {

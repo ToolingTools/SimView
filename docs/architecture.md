@@ -390,3 +390,33 @@ binds only this address, never a wildcard or LAN interface. Native, ADB, Metro,
 MCP, and the default browser relay retain their local transports. No Serve or
 Funnel state is modified. Status includes the sharing network without tokens;
 only an explicit sharing operation returns the private capability link.
+
+
+### Persistent standalone preview server
+
+`packages/cli/src/serve.ts` owns an independent browser-server lifetime,
+separate from MCP adapters and per-device native backends. Named `serve start`
+operations use a serialized private runtime registry and spawn a detached CLI
+child with startup credentials on stdin and ignored stdout/stderr. `serve run`
+uses the same server in the foreground for external supervisors, without
+printing credentials. A verified loopback, LAN, or Tailscale listener may exist
+with no selected device or native client. Browser `/devices` discovery and
+explicit `/device` selection attach a ready device; there is no auto-selection,
+auto-boot, or automatic native recovery.
+
+A mode-0600 Unix control socket accepts bounded authenticated status, connect,
+and stop handshakes. Status excludes credentials and UI contents; only explicit
+start/connect return a browser capability. Registry directories are mode 0700,
+records mode 0600, and startup uses the existing atomic lock and process start
+identity checks. Stale records are removed without signalling their PID. A
+healthy named server can be reused only with identical bind options and build
+identity. Stop revokes viewers and removes its own record and socket; restart
+creates a new capability. No startup URLs are written to service logs.
+
+Idle authenticated browser sockets do not acquire a native client or enable
+capture. Selecting a device reconciles existing viewer demand. A native
+disconnect closes streaming viewers while leaving the browser/control listeners
+alive; the browser can explicitly select the same ready device after reboot.
+Closing the last viewer disables its video demand. Standalone annotations stay
+in memory for this shared review, whereas connected MCP review sharing retains
+its existing requirement and lifetime.

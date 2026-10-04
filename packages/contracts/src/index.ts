@@ -4,6 +4,7 @@ export * from "./elements";
 export * from "./json";
 export * from "./mcp";
 export * from "./mcp-daemon";
+export * from "./preview-server";
 export * from "./protocol";
 export * from "./relay";
 export * from "./review-images";

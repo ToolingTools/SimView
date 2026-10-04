@@ -545,6 +545,7 @@ export class SimViewSession {
         await this.#refreshIOSAccessibilityStatus();
         this.#assertOpen();
         if (options.startRelay === true) this.startRelay();
+        if (this.viewers.size > 0) await this.#reconcilePreviewDemand();
         this.#resumeMjpegViewers();
         void this.#primeObservation();
       } catch (error) {
@@ -606,6 +607,7 @@ export class SimViewSession {
   }
 
   async #selectDevice(deviceId: string): Promise<SessionState> {
+    if (!this.client?.connected) return this.#open(deviceId, { startRelay: false });
     if (matchesDeviceId(this.device, deviceId)) {
       await this.refreshDevice();
       await this.#refreshIOSAccessibilityStatus();
@@ -2110,7 +2112,32 @@ export class SimViewSession {
 
   startLanSharing(input: LanSharingInput = {}): LanSharingStarted {
     this.requireClient();
-    if (!this.device || this.#closePromise)
+    return this.#startLanSharing(input);
+  }
+
+  /** Standalone servers may wait for an explicit browser device selection. */
+  startPreviewServer(input: {
+    network: "loopback" | "lan" | "tailscale";
+    host?: string | undefined;
+    port?: number | undefined;
+  }): { url: string; host: string; port: number; notice: string } {
+    this.#assertOpen();
+    if (input.network !== "loopback")
+      return this.#startLanSharing({ ...input, network: input.network }, true);
+    this.startRelay(input.port ?? 0);
+    const url = this.browserUrl();
+    if (!url || !this.relay?.hostname || !this.relay.port)
+      throw new Error("The preview server did not start");
+    return {
+      url,
+      host: this.relay.hostname,
+      port: this.relay.port,
+      notice: "Anyone with this local link can control the selected device. Keep the link private.",
+    };
+  }
+
+  #startLanSharing(input: LanSharingInput, allowIdle = false): LanSharingStarted {
+    if ((!allowIdle && !this.device) || this.#closePromise)
       throw new Error("Connect a healthy device before sharing.");
     const options = lanSharingInputSchema.parse(input);
     if (this.#lanRelay) {
@@ -2385,6 +2412,8 @@ export class SimViewSession {
           socket.data.authenticated = true;
           clearTimeout(socket.data.authenticationTimer);
           session.viewers.add(socket);
+          socket.data.waitingForKeyframe = socket.data.codec === "h264";
+          if (!session.client?.connected) return;
           void session.#reconcilePreviewDemand().catch(() => {
             socket.close(1011, "Unable to enable preview capture");
           });
@@ -2757,6 +2786,9 @@ export class SimViewSession {
         this.#clearSemanticState();
         this.#metroInspector.close();
         this.#resetPreviewPackets();
+        for (const viewer of this.viewers)
+          viewer.close(1001, "Device disconnected; select an available device to reconnect");
+        this.viewers.clear();
         void this.#releaseMjpegClient();
       }),
     );

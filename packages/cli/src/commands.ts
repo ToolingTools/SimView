@@ -14,6 +14,7 @@ import {
   type LanSharingInput,
   type LanSharingStarted,
   lanSharingInputSchema,
+  previewServerOptionsSchema,
   type SessionState,
   SIMVIEW_VERSION,
 } from "@simview/contracts";
@@ -34,6 +35,17 @@ const commonOptions: Record<string, OptionDefinition> = {
 const commandOptions: Record<string, Record<string, OptionDefinition>> = {
   devices: { booted: { type: "boolean" }, json: { type: "boolean" } },
   doctor: { json: { type: "boolean" } },
+  serve: {
+    name: { type: "string" },
+    port: { type: "string" },
+    json: { type: "boolean" },
+    lan: { type: "boolean" },
+    tailscale: { type: "boolean" },
+    "lan-host": { type: "string" },
+    "lan-port": { type: "string" },
+    "tailscale-host": { type: "string" },
+    "tailscale-port": { type: "string" },
+  },
   preview: {
     "device-id": { type: "string" },
     udid: { type: "string" },
@@ -113,8 +125,12 @@ function parse(argv: string[]): { command: string; positional: string[]; options
   if (command === "--version" || command === "-v") {
     return { command: "version", positional: [], options: {} };
   }
-  if (command === "serve") {
-    return { command, positional: argv.slice(3), options: {} };
+  if (
+    command === "serve" &&
+    argv[3]?.startsWith("--") &&
+    argv.slice(3).some((arg) => ["--socket", "--token-fd"].includes(arg))
+  ) {
+    return { command: "native-serve", positional: argv.slice(3), options: {} };
   }
   const options = commandOptions[command];
   if (!options) throw new Error(`Unknown command: ${command}`);
@@ -227,6 +243,40 @@ export async function run(argv = process.argv): Promise<void> {
         break;
       }
       throw new Error(`Unknown daemon action: ${action}`);
+    }
+    case "serve": {
+      const action = positional[0] ?? "status";
+      if (positional.length > 1 || !["start", "run", "status", "connect", "stop"].includes(action))
+        throw new Error("serve accepts start, run, status, connect, or stop");
+      const name = stringOption(options, "name", false) ?? "default";
+      if (action === "start" || action === "run") {
+        const sharing = previewLanOptions(options);
+        if (sharing && options.port !== undefined)
+          throw new Error(
+            "--port is for loopback; use --lan-port or --tailscale-port when sharing",
+          );
+        const port = options.port;
+        if (port !== undefined && (typeof port !== "string" || !/^\d+$/.test(port)))
+          throw new Error("--port must be an integer from 0 to 65535");
+        const serveOptions = previewServerOptionsSchema.parse({
+          name,
+          network: sharing?.network ?? (sharing ? "lan" : "loopback"),
+          ...(sharing?.host ? { host: sharing.host } : {}),
+          port: sharing?.port ?? (port === undefined ? 0 : Number(port)),
+        });
+        const { startPreviewDaemon, runPreviewForeground } = await import("./serve");
+        if (action === "run") await runPreviewForeground(serveOptions);
+        else printJson(await startPreviewDaemon(serveOptions), options.json === true);
+      } else {
+        if (Object.keys(options).some((key) => !["name", "json"].includes(key)))
+          throw new Error("serve status, connect, and stop accept only --name and --json");
+        const { previewDaemonCommand } = await import("./serve");
+        printJson(
+          await previewDaemonCommand(name, action as "status" | "connect" | "stop"),
+          options.json === true,
+        );
+      }
+      break;
     }
     case "preview": {
       const lanOptions = previewLanOptions(options);
@@ -444,7 +494,7 @@ export async function run(argv = process.argv): Promise<void> {
       await withClient(deviceId, udid, (client) => client.request("input.button", { button }));
       break;
     }
-    case "serve": {
+    case "native-serve": {
       const child = Bun.spawn([resolveBinary(), "serve", ...positional], {
         stdin: "inherit",
         stdout: "inherit",
@@ -581,6 +631,10 @@ Usage:
   simview --version
   simview devices [--booted] [--json]
   simview doctor --json
+  simview serve start|run [--name <name>] [--port <0-65535>]
+                        [--lan [--lan-host <ip>] [--lan-port <port>]]
+                        [--tailscale [--tailscale-host <ip>] [--tailscale-port <port>]]
+  simview serve status|connect|stop [--name <name>] [--json]
   simview preview [--device-id <id>] [--no-open] [--print-url]
                   [--lan [--lan-host <local-ipv4>] [--lan-port <0-65535>]]
                   [--tailscale [--tailscale-host <tailscale-ipv4>] [--tailscale-port <0-65535>]]

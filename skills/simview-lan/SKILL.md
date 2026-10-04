@@ -47,3 +47,17 @@ with `--tailscale-port <port>`, `--tailscale-host <current-tailscale-ipv4>`, and
 Use the returned IP link unchanged; substituting MagicDNS fails Host/Origin
 validation. Never enable Serve or Funnel as part of private preview sharing.
 Status and stop still use `get_lan_sharing_status` and `stop_lan_sharing`.
+
+
+For an explicitly requested persistent browser host, use `simview serve start`
+with `--name <name>` and either `--lan`/`--lan-port` or
+`--tailscale`/`--tailscale-port`. It starts idle without selecting or booting a
+device; the viewer uses Choose device after the device is available. Do not
+replace MCP review sharing with a standalone server unless the user requests
+that separate review. `serve connect --name <name> --json` explicitly returns
+its secret `url`; `serve status` omits URLs/tokens and `serve stop` revokes them.
+Do not persist capability output in service logs. `serve run` stays in the
+foreground without printing a capability for an external supervisor. SimView
+does not install login services. After a device shuts down, start it on the
+host, refresh the device menu, and select it again; the server never boots or
+reconnects a device automatically.

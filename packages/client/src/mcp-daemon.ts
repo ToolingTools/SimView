@@ -192,8 +192,11 @@ export async function connectMcpDaemon(
   }
 }
 
-async function startupLock(identity: string, signal: AbortSignal): Promise<() => Promise<void>> {
-  const path = mcpDaemonPaths(identity).lock;
+export async function startupLock(
+  identity: string,
+  signal: AbortSignal,
+  path = mcpDaemonPaths(identity).lock,
+): Promise<() => Promise<void>> {
   const startedAt = (await processSnapshot([process.pid])).get(process.pid)?.startedAt;
   if (!startedAt) throw new Error("Unable to identify the MCP launcher");
   const contents = JSON.stringify({
