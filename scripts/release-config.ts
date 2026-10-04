@@ -96,3 +96,10 @@ export async function copyPluginSkills(root: string, stage: string): Promise<voi
     }
   }
 }
+
+export async function copyPreviewAssets(root: string, stage: string): Promise<void> {
+  const source = join(root, "packages", "app", "dist");
+  // Every distribution needs both files, including the standalone macOS archive.
+  await Promise.all(["preview.html", "preview.js"].map((name) => readFile(join(source, name))));
+  await cp(source, join(stage, "app", "dist"), { recursive: true });
+}

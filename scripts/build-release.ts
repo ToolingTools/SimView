@@ -2,6 +2,7 @@ import { cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
 import { ANDROID_AGENT_PROTOCOL_VERSION } from "./android-agent-config";
+import { copyPreviewAssets } from "./release-config";
 import { codesignArguments, type ReleaseBinary } from "./release-signing";
 
 const root = resolve(import.meta.dir, "..");
@@ -92,8 +93,10 @@ await Promise.all([
   cp(join(root, "README.md"), join(archiveStage, "README.md")),
   cp(join(root, "LICENSE"), join(archiveStage, "LICENSE")),
   cp(join(root, "THIRD_PARTY_NOTICES.md"), join(archiveStage, "THIRD_PARTY_NOTICES.md")),
+  copyPreviewAssets(root, archiveStage),
 ]);
 await $`ditto -c -k --norsrc --keepParent ${archiveStage} ${join(artifacts, `simview-${version}-macos.zip`)}`;
+await $`bun ${join(root, "scripts/smoke-preview-package.ts")} ${join(archiveStage, "bin/simview")}`;
 
 await $`bun ${join(root, "scripts/generate-sbom.ts")} ${join(artifacts, "sbom.cdx.json")}`;
 

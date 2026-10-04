@@ -1,7 +1,7 @@
 import { mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { $ } from "bun";
-import { copyPluginSkills, createPackagedMcpConfig } from "./release-config";
+import { copyPluginSkills, copyPreviewAssets, createPackagedMcpConfig } from "./release-config";
 
 const root = resolve(import.meta.dir, "..");
 const stage = join(root, "artifacts", "plugin", "simview");
@@ -77,7 +77,7 @@ await writeFile(
   join(stage, ".mcp.json"),
   `${JSON.stringify(createPackagedMcpConfig(await Bun.file(join(root, ".mcp.json")).json()), null, 2)}\n`,
 );
-await $`cp -R ${join(root, "packages/app/dist")} ${join(stage, "app/dist")}`;
+await copyPreviewAssets(root, stage);
 await $`cp ${join(root, "packages/cli/dist/simview")} ${join(stage, "bin/simview")}`;
 await $`cp ${join(root, "packages/core/bin/simview-core")} ${join(stage, "bin/simview-core")}`;
 await $`cp ${join(root, "packages/core/bin/libSimViewProbe.dylib")} ${join(stage, "bin/libSimViewProbe.dylib")}`;

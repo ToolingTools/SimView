@@ -1,7 +1,8 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { chmod, lstat } from "node:fs/promises";
-import { resolve } from "node:path";
+import { chmod, cp, lstat, mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { SimViewClient } from "@simview/client";
 import {
   parseDeviceDescription,
@@ -16,6 +17,7 @@ import {
   requestPreviewServer,
 } from "../packages/cli/src/serve-registry";
 import { SimViewSession } from "../packages/mcp/src/session";
+import { copyPreviewAssets } from "../scripts/release-config";
 
 const names = new Set<string>();
 afterEach(async () => {
@@ -52,6 +54,54 @@ async function eventually(check: () => Promise<boolean>) {
   }
   throw new Error("Preview lifecycle did not settle");
 }
+
+test("installed compiled servers serve packaged assets through a command symlink", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "simview-preview-install-"));
+  const stage = join(directory, "installation");
+  const command = join(directory, "simview");
+  const serverName = name();
+  const installedCli = async (action: string) => {
+    const child = Bun.spawn([command, "serve", action, "--name", serverName, "--json"], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        SIMVIEW_PLUGIN_ROOT: "",
+        SIMVIEW_CORE_BINARY: resolve("tests/fixtures/fake-simview-core.ts"),
+      },
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    if (code !== 0) throw new Error(`Installed preview failed: ${stderr}`);
+    return JSON.parse(stdout) as unknown;
+  };
+  try {
+    await mkdir(join(stage, "bin"), { recursive: true });
+    await cp(resolve("packages/cli/dist/simview"), join(stage, "bin", "simview"));
+    await copyPreviewAssets(resolve("."), stage);
+    await symlink(join(stage, "bin", "simview"), command);
+    const connection = previewServerConnectionSchema.parse(await installedCli("start"));
+    const url = new URL(connection.url);
+    const html = await fetch(url.origin);
+    expect(html.status).toBe(200);
+    expect(await html.text()).toBe(await Bun.file(join(stage, "app/dist/preview.html")).text());
+    const script = await fetch(`${url.origin}/preview.js`);
+    expect(script.status).toBe(200);
+    expect(await script.text()).toBe(await Bun.file(join(stage, "app/dist/preview.js")).text());
+    expect((await fetch(`${url.origin}/state`)).status).toBe(401);
+    const state = await fetch(`${url.origin}/state`, {
+      headers: { authorization: `Bearer ${url.hash.slice(7)}` },
+    }).then((response) => response.json());
+    expect(state.connected).toBe(false);
+  } finally {
+    await installedCli("stop");
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 15_000);
 
 test("detached servers are idle, authenticated, reused concurrently, private, and revocable", async () => {
   const serverName = name();

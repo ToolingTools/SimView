@@ -9,6 +9,9 @@ GitHub Actions builds from source, signs the resulting Mach-O files, notarizes
 the plugin archive, and then uses those same signed bytes for GitHub Releases,
 npm, Codex, Claude Code, and MCPB. Raw executables are never uploaded as release
 assets; permission-preserving archives and packages are the distribution unit.
+The standalone macOS archive also includes `app/dist/preview.html` and
+`app/dist/preview.js`. Release builds smoke-test its compiled idle preview from
+outside the checkout, including asset serving and authenticated state access.
 
 The unprivileged verification job builds and smoke-tests an unsigned candidate.
 Only the tag-triggered publish job has the release environment, signing
