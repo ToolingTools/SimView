@@ -27,6 +27,7 @@ let lastPaint = 0;
 const treeRequests = [];
 let recoveryRequests = 0;
 let inputs = 0;
+let nativeDisconnected = false;
 const deadlines = new Map();
 const schedule = browser.setTimeout.bind(browser);
 browser.setTimeout = (callback, milliseconds, ...args) => {
@@ -163,6 +164,7 @@ if (relay) {
     if (path === "/state") return Response.json(state);
     if (path === "/device") {
       recoveryRequests++;
+      nativeDisconnected = false;
       return Response.json(state);
     }
     if (path.startsWith("/elements")) {
@@ -190,6 +192,7 @@ if (relay) {
       sockets.push(this);
       let configured = false;
       this.timer = setInterval(() => {
+        if (nativeDisconnected) return;
         if (!configured) {
           this.onmessage?.({ data: Uint8Array.from([0x10, 1, 0x42, 0, 0x1e]).buffer });
           configured = true;
@@ -414,10 +417,13 @@ try {
   }
   // A native disconnect can leave the App bridge alive. Explicit recovery must
   // restore connected state as well as the tree, so closing Inspector resumes.
-  if (relay) sockets.at(-1).onclose();
-  else browser.__simviewTestBridge.onclose();
+  if (relay) {
+    nativeDisconnected = true;
+    sockets.at(-1).onclose();
+  } else browser.__simviewTestBridge.onclose();
   await until(
-    () => browser.document.body.textContent.includes("Review disconnected"),
+    () =>
+      browser.document.body.textContent.includes(relay ? "Choose a device" : "Review disconnected"),
     "disconnect visible",
   );
   click("Show inspector");

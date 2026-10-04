@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   assertCodexPluginArchiveSize,
+  copyPluginSkills,
   createNpmPackageManifest,
   maxCodexPluginArchiveBytes,
   repositoryUrl,
@@ -20,6 +22,19 @@ afterEach(async () => {
 });
 
 describe("release distribution", () => {
+  test("packages both operational skills and their metadata without changes", async () => {
+    const stage = await mkdtemp(join(tmpdir(), "simview-skills-"));
+    temporaryDirectories.push(stage);
+    await copyPluginSkills(root, stage);
+    for (const name of ["simview", "simview-lan"]) {
+      for (const file of ["SKILL.md", "agents/openai.yaml"]) {
+        expect(await Bun.file(join(stage, "skills", name, file)).text()).toBe(
+          await Bun.file(join(root, "skills", name, file)).text(),
+        );
+      }
+    }
+  });
+
   test("publishes one standalone macOS command", () => {
     const manifest = createNpmPackageManifest("1.2.3") as {
       name: string;

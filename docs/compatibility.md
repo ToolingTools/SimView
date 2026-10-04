@@ -21,6 +21,67 @@ The iOS backend currently probes:
 Framework candidates cover the system CoreSimulator framework plus the Xcode 26
 and Xcode 27 SimulatorKit locations.
 
+## Device Hub and command-line tools
+
+Xcode 27 replaces the Simulator desktop application with Device Hub. Simulated
+devices still have CoreSimulator UDIDs; changing the desktop application does
+not require a new SimView device identity or MCP protocol.
+
+Apple recommends `devicectl` for Device Hub automation, while continuing to
+document `simctl` for Simulator control. SimView uses each interface where it
+fits the operation rather than replacing the whole Simulator backend:
+
+| Operation | Integration | Reason |
+| --- | --- | --- |
+| Inventory and runtime discovery | `simctl list --json` | Preserves runtime identifiers and older Xcode compatibility. |
+| Orientation | Capability-detected `devicectl`, with the legacy private path when unavailable | Provides a documented replacement for `PurpleWorkspacePort`. |
+| Live video and screenshots | Direct CoreSimulator/SimulatorKit framebuffer capture | `devicectl` screenshot and recording commands write PNG/MP4 files; they do not expose SimView's live frame and keyframe transport. |
+| Touch, keyboard, and hardware buttons | SimulatorKit HID | `devicectl` does not document equivalent input commands. Advertised CoreDevice HID capabilities are not a CLI contract. |
+| Accessibility | XCTest with native AX fallback | No equivalent accessibility-tree CLI is documented. |
+| Foreground app discovery | `simctl spawn ... launchctl print` | A process list does not establish the foreground application role. |
+| Probe relaunch | Existing `simctl` commands | Preserve tested environment injection and relaunch behavior. |
+| Unicode pasteboard fallback | Capability-detected `devicectl`, then legacy `simctl pbcopy` | Xcode 27's `devicectl` preserves UTF-8 text; local `simctl pbcopy` testing decoded those bytes incorrectly. ASCII still uses HID directly. |
+
+Device Hub's own live display uses private CoreDevice media-streaming
+frameworks. The installed CLI exposes no live-frame subscription, and Apple's
+[capture documentation](https://developer.apple.com/documentation/xcode/capturing-screenshots-and-videos-from-devices)
+describes saved screenshots and recordings. Replacing SimulatorKit would require
+a separate compatibility and performance investigation of those private
+interfaces; the desktop live display alone does not establish a supported
+streaming API.
+
+Rotation probes the selected installation's `devicectl` orientation command,
+then invokes it with a ten-second execution deadline. Missing or unsupported
+commands use the legacy path. An execution timeout or operational failure is
+reported rather than silently replayed through the private backend.
+SimView retains its existing interface-orientation convention: `landscape-left`
+maps to physical `landscapeRight`, and `landscape-right` to physical
+`landscapeLeft`. This matches the installed legacy core's observed behavior.
+
+The desktop UI is resolved within the selected Xcode installation: Device Hub
+at `Contents/Applications/DeviceHub.app`, or legacy Simulator at
+`Contents/Developer/Applications/Simulator.app`. A missing desktop application
+must not prevent otherwise working headless capture or input. `DEVELOPER_DIR`
+selects the installation without changing the system-wide Xcode selection.
+
+Sources: [Apple's Device Hub session](https://developer.apple.com/videos/play/wwdc2026/260/)
+and [Xcode command-line tool reference](https://developer.apple.com/documentation/xcode/xcode-command-line-tool-reference).
+
+After rebuilding with `bun run build:native`, run the opt-in check against a
+dedicated booted simulator:
+
+```sh
+SIMVIEW_DEVICE_ID=ios:<udid> bun scripts/smoke-device-hub.ts
+```
+
+This verifies both landscape orientation values and portrait through SimView,
+checks the resulting sensor state with `devicectl`, validates in-memory PNG
+frames and live H.264 delivery, and restores the original orientation. The raw
+framebuffer can retain portrait pixel dimensions while its content rotates;
+dimension swapping is not asserted. SpringBoard and portrait-only apps need not
+change their layout when the simulated sensor rotates. No images are saved.
+Set `SIMVIEW_CORE_BINARY` to compare another core build with the same check.
+
 ## Supported matrix
 
 No Xcode line becomes supported from compilation alone. A release operator must
@@ -31,6 +92,38 @@ record a passing real-device-set run here.
 | 26.5 (17F42) | 26.5.2 | arm64 | iOS 26.1, iPhone 17 Pro Max | direct PNG passes | Indigo probes and authenticated tap pass | AX 25-node tree and injected UIKit probe pass |
 | previous stable minor | — | arm64 | — | — | — | not tested |
 | second previous minor | — | arm64 | — | — | — | not tested |
+
+### Xcode 27 Device Hub validation
+
+The 27 September 2026 checks used Xcode 27.0 (27A266a), macOS 26.6.2
+(25G83), arm64, and dedicated iPhone 17 Pro simulators:
+
+| Runtime | Observed result |
+| --- | --- |
+| iOS 27.0 | Both landscape directions and portrait passed; in-memory 1206×2622 PNGs and 171 live H.264 frames arrived. Native accessibility, tap, swipe, and Unicode text entry passed against a UIKit fixture. |
+| iOS 26.5 | Both landscape directions and portrait passed; in-memory 1206×2622 PNGs and 100 live H.264 frames arrived. |
+
+The iOS 27 fixture used `core-simulator-ax`: XCTest provider activation did not
+complete successfully. Enhanced XCTest accessibility is therefore unverified
+for this run; the passing native fallback must not be treated as XCTest
+acceptance.
+
+The text fixture verified spaces, punctuation, accented text, emoji, and a
+combining accent. The prior `simctl pbcopy` path corrupted UTF-8 text in this
+setup; the capability-detected `devicectl` path preserved the exact string.
+The installed legacy core confirmed the existing landscape naming convention
+and retained portrait framebuffer dimensions during rotation.
+
+`DEVELOPER_DIR=/Applications/Xcode-Beta.app` also resolved Xcode 27.1
+(27A9269) and its Device Hub application successfully in diagnostics. This was
+a discovery check, not a second full runtime acceptance run. No Xcode 26
+installation was available for a fresh legacy-toolchain run; fallback and
+selected-installation behavior have automated fixture coverage.
+
+`bun run check` passed 307 Bun tests and 106 Swift tests, with one opt-in Swift
+test skipped, plus formatting, typechecking, toolchain/version gates, and fresh
+native builds. These focused checks do not establish frame latency, sustained
+frame rate, or the complete release smoke matrix below.
 
 ### 0.4.4 candidate lifecycle investigation
 

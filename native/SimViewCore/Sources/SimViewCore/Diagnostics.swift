@@ -7,6 +7,7 @@ enum Diagnostics {
         let xcode = run("/usr/bin/xcodebuild", ["-version"])
         let runtimes = run("/usr/bin/xcrun", ["simctl", "list", "runtimes", "--json"])
         let devices = (try? SimulatorRuntime.devices()) ?? []
+        let simulatorUI = Xcode.selectedUIApplication()
         let adbPath = ADBResolver.resolve()
         let adb = try? ADBClient(executable: adbPath)
         let adbVersionResult = adb.flatMap { try? $0.execute(["version"], timeout: 5) }
@@ -36,6 +37,7 @@ enum Diagnostics {
             "macOS": ProcessInfo.processInfo.operatingSystemVersionString,
             "architecture": machineArchitecture(),
             "developerDirectory": Xcode.developerDirectory(),
+            "simulatorUI": simulatorUIDictionary(simulatorUI),
             "xcode": xcode.output.trimmingCharacters(in: .whitespacesAndNewlines),
             "frameworks": frameworks,
             "symbols": Dictionary(uniqueKeysWithValues: symbols.map { ($0, Xcode.symbolAvailable($0)) }),
@@ -80,6 +82,25 @@ enum Diagnostics {
                     .trimmingCharacters(in: .whitespacesAndNewlines),
             ],
             "errors": diagnosticErrors(frameworks: frameworks, runtimesStatus: runtimes.status),
+        ]
+    }
+
+    private static func simulatorUIDictionary(_ application: XcodeUIApplication?) -> [String: Any] {
+        guard let application else {
+            return [
+                "available": false,
+                "kind": NSNull(),
+                "path": NSNull(),
+                "action":
+                    "Install the selected Xcode's Device Hub or legacy Simulator application, "
+                    + "or set DEVELOPER_DIR to a full Xcode installation.",
+            ]
+        }
+        return [
+            "available": true,
+            "kind": application.kind.rawValue,
+            "path": application.path,
+            "action": "Use the selected Xcode UI for simulator management.",
         ]
     }
 

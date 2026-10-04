@@ -2,6 +2,8 @@ import { chmod, cp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import {
   assertCodexPluginArchiveSize,
+  copyPluginSkills,
+  copyPreviewAssets,
   createNpmPackageManifest,
   createPackagedMcpConfig,
 } from "./release-config";
@@ -26,11 +28,9 @@ await mkdir(npmCache, { recursive: true });
 await Promise.all([
   cp(join(root, ".codex-plugin"), join(stage, ".codex-plugin"), { recursive: true }),
   cp(join(root, ".claude-plugin"), join(stage, ".claude-plugin"), { recursive: true }),
-  cp(join(root, "skills", "simview"), join(stage, "skills", "simview"), {
-    recursive: true,
-  }),
+  copyPluginSkills(root, stage),
   cp(join(root, "assets", "icon-512.png"), join(stage, "assets", "icon-512.png")),
-  cp(join(root, "packages/app/dist"), join(stage, "app/dist"), { recursive: true }),
+  copyPreviewAssets(root, stage),
   cp(join(root, "README.md"), join(stage, "README.md")),
   cp(join(root, "LICENSE"), join(stage, "LICENSE")),
   cp(join(root, "THIRD_PARTY_NOTICES.md"), join(stage, "THIRD_PARTY_NOTICES.md")),

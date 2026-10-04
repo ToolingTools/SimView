@@ -38,6 +38,9 @@ import {
   inspectPointOutputSchema,
   jsonObjectSchema,
   jsonValueSchema,
+  lanSharingInputSchema,
+  lanSharingStartedSchema,
+  lanSharingStatusSchema,
   normalizedPointSchema,
   previewPacketBatchSchema,
   relayInputSchema,
@@ -1524,6 +1527,46 @@ export function createServer(
       }
     }
   };
+
+  server.registerTool(
+    "start_lan_sharing",
+    {
+      title: "Start LAN sharing",
+      description:
+        "Explicitly share the connected review on a trusted LAN, or pass network: tailscale for private encrypted tailnet access. Anyone with the returned link and network access can control the device. Call only when the user requests sharing. Reuse unchanged options; stop before changing them.",
+      inputSchema: lanSharingInputSchema.shape,
+      outputSchema: lanSharingStartedSchema,
+      _meta: metadata.modelOnly,
+    },
+    (input) => {
+      const sharing = session.startLanSharing(input);
+      return toolResult(`${sharing.notice} ${sharing.url}`, sharing);
+    },
+  );
+  server.registerTool(
+    "get_lan_sharing_status",
+    {
+      title: "Get LAN sharing status",
+      description:
+        "Check whether this review is shared on the LAN or Tailscale without returning its secret link.",
+      inputSchema: {},
+      outputSchema: lanSharingStatusSchema,
+      _meta: metadata.modelOnly,
+    },
+    () => toolResult("LAN sharing status.", session.lanSharingStatus()),
+  );
+  server.registerTool(
+    "stop_lan_sharing",
+    {
+      title: "Stop LAN sharing",
+      description:
+        "Revoke this review's LAN link and disconnect remote viewers while preserving the local review.",
+      inputSchema: {},
+      outputSchema: lanSharingStatusSchema,
+      _meta: metadata.modelOnly,
+    },
+    async () => toolResult("LAN sharing stopped.", await session.stopLanSharing()),
+  );
 
   server.registerTool(
     "open_simview",

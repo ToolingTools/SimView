@@ -48,6 +48,9 @@ const appCalledTools = [
 ];
 
 const modelOnlyTools = [
+  "start_lan_sharing",
+  "get_lan_sharing_status",
+  "stop_lan_sharing",
   "add_annotation",
   "connect_device",
   "disable_ios_accessibility",

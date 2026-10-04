@@ -362,3 +362,61 @@ When Expo Router's root state ends at a native tab, nested scenes under that
 focused leaf remain eligible; missing nested state alone is not proof that a
 scene is inactive. Inactive sibling scenes stay excluded. Inspector rows and
 canvas hit testing both exclude entire explicitly hidden subtrees.
+
+## Explicit LAN browser sharing
+
+The browser relay can additionally listen on one assigned private IPv4 address
+when requested through `preview --lan` or `start_lan_sharing`. It shares the
+SimViewSession review and handlers, but owns a separate random capability token,
+listener, and viewer identity. `stop_lan_sharing` invalidates that token and closes
+remote sockets without replacing the local relay. Session close stops both.
+No native backend, Metro, ADB, or MCP transport is exposed by this feature.
+
+LAN links use HTTP and MJPEG over authenticated WebSockets. The browser state
+advertises MJPEG for that listener; local H.264 behavior is preserved. Host,
+Origin, and CSP are scoped to the listener origin. Capture demand combines the
+embedded preview and browser viewers; unused MJPEG attachments are released.
+Sharing metadata has dedicated contract schemas. Ordinary state and status omit
+capabilities; only explicit start-sharing results contain the secret URL.
+
+
+### Private tailnet preview
+
+Tailscale sharing is an explicit alternative to LAN sharing, using the same
+separate revocable capability and MJPEG/annotation relay. The network selector
+queries the installed Tailscale CLI and requires its CGNAT IPv4 address to be
+assigned locally. A different VPN's CGNAT address is insufficient. The listener
+binds only this address, never a wildcard or LAN interface. Native, ADB, Metro,
+MCP, and the default browser relay retain their local transports. No Serve or
+Funnel state is modified. Status includes the sharing network without tokens;
+only an explicit sharing operation returns the private capability link.
+
+
+### Persistent standalone preview server
+
+`packages/cli/src/serve.ts` owns an independent browser-server lifetime,
+separate from MCP adapters and per-device native backends. Named `serve start`
+operations use a serialized private runtime registry and spawn a detached CLI
+child with startup credentials on stdin and ignored stdout/stderr. `serve run`
+uses the same server in the foreground for external supervisors, without
+printing credentials. A verified loopback, LAN, or Tailscale listener may exist
+with no selected device or native client. Browser `/devices` discovery and
+explicit `/device` selection attach a ready device; there is no auto-selection,
+auto-boot, or automatic native recovery.
+
+A mode-0600 Unix control socket accepts bounded authenticated status, connect,
+and stop handshakes. Status excludes credentials and UI contents; only explicit
+start/connect return a browser capability. Registry directories are mode 0700,
+records mode 0600, and startup uses the existing atomic lock and process start
+identity checks. Stale records are removed without signalling their PID. A
+healthy named server can be reused only with identical bind options and build
+identity. Stop revokes viewers and removes its own record and socket; restart
+creates a new capability. No startup URLs are written to service logs.
+
+Idle authenticated browser sockets do not acquire a native client or enable
+capture. Selecting a device reconciles existing viewer demand. A native
+disconnect closes streaming viewers while leaving the browser/control listeners
+alive; the browser can explicitly select the same ready device after reboot.
+Closing the last viewer disables its video demand. Standalone annotations stay
+in memory for this shared review, whereas connected MCP review sharing retains
+its existing requirement and lifetime.

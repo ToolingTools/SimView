@@ -24,6 +24,12 @@ consume its versioned binary protocol.
 - Bun 1.3.14 for source development only
 - XcodeGen, JDK 17, Android SDK platform 35, and build-tools 35.0.0 when building from source
 
+SimView targets simulated iOS devices in both Xcode 27's Device Hub and the
+legacy Simulator application. It retains CoreSimulator device identifiers and
+uses `devicectl` for rotation and Unicode paste when available. See the
+[compatibility matrix](docs/compatibility.md) for tested configurations and the
+division between `simctl`, `devicectl`, and native interfaces.
+
 Android support targets API 26 or later. SimView uses the user's existing ADB
 server and authorization keys; it does not pair devices, enable legacy
 `adb tcpip 5555`, or install a persistent helper app. ADB is resolved from
@@ -243,7 +249,127 @@ observe without replaying the action. `get_simview_state` exposes the selected
 device's named-key support in `device.capabilities.input.keys`; iOS includes
 Return and Delete, while Android currently reports no named-key support.
 
-The standalone browser preview uses the authenticated localhost stream. The
+### Share a preview on your LAN
+
+Run `simview preview --lan` to print a link another device can open on your local
+network. The local browser also opens as usual; add `--no-open` to suppress it.
+Use `--lan-host <local-ipv4>` to choose an interface and `--lan-port <port>` for a
+fixed port (0 selects an available port). Overrides require `--lan`.
+
+SimView selects the default-route interface's private IPv4 address, or the only
+eligible address. If there are multiple candidates, choose one explicitly. It
+binds only that address. `--print-url` prints the LAN link when sharing is enabled.
+
+The link grants full device interaction and annotation access. HTTP traffic is
+unencrypted, so use only a trusted LAN. Remote video uses MJPEG. Keep the host
+awake and SimView running; Ctrl-C revokes the link. Check macOS firewall access
+and Wi-Fi client isolation if another device cannot connect. After changing
+networks, restart sharing. SimView does not configure routers or firewalls.
+
+With the plugin, ask `$simview-lan` to share the current review. The agent uses
+`start_lan_sharing`, `get_lan_sharing_status`, and `stop_lan_sharing`. Remote
+viewers share the agent's device and annotations. Stopping sharing disconnects
+remote viewers without closing the local review. Starting again creates a fresh
+link; old links no longer work. A device switch changes the shared device too.
+The standalone CLI creates its own review rather than joining an MCP review.
+
+For acceptance testing, `SIMVIEW_TEST_LAN=1 bun test tests/lan-sharing.test.ts`
+uses the real LAN interface. The default test suite exercises the same relay
+handlers over loopback so it can run without LAN permissions.
+
+### Share a preview over Tailscale
+
+Run `simview preview --tailscale --device-id <id>` for private tailnet access.
+SimView queries the installed Tailscale CLI (`tailscale ip -4`, including the
+macOS app's bundled CLI) and binds only to that locally assigned Tailscale IPv4
+address. Tailscale must be connected on the host and viewer, with tailnet policy
+allowing the chosen port. No Serve/Funnel configuration or public endpoint is
+created. Ordinary `--lan` sharing still selects only RFC1918 LAN addresses.
+
+Use `--tailscale-port <0-65535>` to choose a fixed port (`0` selects an available
+port) and optionally
+`--tailscale-host <tailscale-ipv4>` to assert the current host address. These
+options require `--tailscale` and cannot be combined with `--lan` or its
+options. Add `--no-open` to avoid opening the host's local browser. For example:
+
+```sh
+simview preview --tailscale --tailscale-port 4041 --device-id <id> --no-open
+```
+
+Open the printed IP-based capability link from your iPad or another tailnet
+device. Tailscale encrypts traffic between devices; the link still grants full
+interactive access and must be kept private. Host/Origin validation requires
+the printed IP address rather than substituting a MagicDNS hostname. Preview
+video uses MJPEG, and annotations are shared with the same review. Stop sharing
+or exit the process to revoke the link. Restarting creates a new token.
+
+With MCP, call `start_lan_sharing` with `network: "tailscale"` (and optional
+`port`) to share the current review. The existing status and stop tools work
+for both networks; ordinary diagnostics never return the link or token.
+
+### Run a persistent browser server
+
+`simview serve start` starts an authenticated, detached loopback preview server.
+It stays available after the terminal exits and starts without selecting,
+booting, or capturing a device. Open its returned `url`, use **Choose device**,
+and select an available device. A shut down simulator or emulator must first be
+started on the host, for example by your device automation tools; refresh the
+menu after it boots. Physical devices are never selected automatically.
+
+```sh
+simview serve start --name mobile-preview --json
+simview serve connect --name mobile-preview --json
+simview serve status --name mobile-preview --json
+simview serve stop --name mobile-preview --json
+```
+
+`start` and `connect` are explicit capability operations: they return a secret
+`url` and access notice. `status` reports only the listener, PID, version, and
+connection metadata, without any token or URL. Keep capability links private
+and do not save them in logs. The default server name is `default`. Repeating
+`start` with the same name, build, and options reuses the server and its token;
+stop it before changing options or upgrading the build. Stopping closes viewers
+and revokes the link. A subsequent start creates a new token.
+
+Use `--port <port>` to choose a loopback port (0 selects an available port).
+For a remote viewer, explicitly choose the same verified LAN or Tailscale binds
+as `preview`:
+
+```sh
+simview serve start --name mobile-preview --tailscale --tailscale-port 4040 --json
+# Or: simview serve start --name mobile-preview --lan --lan-port 4040 --json
+```
+
+`--lan-host` and `--tailscale-host` retain their address validation; LAN and
+Tailscale options cannot be combined. The network listener's capability is
+returned in `url`. Tailscale links use the printed IP unchanged and require
+private tailnet connectivity and permission to reach the port. LAN links use
+unencrypted HTTP on a trusted LAN. SimView does not configure Serve, Funnel,
+firewalls, or router forwarding. Remote video uses MJPEG.
+
+The server survives a device backend disconnect. Start the device again,
+refresh the browser's device menu, and select it to reconnect, including when
+selecting the same device. The server does not automatically boot or reconnect
+devices. Closing the last viewer releases video demand; opening an idle server
+never starts capture. Its shared review and annotations live in memory and end
+when the server stops. This is a separate review from an MCP agent's review;
+MCP sharing still requires an explicitly connected device.
+
+For a user LaunchAgent or another supervisor, use foreground mode:
+
+```sh
+simview serve run --name mobile-preview --tailscale --tailscale-port 4040
+```
+
+`run` stays in the foreground and emits no capability URL to service logs.
+Retrieve access with `serve connect --name mobile-preview --json`. SIGTERM,
+SIGINT, and authenticated `serve stop` cleanly revoke the server. SimView does
+not install login services itself; a detached server alone does not survive a
+reboot. Control sockets and registry records use private per-user temporary
+paths with modes 0600 and directories 0700. Shutdown authenticates to the server,
+and stale or reused PID records never authorize killing an unrelated process.
+
+By default, the standalone browser preview uses the authenticated localhost stream. The
 embedded MCP App does not make localhost HTTP or WebSocket requests: Codex
 requires secure network origins, so it carries bounded video packet batches and
 byte-paged React Native/AX element snapshots through app-only bridge tools. A
