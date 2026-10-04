@@ -64,8 +64,10 @@ Backends stop capture as soon as their last authenticated client disconnects and
 begin shutdown immediately; startup has a separate ten-second
 allowance. `simview mcp` adapters share an on-demand MCP daemon, which exits after
 its last agent connection closes. Use `simview mcp status --json` for MCP process
-diagnostics. Registry records and tokens
-are private temporary files and must never be logged.
+diagnostics. The independent `simview serve` browser server can wait idle without a
+selected device and persists until explicitly stopped. `serve run` is its
+foreground supervisor entrypoint; only `serve start`/`connect` return capability
+URLs. Registry records and tokens are private temporary files and must never be logged.
 
 If SwiftPM sandboxing fails in a managed environment, use `swift test --disable-sandbox --package-path native/SimViewCore`.
 
@@ -100,9 +102,15 @@ The repository has no established commit history yet. Use concise, imperative su
 
 ## Security & Configuration
 
-Keep transports loopback-only and authenticated. Native sockets use a mode-0700
+Keep transports loopback-only and authenticated by default. The browser relay
+may bind to one assigned private IPv4 address only through explicit LAN or
+Tailscale sharing. Tailscale selection verifies the CLI-reported address against
+local assignments and does not configure Serve or Funnel.
+LAN sharing uses separate revocable tokens and HTTP/MJPEG; capability links may
+be returned only by explicit sharing operations. Native, Metro, ADB, and MCP
+transports retain their existing local boundaries. Native sockets use a mode-0700
 temporary directory, mode-0600 socket, and launch-time token; browser relay
 HTTP uses `Authorization: Bearer`, and WebSockets authenticate in their first
-message. Never log capability tokens, expose relay URLs in normal model-visible
+message. Never log capability tokens in diagnostics, expose relay URLs in normal model-visible
 state, or persist Simulator UI contents. Do not weaken path validation,
 code-signing/release gates, or explicit probe/app-relaunch boundaries.

@@ -1,14 +1,36 @@
 import Darwin
 import Foundation
 
+struct XcodeUIApplication: Equatable, Sendable {
+    enum Kind: String, Sendable {
+        case deviceHub
+        case simulator
+    }
+
+    let kind: Kind
+    let path: String
+}
+
 enum Xcode {
     static func developerDirectory() -> String {
         if let explicit = ProcessInfo.processInfo.environment["DEVELOPER_DIR"], !explicit.isEmpty {
-            return explicit
+            return normalizedDeveloperDirectory(explicit)
         }
-        return run("/usr/bin/xcode-select", ["-p"]).output
+        let selected =
+            run(
+                "/usr/bin/xcode-select", ["-p"]
+            ).output
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .nonEmpty ?? "/Applications/Xcode.app/Contents/Developer"
+        return normalizedDeveloperDirectory(selected)
+    }
+
+    static func normalizedDeveloperDirectory(_ path: String) -> String {
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        if url.pathExtension.lowercased() == "app" {
+            return url.appendingPathComponent("Contents/Developer").path
+        }
+        return url.path
     }
 
     static func frameworkCandidates() -> [String] {
@@ -19,6 +41,30 @@ enum Xcode {
             "\(developer)/../SharedFrameworks/SimulatorKit.framework/SimulatorKit",
             "\(developer)/Library/PrivateFrameworks/SimulatorKit.framework/SimulatorKit",
         ]
+    }
+
+    static func devicectlPath(developerDirectory: String = developerDirectory()) -> String {
+        "\(normalizedDeveloperDirectory(developerDirectory))/usr/bin/devicectl"
+    }
+
+    static func selectedUIApplication(
+        developerDirectory: String = developerDirectory(),
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> XcodeUIApplication? {
+        let developer = normalizedDeveloperDirectory(developerDirectory)
+        let candidates: [(XcodeUIApplication.Kind, String)] = [
+            (.deviceHub, "\(developer)/../Applications/DeviceHub.app"),
+            (.deviceHub, "\(developer)/Applications/DeviceHub.app"),
+            (.simulator, "\(developer)/../Applications/Simulator.app"),
+            (.simulator, "\(developer)/Applications/Simulator.app"),
+        ]
+        for (kind, path) in candidates {
+            let normalized = URL(fileURLWithPath: path).standardizedFileURL.path
+            if fileExists(normalized) {
+                return XcodeUIApplication(kind: kind, path: normalized)
+            }
+        }
+        return nil
     }
 
     @discardableResult

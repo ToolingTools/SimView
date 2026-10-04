@@ -9,7 +9,15 @@ import {
   SimViewClient,
   stopDaemons,
 } from "@simview/client";
-import { accessibilitySelectorSchema, SIMVIEW_VERSION } from "@simview/contracts";
+import {
+  accessibilitySelectorSchema,
+  type LanSharingInput,
+  type LanSharingStarted,
+  lanSharingInputSchema,
+  previewServerOptionsSchema,
+  type SessionState,
+  SIMVIEW_VERSION,
+} from "@simview/contracts";
 import { resolveBinary } from "@simview/core";
 import { SimViewSession } from "@simview/mcp";
 
@@ -27,11 +35,28 @@ const commonOptions: Record<string, OptionDefinition> = {
 const commandOptions: Record<string, Record<string, OptionDefinition>> = {
   devices: { booted: { type: "boolean" }, json: { type: "boolean" } },
   doctor: { json: { type: "boolean" } },
+  serve: {
+    name: { type: "string" },
+    port: { type: "string" },
+    json: { type: "boolean" },
+    lan: { type: "boolean" },
+    tailscale: { type: "boolean" },
+    "lan-host": { type: "string" },
+    "lan-port": { type: "string" },
+    "tailscale-host": { type: "string" },
+    "tailscale-port": { type: "string" },
+  },
   preview: {
     "device-id": { type: "string" },
     udid: { type: "string" },
     "no-open": { type: "boolean" },
     "print-url": { type: "boolean" },
+    lan: { type: "boolean" },
+    tailscale: { type: "boolean" },
+    "tailscale-host": { type: "string" },
+    "tailscale-port": { type: "string" },
+    "lan-host": { type: "string" },
+    "lan-port": { type: "string" },
   },
   screenshot: {
     "device-id": { type: "string" },
@@ -100,8 +125,12 @@ function parse(argv: string[]): { command: string; positional: string[]; options
   if (command === "--version" || command === "-v") {
     return { command: "version", positional: [], options: {} };
   }
-  if (command === "serve") {
-    return { command, positional: argv.slice(3), options: {} };
+  if (
+    command === "serve" &&
+    argv[3]?.startsWith("--") &&
+    argv.slice(3).some((arg) => ["--socket", "--token-fd"].includes(arg))
+  ) {
+    return { command: "native-serve", positional: argv.slice(3), options: {} };
   }
   const options = commandOptions[command];
   if (!options) throw new Error(`Unknown command: ${command}`);
@@ -215,21 +244,69 @@ export async function run(argv = process.argv): Promise<void> {
       }
       throw new Error(`Unknown daemon action: ${action}`);
     }
+    case "serve": {
+      const action = positional[0] ?? "status";
+      if (positional.length > 1 || !["start", "run", "status", "connect", "stop"].includes(action))
+        throw new Error("serve accepts start, run, status, connect, or stop");
+      const name = stringOption(options, "name", false) ?? "default";
+      if (action === "start" || action === "run") {
+        const sharing = previewLanOptions(options);
+        if (sharing && options.port !== undefined)
+          throw new Error(
+            "--port is for loopback; use --lan-port or --tailscale-port when sharing",
+          );
+        const port = options.port;
+        if (port !== undefined && (typeof port !== "string" || !/^\d+$/.test(port)))
+          throw new Error("--port must be an integer from 0 to 65535");
+        const serveOptions = previewServerOptionsSchema.parse({
+          name,
+          network: sharing?.network ?? (sharing ? "lan" : "loopback"),
+          ...(sharing?.host ? { host: sharing.host } : {}),
+          port: sharing?.port ?? (port === undefined ? 0 : Number(port)),
+        });
+        const { startPreviewDaemon, runPreviewForeground } = await import("./serve");
+        if (action === "run") await runPreviewForeground(serveOptions);
+        else printJson(await startPreviewDaemon(serveOptions), options.json === true);
+      } else {
+        if (Object.keys(options).some((key) => !["name", "json"].includes(key)))
+          throw new Error("serve status, connect, and stop accept only --name and --json");
+        const { previewDaemonCommand } = await import("./serve");
+        printJson(
+          await previewDaemonCommand(name, action as "status" | "connect" | "stop"),
+          options.json === true,
+        );
+      }
+      break;
+    }
     case "preview": {
+      const lanOptions = previewLanOptions(options);
       const session = new SimViewSession();
-      const state = await session.open(deviceId ?? udid, { startRelay: true });
+      let state: SessionState;
+      let sharing: LanSharingStarted | undefined;
+      try {
+        state = await session.open(deviceId ?? udid, { startRelay: true });
+        sharing = lanOptions ? session.startLanSharing(lanOptions) : undefined;
+      } catch (error) {
+        await session.close();
+        throw error;
+      }
       const browserUrl = session.browserUrl();
       const shouldOpen = options["no-open"] !== true;
       printJson(
         {
           device: state.device,
           ...(shouldOpen ? {} : { browserUrl }),
+          ...(sharing
+            ? lanOptions?.network === "tailscale"
+              ? { tailscaleUrl: sharing.url, tailscaleNotice: sharing.notice }
+              : { lanUrl: sharing.url, lanNotice: sharing.notice }
+            : {}),
           note: "Press Ctrl-C to stop SimView.",
         },
         false,
       );
       if (shouldOpen && browserUrl) Bun.spawn(["/usr/bin/open", browserUrl]);
-      if (options["print-url"] === true && browserUrl) console.log(browserUrl);
+      if (options["print-url"] === true && browserUrl) console.log(sharing?.url ?? browserUrl);
       const stop = async () => {
         await session.close();
         process.exit(0);
@@ -417,7 +494,7 @@ export async function run(argv = process.argv): Promise<void> {
       await withClient(deviceId, udid, (client) => client.request("input.button", { button }));
       break;
     }
-    case "serve": {
+    case "native-serve": {
       const child = Bun.spawn([resolveBinary(), "serve", ...positional], {
         stdin: "inherit",
         stdout: "inherit",
@@ -442,6 +519,36 @@ function nextFrame(client: SimViewClient, kind: FrameKind): Promise<Uint8Array> 
       unsubscribe();
       resolve(payload);
     });
+  });
+}
+
+export function previewLanOptions(options: Options): LanSharingInput | undefined {
+  const tailscale = options.tailscale === true;
+  if (tailscale && options.lan === true)
+    throw new Error("Pass either --lan or --tailscale, not both");
+  if (
+    !tailscale &&
+    (options["tailscale-host"] !== undefined || options["tailscale-port"] !== undefined)
+  ) {
+    throw new Error("--tailscale-host and --tailscale-port require --tailscale");
+  }
+  if (
+    options.lan !== true &&
+    (options["lan-host"] !== undefined || options["lan-port"] !== undefined)
+  ) {
+    throw new Error("--lan-host and --lan-port require --lan");
+  }
+  if (!tailscale && options.lan !== true) return undefined;
+  const prefix = tailscale ? "tailscale" : "lan";
+  const port = options[`${prefix}-port`];
+  const host = options[`${prefix}-host`];
+  if (port !== undefined && (typeof port !== "string" || !/^\d+$/.test(port))) {
+    throw new Error(`--${prefix}-port must be an integer from 0 to 65535`);
+  }
+  return lanSharingInputSchema.parse({
+    ...(tailscale ? { network: "tailscale" } : {}),
+    ...(host !== undefined ? { host } : {}),
+    ...(port !== undefined ? { port: Number(port) } : {}),
   });
 }
 
@@ -524,7 +631,13 @@ Usage:
   simview --version
   simview devices [--booted] [--json]
   simview doctor --json
+  simview serve start|run [--name <name>] [--port <0-65535>]
+                        [--lan [--lan-host <ip>] [--lan-port <port>]]
+                        [--tailscale [--tailscale-host <ip>] [--tailscale-port <port>]]
+  simview serve status|connect|stop [--name <name>] [--json]
   simview preview [--device-id <id>] [--no-open] [--print-url]
+                  [--lan [--lan-host <local-ipv4>] [--lan-port <0-65535>]]
+                  [--tailscale [--tailscale-host <tailscale-ipv4>] [--tailscale-port <0-65535>]]
   simview screenshot --output <path> [--device-id <id>]
   simview observe [--scope interactive|visible|full] [--output <png>] [--json]
   simview tree [--scope interactive|visible|full] [--json]

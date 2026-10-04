@@ -433,6 +433,8 @@ final class SimViewServer: @unchecked Sendable {
             if enabled {
                 if connection.codec == "h264" {
                     bootstrapH264Preview(for: connection)
+                } else if connection.codec == "mjpeg", androidAgent != nil {
+                    ensureAndroidMJPEGCapture(generation: captureGeneration)
                 }
             }
             sendResult(["enabled": enabled], requestID: request.id, to: connection)
@@ -649,8 +651,16 @@ final class SimViewServer: @unchecked Sendable {
                     }
                 }
             } else {
-                try prepareHID()
-                try hid.setOrientation(request.params.string("orientation"))
+                let device = try requireIOSDevice(nil)
+                let orientation = try request.params.string("orientation")
+                let usedDeviceHub = try DeviceHubOrientation.setOrientation(
+                    udid: device.nativeIdentifier,
+                    name: orientation
+                )
+                if !usedDeviceHub {
+                    try prepareHID()
+                    try hid.setLegacyOrientation(orientation)
+                }
                 Task { await h264.forceKeyframe() }
             }
             sendResult(["accepted": true], requestID: request.id, to: connection)

@@ -5,6 +5,9 @@ description: Open, control, annotate, and send visual feedback from a local iOS 
 
 # SimView
 
+For viewing from another device on a local network, use the
+[SimView LAN skill](../simview-lan/SKILL.md) to share this review.
+
 Use SimView when a task needs visual inspection or input in an iOS Simulator,
 Android Emulator, or authorized Android device connected through ADB.
 

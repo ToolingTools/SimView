@@ -1,0 +1,63 @@
+---
+name: simview-lan
+description: Share the current SimView review over a trusted LAN or private Tailscale tailnet, check sharing status, or stop sharing.
+---
+
+# SimView LAN sharing
+
+Use this skill when the user requests LAN or Tailscale access to a SimView preview. Ordinary
+local preview requests do not enable sharing.
+
+- Reuse the current connected review. Check `get_simview_state` when its state is
+  unknown. If disconnected, call `list_devices` without a platform filter. Use an
+  explicitly selected device; connect automatically when only one is available,
+  otherwise ask the user to select a device. Call `connect_device` before sharing.
+- Call `start_lan_sharing` with no arguments for automatic address selection and
+  an available port. For an explicit Tailscale request, pass `network: "tailscale"`
+  to bind the address verified through the host Tailscale CLI. Use `host` and `port` only when the user specifies them or
+  address selection requires a choice. For ambiguous interfaces, present the
+  returned candidates and ask which network to use. Do not guess a VPN address.
+- Present the returned URL as a clickable link along with its notice: anyone
+  with the link and network access can control the device. LAN HTTP traffic is
+  unencrypted; Tailscale encrypts traffic between tailnet devices. The
+  viewer must be on a network that can reach the host. This link is intentionally
+  returned by the sharing tool; do not save it in project files or other logs.
+- `get_lan_sharing_status` checks sharing without revealing the link. Repeating
+  `start_lan_sharing` with the same options returns the current link; stop first
+  to change options. If a link must be retrieved and the original arguments are
+  unknown, report the active status rather than interrupting sharing to recreate it.
+- Call `stop_lan_sharing` when asked to stop or revoke access. This preserves the
+  connected review and local preview. Sharing otherwise lasts until the MCP
+  session closes. Device selection changes are reflected in the shared review.
+
+LAN viewing uses MJPEG with the existing interactive controls and annotations.
+Keep the host awake and the MCP session running. If a link cannot be reached,
+check the selected address, same-network connectivity, macOS firewall permission,
+and Wi-Fi client isolation. Do not alter firewall or router settings automatically.
+After a network change, stop and start sharing to obtain a fresh link.
+
+For an explicitly requested standalone terminal preview, use
+`simview preview --lan`, optionally with `--lan-host <local-ipv4>`,
+`--lan-port <port>`, and `--no-open`. This creates a separate review; prefer the
+MCP tools when sharing the agent's current annotations. Ctrl-C stops that process.
+
+For a standalone tailnet preview, use `simview preview --tailscale`, optionally
+with `--tailscale-port <port>`, `--tailscale-host <current-tailscale-ipv4>`, and
+`--no-open`. Tailscale must be connected on both devices and permit the port.
+Use the returned IP link unchanged; substituting MagicDNS fails Host/Origin
+validation. Never enable Serve or Funnel as part of private preview sharing.
+Status and stop still use `get_lan_sharing_status` and `stop_lan_sharing`.
+
+
+For an explicitly requested persistent browser host, use `simview serve start`
+with `--name <name>` and either `--lan`/`--lan-port` or
+`--tailscale`/`--tailscale-port`. It starts idle without selecting or booting a
+device; the viewer uses Choose device after the device is available. Do not
+replace MCP review sharing with a standalone server unless the user requests
+that separate review. `serve connect --name <name> --json` explicitly returns
+its secret `url`; `serve status` omits URLs/tokens and `serve stop` revokes them.
+Do not persist capability output in service logs. `serve run` stays in the
+foreground without printing a capability for an external supervisor. SimView
+does not install login services. After a device shuts down, start it on the
+host, refresh the device menu, and select it again; the server never boots or
+reconnects a device automatically.

@@ -27,6 +27,11 @@ import {
   type InputReceipt,
   type IOSAccessibilityStatus,
   inputReceiptSchema,
+  LAN_SHARING_NOTICE,
+  type LanSharingInput,
+  type LanSharingStarted,
+  type LanSharingStatus,
+  lanSharingInputSchema,
   type McpConnectionContext,
   type NativeActionEvidence,
   type NativeDisconnect,
@@ -40,12 +45,14 @@ import {
   type SessionState,
   saveReviewImagesInputSchema,
   summarizeAccessibilityNode,
+  TAILSCALE_SHARING_NOTICE,
   uiContextSchema,
 } from "@simview/contracts";
 import type { ServerWebSocket } from "bun";
 import { z } from "zod";
 import { previewScriptResponse, resolveAppRoot } from "./app-assets";
 import { adapterDiagnostic, classifyNativeDisconnect, type DiagnosticReason } from "./diagnostics";
+import { resolveLanAddress, resolveTailscaleAddress } from "./lan";
 import { MetroInspector } from "./metro";
 import { packetsFromLatestKeyframe } from "./preview";
 import { captureScreenshot } from "./screenshot";
@@ -54,7 +61,9 @@ import { accessibilityResourceSemanticHash } from "./semantic-state";
 export type { SessionState } from "@simview/contracts";
 
 type StreamCodec = "h264" | "mjpeg";
+type RelayAccess = { token: string; lan: boolean; active: boolean };
 type ViewerData = {
+  access: RelayAccess;
   codec: StreamCodec;
   authenticated: boolean;
   authenticationTimer?: ReturnType<typeof setTimeout> | undefined;
@@ -354,6 +363,9 @@ export class SimViewSession {
   lastScreenContext: ScreenContext | undefined = undefined;
   relay: ReturnType<typeof Bun.serve> | undefined = undefined;
   codec: "h264" | "mjpeg" = "h264";
+  #lanRelay: ReturnType<typeof Bun.serve<ViewerData>> | undefined;
+  #lanAccess: RelayAccess | undefined;
+  #lanOptions: LanSharingInput | undefined;
   #h264Configuration: Uint8Array | undefined = undefined;
   #mjpegClientPromise: Promise<SimViewClient> | undefined = undefined;
   #mjpegGeneration = 0;
@@ -533,6 +545,8 @@ export class SimViewSession {
         await this.#refreshIOSAccessibilityStatus();
         this.#assertOpen();
         if (options.startRelay === true) this.startRelay();
+        if (this.viewers.size > 0) await this.#reconcilePreviewDemand();
+        this.#resumeMjpegViewers();
         void this.#primeObservation();
       } catch (error) {
         for (const unsubscribe of this.#unsubscribers) unsubscribe();
@@ -593,6 +607,7 @@ export class SimViewSession {
   }
 
   async #selectDevice(deviceId: string): Promise<SessionState> {
+    if (!this.client?.connected) return this.#open(deviceId, { startRelay: false });
     if (matchesDeviceId(this.device, deviceId)) {
       await this.refreshDevice();
       await this.#refreshIOSAccessibilityStatus();
@@ -632,9 +647,7 @@ export class SimViewSession {
       this.#resetPreviewPackets();
       this.#bindFrames();
       await this.#reconcilePreviewDemand();
-      if ([...this.viewers].some((viewer) => viewer.data.codec === "mjpeg")) {
-        void this.#ensureMjpegClient().catch(() => {});
-      }
+      this.#resumeMjpegViewers();
       return this.state();
     } catch (error) {
       await nextClient.close();
@@ -2090,12 +2103,128 @@ export class SimViewSession {
   startRelay(port = 0): void {
     this.#assertOpen();
     if (this.relay) return;
+    this.relay = this.#createRelay("127.0.0.1", port, {
+      token: this.relayToken,
+      lan: false,
+      active: true,
+    });
+  }
+
+  startLanSharing(input: LanSharingInput = {}): LanSharingStarted {
+    this.requireClient();
+    return this.#startLanSharing(input);
+  }
+
+  /** Standalone servers may wait for an explicit browser device selection. */
+  startPreviewServer(input: {
+    network: "loopback" | "lan" | "tailscale";
+    host?: string | undefined;
+    port?: number | undefined;
+  }): { url: string; host: string; port: number; notice: string } {
+    this.#assertOpen();
+    if (input.network !== "loopback")
+      return this.#startLanSharing({ ...input, network: input.network }, true);
+    this.startRelay(input.port ?? 0);
+    const url = this.browserUrl();
+    if (!url || !this.relay?.hostname || !this.relay.port)
+      throw new Error("The preview server did not start");
+    return {
+      url,
+      host: this.relay.hostname,
+      port: this.relay.port,
+      notice: "Anyone with this local link can control the selected device. Keep the link private.",
+    };
+  }
+
+  #startLanSharing(input: LanSharingInput, allowIdle = false): LanSharingStarted {
+    if ((!allowIdle && !this.device) || this.#closePromise)
+      throw new Error("Connect a healthy device before sharing.");
+    const options = lanSharingInputSchema.parse(input);
+    if (this.#lanRelay) {
+      if (
+        (options.network ?? "lan") !== (this.#lanOptions?.network ?? "lan") ||
+        options.host !== this.#lanOptions?.host ||
+        (options.port ?? 0) !== (this.#lanOptions?.port ?? 0)
+      ) {
+        throw new Error("Stop LAN sharing before changing its network, host, or port.");
+      }
+    } else {
+      const host =
+        options.network === "tailscale"
+          ? resolveTailscaleAddress(options.host)
+          : resolveLanAddress(options.host);
+      const access = { token: randomBytes(32).toString("hex"), lan: true, active: true };
+      try {
+        this.#lanRelay = this.#createRelay(host, options.port ?? 0, access);
+      } catch {
+        throw new Error(
+          `Unable to listen on ${host}:${options.port ?? 0}. Check the address or choose another sharing port.`,
+        );
+      }
+      this.#lanAccess = access;
+      this.#lanOptions = options;
+    }
+    const status = this.lanSharingStatus();
+    if (!status.active || !this.#lanAccess) throw new Error("LAN sharing did not start.");
+    return {
+      ...status,
+      url: `http://${status.host}:${status.port}/#token=${this.#lanAccess.token}`,
+      notice: options.network === "tailscale" ? TAILSCALE_SHARING_NOTICE : LAN_SHARING_NOTICE,
+    };
+  }
+
+  lanSharingStatus(): LanSharingStatus {
+    const host = this.#lanRelay?.hostname;
+    const port = this.#lanRelay?.port;
+    if (!host || !port) return { active: false };
+    return {
+      active: true,
+      ...(this.#lanOptions?.network ? { network: this.#lanOptions.network } : {}),
+      host,
+      port,
+      transport: "http",
+      codec: "mjpeg",
+      access: "interactive",
+    };
+  }
+
+  async stopLanSharing(): Promise<LanSharingStatus> {
+    const access = this.#lanAccess;
+    if (!access) return { active: false };
+    access.active = false;
+    for (const viewer of this.viewers) {
+      if (viewer.data.access === access) {
+        this.viewers.delete(viewer);
+        viewer.close(1001, "LAN sharing stopped");
+      }
+    }
+    this.#lanRelay?.stop(true);
+    this.#lanRelay = undefined;
+    this.#lanAccess = undefined;
+    this.#lanOptions = undefined;
+    if (!this.#hasMjpegViewers()) await this.#releaseMjpegClient();
+    if (this.client?.connected && !this.#closePromise)
+      await this.#reconcilePreviewDemand().catch(() => {});
+    return { active: false };
+  }
+
+  #createRelay(hostname: string, port: number, access: RelayAccess) {
     const session = this;
-    this.relay = Bun.serve<ViewerData>({
-      hostname: "127.0.0.1",
+    return Bun.serve<ViewerData>({
+      hostname,
       port,
       async fetch(request, server) {
         const url = new URL(request.url);
+        const listenerUrl = new URL(`http://${hostname}:${server.port}`);
+        const authority = listenerUrl.host;
+        const origin = listenerUrl.origin;
+        if (!access.active) return new Response("Sharing stopped", { status: 410 });
+        if (
+          request.headers.get("host") !== authority ||
+          (request.headers.has("origin") && request.headers.get("origin") !== origin)
+        ) {
+          return new Response("Forbidden origin", { status: 403 });
+        }
         const bearer = request.headers.get("authorization")?.match(/^Bearer (.+)$/)?.[1];
         if (url.pathname === "/") {
           return new Response(await browserHtml(session.appRoot), {
@@ -2103,7 +2232,7 @@ export class SimViewSession {
               "content-type": "text/html; charset=utf-8",
               "cache-control": "no-store",
               "content-security-policy":
-                `default-src 'self'; connect-src 'self' ws://${server.hostname}:${server.port}; ` +
+                `default-src 'self'; connect-src 'self' ws://${hostname}:${server.port}; ` +
                 "img-src 'self' blob: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
             },
           });
@@ -2112,10 +2241,12 @@ export class SimViewSession {
           return previewScriptResponse(undefined, session.appRoot);
         }
         if (url.pathname === "/stream") {
-          const codec: StreamCodec = url.searchParams.get("codec") === "mjpeg" ? "mjpeg" : "h264";
+          const codec: StreamCodec =
+            access.lan || url.searchParams.get("codec") === "mjpeg" ? "mjpeg" : "h264";
           const upgraded = server.upgrade(request, {
             data: {
               codec,
+              access,
               authenticated: false,
               paused: false,
               waitingForKeyframe: false,
@@ -2123,14 +2254,22 @@ export class SimViewSession {
           });
           return upgraded ? undefined : new Response("WebSocket upgrade required", { status: 426 });
         }
-        if (!bearer || !secureTokenEquals(bearer, session.relayToken)) {
+        if (!bearer || !secureTokenEquals(bearer, access.token)) {
           return new Response("Unauthorized", { status: 401 });
         }
+        const readBody = async () => {
+          const body: unknown = await request.json();
+          if (!access.active) throw new Error("LAN sharing stopped while reading the request");
+          return body;
+        };
         try {
           if (url.pathname === "/state") {
-            return Response.json(await session.refreshDevice(), {
-              headers: { "cache-control": "no-store" },
-            });
+            return Response.json(
+              { ...(await session.refreshDevice()), ...(access.lan ? { codec: "mjpeg" } : {}) },
+              {
+                headers: { "cache-control": "no-store" },
+              },
+            );
           }
           if (url.pathname === "/devices") {
             return Response.json({ devices: await session.devices() });
@@ -2144,19 +2283,19 @@ export class SimViewSession {
               .refine((value) => Boolean(value.deviceId || value.udid), {
                 message: "deviceId or udid is required",
               })
-              .parse(await request.json());
+              .parse(await readBody());
             const selectedId = deviceId ?? udid;
             if (!selectedId) throw new Error("deviceId or udid is required");
             return Response.json(await session.selectDevice(selectedId));
           }
           if (url.pathname === "/input" && request.method === "POST") {
             const receipt = await session.dispatchInputReceipt(
-              relayInputSchema.parse(await request.json()),
+              relayInputSchema.parse(await readBody()),
             );
             return Response.json(receipt, { status: receipt.accepted ? 200 : 409 });
           }
           if (url.pathname === "/annotation" && request.method === "POST") {
-            const body = annotationMutationSchema.parse(await request.json());
+            const body = annotationMutationSchema.parse(await readBody());
             if (body.action === "delete") {
               return Response.json({ deleted: session.deleteAnnotation(body.id), id: body.id });
             }
@@ -2179,9 +2318,7 @@ export class SimViewSession {
           }
           if (url.pathname === "/review-images" && request.method === "POST") {
             return Response.json(
-              await session.saveReviewImages(
-                saveReviewImagesInputSchema.parse(await request.json()),
-              ),
+              await session.saveReviewImages(saveReviewImagesInputSchema.parse(await readBody())),
             );
           }
           if (url.pathname === "/accessibility") {
@@ -2229,7 +2366,7 @@ export class SimViewSession {
           if (url.pathname === "/probe/enable" && request.method === "POST") {
             const { bundleId } = z
               .object({ bundleId: z.string().trim().min(3) })
-              .parse(await request.json());
+              .parse(await readBody());
             if (bundleId.startsWith("com.apple.")) {
               return new Response("Apple platform apps cannot load the UIKit probe", {
                 status: 400,
@@ -2266,7 +2403,8 @@ export class SimViewSession {
           const authentication = relayAuthenticationSchema.safeParse(body);
           if (
             !authentication.success ||
-            !secureTokenEquals(authentication.data.token, session.relayToken)
+            !access.active ||
+            !secureTokenEquals(authentication.data.token, access.token)
           ) {
             socket.close(1008, "Authentication failed");
             return;
@@ -2274,6 +2412,8 @@ export class SimViewSession {
           socket.data.authenticated = true;
           clearTimeout(socket.data.authenticationTimer);
           session.viewers.add(socket);
+          socket.data.waitingForKeyframe = socket.data.codec === "h264";
+          if (!session.client?.connected) return;
           void session.#reconcilePreviewDemand().catch(() => {
             socket.close(1011, "Unable to enable preview capture");
           });
@@ -2462,6 +2602,7 @@ export class SimViewSession {
   }
 
   async #close(): Promise<void> {
+    await this.stopLanSharing();
     this.#connectionGeneration += 1;
     this.#resetPreviewDemand();
     await this.#cancelScreenshot();
@@ -2645,6 +2786,9 @@ export class SimViewSession {
         this.#clearSemanticState();
         this.#metroInspector.close();
         this.#resetPreviewPackets();
+        for (const viewer of this.viewers)
+          viewer.close(1001, "Device disconnected; select an available device to reconnect");
+        this.viewers.clear();
         void this.#releaseMjpegClient();
       }),
     );
@@ -2695,6 +2839,21 @@ export class SimViewSession {
         }),
       );
     }
+  }
+
+  #resumeMjpegViewers(): void {
+    if (!this.#hasMjpegViewers()) return;
+    const generation = this.#connectionGeneration;
+    const mjpegGeneration = this.#mjpegGeneration;
+    void this.#ensureMjpegClient().catch(() => {
+      if (generation !== this.#connectionGeneration || mjpegGeneration !== this.#mjpegGeneration)
+        return;
+      for (const viewer of this.viewers) {
+        if (viewer.data.codec === "mjpeg") {
+          viewer.close(1011, "Unable to resume MJPEG preview");
+        }
+      }
+    });
   }
 
   #ensureMjpegClient(): Promise<SimViewClient> {

@@ -41,3 +41,44 @@ export const annotationMutationSchema = z.discriminatedUnion("action", [
     }),
   z.object({ action: z.literal("delete"), id: z.string().uuid() }),
 ]);
+
+export const LAN_SHARING_NOTICE =
+  "Anyone with this link can control the device. HTTP traffic is unencrypted; share only on a trusted LAN.";
+
+export const TAILSCALE_SHARING_NOTICE =
+  "Anyone with this link and tailnet access can control the device. Tailscale encrypts the connection; keep the link private.";
+
+export const lanSharingInputSchema = z.object({
+  network: z.enum(["lan", "tailscale"]).optional(),
+  host: z.ipv4().optional(),
+  port: z.number().int().min(0).max(65535).optional(),
+});
+
+export const lanSharingStatusSchema = z.discriminatedUnion("active", [
+  z.object({ active: z.literal(false) }),
+  z.object({
+    active: z.literal(true),
+    network: z.enum(["lan", "tailscale"]).optional(),
+    host: z.ipv4(),
+    port: z.number().int().min(1).max(65535),
+    transport: z.literal("http"),
+    codec: z.literal("mjpeg"),
+    access: z.literal("interactive"),
+  }),
+]);
+
+export const lanSharingStartedSchema = z.object({
+  active: z.literal(true),
+  network: z.enum(["lan", "tailscale"]).optional(),
+  host: z.ipv4(),
+  port: z.number().int().min(1).max(65535),
+  transport: z.literal("http"),
+  codec: z.literal("mjpeg"),
+  access: z.literal("interactive"),
+  url: z.url(),
+  notice: z.string(),
+});
+
+export type LanSharingInput = z.infer<typeof lanSharingInputSchema>;
+export type LanSharingStatus = z.infer<typeof lanSharingStatusSchema>;
+export type LanSharingStarted = z.infer<typeof lanSharingStartedSchema>;

@@ -95,7 +95,19 @@ type PointerInput = {
 type StartupPhase = "connecting" | "waiting-for-frame" | "ready" | "error" | "disconnected";
 type StartupCopy = { title: string; message: string };
 
-function startupCopy(phase: StartupPhase, error: string, deviceName?: string): StartupCopy {
+function startupCopy(
+  phase: StartupPhase,
+  error: string,
+  deviceName?: string,
+  embedded = true,
+  connected = false,
+): StartupCopy {
+  if (!embedded && !connected && !error)
+    return {
+      title: "Choose a device",
+      message:
+        "Open the device menu and select an available device. If your device is shut down, start it on the host, then refresh the menu.",
+    };
   switch (phase) {
     case "disconnected":
       return {
@@ -424,7 +436,15 @@ function SimView() {
         videoPaintRequestRef.current = undefined;
       }
     };
-  }, [embedded, state.relayOrigin, token, streamCodec, previewPaused]);
+  }, [
+    embedded,
+    state.relayOrigin,
+    token,
+    streamCodec,
+    previewPaused,
+    state.device?.id,
+    state.connected,
+  ]);
 
   useEffect(() => {
     if (!embedded || !state.connected || previewPaused) return;
@@ -498,7 +518,7 @@ function SimView() {
   async function loadBrowserState() {
     const hashToken = new URLSearchParams(location.hash.slice(1)).get("token") ?? "";
     if (!hashToken) {
-      setStartupError("The local preview link is incomplete.");
+      setStartupError("The preview link is incomplete.");
       setStartupPhase("error");
       return;
     }
@@ -506,9 +526,11 @@ function SimView() {
       const response = await fetch("/state", {
         headers: { authorization: `Bearer ${hashToken}` },
       });
-      if (!response.ok) throw new Error(`The local relay returned ${response.status}`);
+      if (!response.ok) throw new Error(`The preview relay returned ${response.status}`);
+      const browserState = sessionStateSchema.parse(await response.json());
+      if (browserState.codec === "mjpeg") setStreamCodec("mjpeg");
       setState({
-        ...sessionStateSchema.parse(await response.json()),
+        ...browserState,
         relayOrigin: location.origin,
       });
       setStartupPhase("waiting-for-frame");
@@ -519,7 +541,7 @@ function SimView() {
   }
 
   async function relayFetch(path: string, init: RequestInit = {}): Promise<Response> {
-    if (!token) throw new Error("The local relay token is unavailable");
+    if (!token) throw new Error("The preview relay token is unavailable");
     const headers = new Headers(init.headers);
     headers.set("authorization", `Bearer ${token}`);
     return fetch(path, { ...init, headers });
@@ -610,7 +632,7 @@ function SimView() {
 
   async function selectDevice(device: Device) {
     if (!device.available) return;
-    if (device.id === state.device?.id) {
+    if (state.connected && device.id === state.device?.id) {
       setDeviceMenuOpen(false);
       return;
     }
@@ -655,7 +677,10 @@ function SimView() {
       accessibilityInitialized.current = false;
       setUiContext(undefined);
       sentAnnotationIds.current.clear();
-      setState(nextState);
+      setState((current) => ({
+        ...nextState,
+        ...(current.relayOrigin ? { relayOrigin: current.relayOrigin } : {}),
+      }));
       setStartupPhase("waiting-for-frame");
       setDeviceMenuOpen(false);
 
@@ -1301,7 +1326,7 @@ function SimView() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify(reviewImageInput(review)),
       });
-      if (!response.ok) throw new Error(`The local relay returned ${response.status}`);
+      if (!response.ok) throw new Error(`The preview relay returned ${response.status}`);
       const savedImages = saveReviewImagesOutputSchema.parse(await response.json());
       const text = createReviewMessageContent(savedImages, review)
         .map((block) => block.text)
@@ -1818,7 +1843,13 @@ function SimView() {
   else if (selectedPlatform === "android") sceneProviderLabel = "UIAutomator";
   else if (state.iosAccessibility?.status === "enhanced-ready") sceneProviderLabel = "XCTest";
   else sceneProviderLabel = uiContext?.status.connected ? "UIKit + AX" : "Simulator AX";
-  const startup = startupCopy(startupPhase, startupError, state.device?.name);
+  const startup = startupCopy(
+    startupPhase,
+    startupError,
+    state.device?.name,
+    embedded,
+    state.connected,
+  );
 
   return (
     <main
@@ -2096,9 +2127,11 @@ function SimView() {
             )}
             {startupPhase !== "ready" && (
               <div class={`empty startup ${startupPhase === "error" ? "startup-error" : ""}`}>
-                {startupPhase !== "error" && startupPhase !== "disconnected" && (
-                  <span class="startup-spinner" aria-hidden="true" />
-                )}
+                {(embedded || state.connected) &&
+                  startupPhase !== "error" &&
+                  startupPhase !== "disconnected" && (
+                    <span class="startup-spinner" aria-hidden="true" />
+                  )}
                 <strong>{startup.title}</strong>
                 <span>{startup.message}</span>
               </div>
